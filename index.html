@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Choir Practice Tool</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">Choir Practice Tool</h1>
+    <span id="score-title" class="score-title"></span>
+  </header>
+
+  <main class="app-layout">
+    <!-- Sidebar for part controls -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <h2>Parts</h2>
+      </div>
+      <div id="parts-list" class="parts-list">
+        <p class="no-parts-message">Upload a MusicXML file to see parts</p>
+      </div>
+    </aside>
+
+    <!-- Main content area -->
+    <section class="main-content">
+      <!-- File upload zone -->
+      <div id="upload-prompt" class="upload-prompt">
+        <div id="file-upload-zone" class="file-upload-zone">
+          <div class="upload-icon">&#9835;</div>
+          <h3>Upload MusicXML File</h3>
+          <p>Drag and drop a .xml or .musicxml file here</p>
+          <p class="upload-hint">or click to browse</p>
+          <input type="file" id="file-input" accept=".xml,.musicxml,.mxl" hidden>
+        </div>
+      </div>
+
+      <!-- Notation display area with canvas -->
+      <div id="notation-area" class="notation-area" style="display: none;">
+        <canvas id="notation-canvas" class="notation-canvas"></canvas>
+      </div>
+
+      <!-- Pitch indicator -->
+      <div id="pitch-indicator" class="pitch-indicator" style="display: none;">
+        <div class="pitch-note" id="pitch-note">--</div>
+        <div class="pitch-cents" id="pitch-cents">0 cents</div>
+        <div class="pitch-accuracy" id="pitch-accuracy"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom transport toolbar -->
+  <footer class="transport-toolbar">
+    <div class="transport-controls">
+      <button id="play-btn" class="transport-btn" title="Play/Pause (Space)">Play</button>
+      <button id="stop-btn" class="transport-btn" title="Stop">Stop</button>
+      <button id="metronome-btn" class="transport-btn" title="Toggle Metronome (M)">Metronome</button>
+    </div>
+    <div class="tempo-control">
+      <label for="tempo-slider">Tempo:</label>
+      <input type="range" id="tempo-slider" min="40" max="240" value="120" class="tempo-slider">
+      <span id="tempo-value" class="tempo-value">120</span>
+      <span class="tempo-unit">BPM</span>
+      <button id="tap-tempo-btn" class="transport-btn tap-btn" title="Tap Tempo">Tap</button>
+    </div>
+    <div class="beat-indicator-container">
+      <div id="beat-indicator" class="beat-indicator"></div>
+    </div>
+    <div class="mic-control">
+      <button id="mic-btn" class="transport-btn" title="Enable Microphone">Mic Off</button>
+    </div>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
