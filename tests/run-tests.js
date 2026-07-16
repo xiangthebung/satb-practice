@@ -12,6 +12,8 @@ import {
   midiToNoteName,
   calculateDuration,
   getPartColor,
+  pitchToMidi,
+  pitchToFrequency,
   NOTE_NAMES,
   A4_FREQUENCY,
   A4_MIDI,
@@ -39,6 +41,14 @@ import {
   getNoteStaffPosition,
   getClefForPart
 } from '../js/notation-renderer.js';
+
+import {
+  layoutMeasure
+} from '../js/musicxml-parser.js';
+
+import {
+  AudioEngine
+} from '../js/audio-engine.js';
 
 let passed = 0;
 let failed = 0;
@@ -94,6 +104,45 @@ test('G#5 should be MIDI 80', () => {
 
 test('Bb2 should be MIDI 46', () => {
   assert.equal(noteToMidi('Bb', 2), 46);
+});
+
+console.log('');
+
+// --- Pitch (step/alter/octave) to MIDI tests ---
+// These cover accidentals the string-based noteToMidi can't resolve and which
+// previously threw inside the audio engine, silently killing playback.
+console.log('Pitch to MIDI (step + alter + octave):');
+
+test('C4 natural should be MIDI 60', () => {
+  assert.equal(pitchToMidi('C', 0, 4), 60);
+});
+
+test('E#4 should be MIDI 65 (enharmonic F4)', () => {
+  assert.equal(pitchToMidi('E', 1, 4), 65);
+});
+
+test('B#3 should be MIDI 60 (enharmonic C4)', () => {
+  assert.equal(pitchToMidi('B', 1, 3), 60);
+});
+
+test('Cb4 should be MIDI 59 (enharmonic B3)', () => {
+  assert.equal(pitchToMidi('C', -1, 4), 59);
+});
+
+test('double-sharp F##4 should be MIDI 67 (enharmonic G4)', () => {
+  assert.equal(pitchToMidi('F', 2, 4), 67);
+});
+
+test('double-flat Bbb4 should be MIDI 69 (enharmonic A4)', () => {
+  assert.equal(pitchToMidi('B', -2, 4), 69);
+});
+
+test('pitchToFrequency A4 (alter 0) should be 440 Hz', () => {
+  assert.equal(pitchToFrequency('A', 0, 4), 440);
+});
+
+test('pitchToFrequency E#4 should equal F4 frequency', () => {
+  assert(approxEqual(pitchToFrequency('E', 1, 4), noteToFrequency('F', 4), 0.001));
 });
 
 console.log('');
@@ -554,6 +603,213 @@ test('baritone should use bass clef', () => {
 
 test('Bass 2 should use bass clef', () => {
   assert.equal(getClefForPart('Bass 2'), 'bass');
+});
+
+console.log('');
+
+// ============================================
+// NEW TESTS: Measure layout timing (all note types)
+// ============================================
+console.log('Measure Layout - Duration as source of truth:');
+
+test('four quarter notes fill a 4/4 measure (4 beats)', () => {
+  // divisions = 1 quarter note per division unit => each quarter has duration 1
+  const events = [
+    { kind: 'note', duration: 1, type: 'quarter' },
+    { kind: 'note', duration: 1, type: 'quarter' },
+    { kind: 'note', duration: 1, type: 'quarter' },
+    { kind: 'note', duration: 1, type: 'quarter' }
+  ];
+  const { notes, beats } = layoutMeasure(events, 1);
+  assert.equal(beats, 4);
+  assert.deepEqual(notes.map(n => n.startBeatInMeasure), [0, 1, 2, 3]);
+  assert.deepEqual(notes.map(n => n.durationBeats), [1, 1, 1, 1]);
+});
+
+test('eighth-note triplet sounds 1/3 beat each (type is ignored for timing)', () => {
+  // divisions=6 => quarter=6. A triplet eighth has duration 2 (6/3), type "eighth".
+  const events = [
+    { kind: 'note', duration: 2, type: 'eighth' },
+    { kind: 'note', duration: 2, type: 'eighth' },
+    { kind: 'note', duration: 2, type: 'eighth' }
+  ];
+  const { notes, beats } = layoutMeasure(events, 6);
+  assert(Math.abs(beats - 1) < 1e-9, `triplet should total 1 beat, got ${beats}`);
+  assert(Math.abs(notes[0].durationBeats - 1 / 3) < 1e-9);
+  assert(Math.abs(notes[1].startBeatInMeasure - 1 / 3) < 1e-9);
+  assert(Math.abs(notes[2].startBeatInMeasure - 2 / 3) < 1e-9);
+});
+
+test('dotted half + quarter fill 4 beats', () => {
+  const events = [
+    { kind: 'note', duration: 3, type: 'half', dots: 1 },
+    { kind: 'note', duration: 1, type: 'quarter' }
+  ];
+  const { notes, beats } = layoutMeasure(events, 1);
+  assert.equal(beats, 4);
+  assert.equal(notes[0].durationBeats, 3);
+  assert.equal(notes[1].startBeatInMeasure, 3);
+});
+
+test('chord notes share the same onset and do not advance time', () => {
+  // C-E-G chord (quarter) then a quarter note.
+  const events = [
+    { kind: 'note', duration: 1, type: 'quarter', pitch: { step: 'C', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', isChord: true, pitch: { step: 'E', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', isChord: true, pitch: { step: 'G', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', pitch: { step: 'D', alter: 0, octave: 4 } }
+  ];
+  const { notes, beats } = layoutMeasure(events, 1);
+  assert.equal(beats, 2, 'chord occupies one beat, plus one more = 2');
+  assert.deepEqual(notes.map(n => n.startBeatInMeasure), [0, 0, 0, 1]);
+});
+
+test('grace note takes no time', () => {
+  const events = [
+    { kind: 'note', duration: 0, type: 'eighth', isGrace: true, pitch: { step: 'B', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', pitch: { step: 'C', alter: 0, octave: 5 } }
+  ];
+  const { notes, beats } = layoutMeasure(events, 1);
+  assert.equal(beats, 1);
+  assert.equal(notes[0].durationBeats, 0);
+  assert.equal(notes[0].startBeatInMeasure, 0);
+  assert.equal(notes[1].startBeatInMeasure, 0);
+});
+
+test('backup rewinds the cursor so a second voice aligns to measure start', () => {
+  // Voice 1: whole note (4 beats). Backup 4. Voice 2: 4 quarter notes.
+  const events = [
+    { kind: 'note', duration: 4, type: 'whole', voice: 1, pitch: { step: 'C', alter: 0, octave: 5 } },
+    { kind: 'backup', duration: 4 },
+    { kind: 'note', duration: 1, type: 'quarter', voice: 2, pitch: { step: 'C', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', voice: 2, pitch: { step: 'D', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', voice: 2, pitch: { step: 'E', alter: 0, octave: 4 } },
+    { kind: 'note', duration: 1, type: 'quarter', voice: 2, pitch: { step: 'F', alter: 0, octave: 4 } }
+  ];
+  const { notes, beats } = layoutMeasure(events, 1);
+  assert.equal(beats, 4);
+  assert.equal(notes[0].startBeatInMeasure, 0); // voice 1 whole note
+  // notes[1..4] are voice 2's four quarter notes, realigned to the measure start
+  assert.deepEqual(notes.slice(1).map(n => n.startBeatInMeasure), [0, 1, 2, 3]);
+});
+
+test('forward inserts a gap (implicit rest)', () => {
+  const events = [
+    { kind: 'forward', duration: 2 },
+    { kind: 'note', duration: 2, type: 'half', pitch: { step: 'G', alter: 0, octave: 4 } }
+  ];
+  const { notes, beats } = layoutMeasure(events, 1);
+  assert.equal(notes[0].startBeatInMeasure, 2);
+  assert.equal(beats, 4);
+});
+
+console.log('');
+
+// ============================================
+// NEW TESTS: Schedule building (absolute position, chords, ties)
+// ============================================
+console.log('Audio Engine - Schedule from absolute positions:');
+
+function makeMeasure(startBeat, beats, notes) {
+  return { startBeat, beats, notes };
+}
+
+test('schedule places notes at measure.startBeat + startBeatInMeasure', () => {
+  const engine = new AudioEngine();
+  engine.parts = [{
+    id: 'P1',
+    measures: [
+      makeMeasure(0, 4, [
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 4 }, durationBeats: 1, startBeatInMeasure: 0 },
+        { isRest: false, pitch: { step: 'D', alter: 0, octave: 4 }, durationBeats: 1, startBeatInMeasure: 1 }
+      ]),
+      makeMeasure(4, 4, [
+        { isRest: false, pitch: { step: 'E', alter: 0, octave: 4 }, durationBeats: 1, startBeatInMeasure: 0 }
+      ])
+    ]
+  }];
+  const schedule = engine.buildSchedule();
+  assert.equal(schedule.length, 3);
+  assert.deepEqual(schedule.map(e => e.startBeat).sort((a, b) => a - b), [0, 1, 4]);
+});
+
+test('chord notes are all scheduled at the same onset', () => {
+  const engine = new AudioEngine();
+  engine.parts = [{
+    id: 'P1',
+    measures: [
+      makeMeasure(0, 4, [
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0 },
+        { isRest: false, isChord: true, pitch: { step: 'E', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0 },
+        { isRest: false, isChord: true, pitch: { step: 'G', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0 }
+      ])
+    ]
+  }];
+  const schedule = engine.buildSchedule();
+  assert.equal(schedule.length, 3, 'all three chord tones should sound');
+  assert(schedule.every(e => e.startBeat === 0));
+});
+
+test('rests and zero-duration grace notes are not scheduled', () => {
+  const engine = new AudioEngine();
+  engine.parts = [{
+    id: 'P1',
+    measures: [
+      makeMeasure(0, 4, [
+        { isRest: true, durationBeats: 1, startBeatInMeasure: 0 },
+        { isRest: false, isGrace: true, pitch: { step: 'B', alter: 0, octave: 4 }, durationBeats: 0, startBeatInMeasure: 1 },
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 5 }, durationBeats: 1, startBeatInMeasure: 1 }
+      ])
+    ]
+  }];
+  const schedule = engine.buildSchedule();
+  assert.equal(schedule.length, 1);
+  assert.equal(schedule[0].startBeat, 1);
+});
+
+test('tied notes merge into one sustained note', () => {
+  const engine = new AudioEngine();
+  engine.parts = [{
+    id: 'P1',
+    measures: [
+      makeMeasure(0, 4, [
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0, tie: { start: true, stop: false } }
+      ]),
+      makeMeasure(4, 4, [
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0, tie: { start: false, stop: true } }
+      ])
+    ]
+  }];
+  const schedule = engine.buildSchedule();
+  assert.equal(schedule.length, 1, 'tied pair becomes a single event');
+  assert.equal(schedule[0].startBeat, 0);
+  assert.equal(schedule[0].durationBeats, 8);
+});
+
+test('a tie between different pitches is not merged', () => {
+  const engine = new AudioEngine();
+  engine.parts = [{
+    id: 'P1',
+    measures: [
+      makeMeasure(0, 4, [
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0, tie: { start: true, stop: false } }
+      ]),
+      makeMeasure(4, 4, [
+        { isRest: false, pitch: { step: 'D', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0, tie: { start: false, stop: true } }
+      ])
+    ]
+  }];
+  const schedule = engine.buildSchedule();
+  assert.equal(schedule.length, 2);
+});
+
+test('getTotalBeats uses absolute measure positions', () => {
+  const engine = new AudioEngine();
+  engine.parts = [{
+    id: 'P1',
+    measures: [makeMeasure(0, 4, []), makeMeasure(4, 3, [])]
+  }];
+  assert.equal(engine.getTotalBeats(), 7);
 });
 
 console.log('');

@@ -105,7 +105,8 @@ body {
   padding: 0.75rem;
   margin-bottom: 0.5rem;
   border: 1px solid var(--border-color);
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  cursor: pointer;
 }
 
 .part-control:hover {
@@ -157,13 +158,37 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-bottom: 0.3rem;
 }
 
-.part-volume label {
-  font-size: 0.75rem;
+/* Mute button */
+.mute-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
   color: var(--text-secondary);
-  min-width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s, color 0.2s;
+}
+
+.mute-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+.mute-btn.active {
+  color: var(--error);
+  background: rgba(244, 67, 54, 0.1);
+}
+
+.mute-icon {
+  width: 16px;
+  height: 16px;
 }
 
 .volume-slider {
@@ -202,23 +227,7 @@ body {
   text-align: right;
 }
 
-.part-toggle {
-  display: flex;
-  align-items: center;
-}
 
-.toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.part-checkbox {
-  accent-color: var(--accent-primary);
-}
 
 /* Main Content */
 .main-content {
@@ -369,175 +378,342 @@ body {
   background: var(--error);
 }
 
-/* Part Actions (Mute/Solo) */
-.part-actions {
-  display: flex;
-  gap: 0.3rem;
-  margin-bottom: 0.3rem;
+/* Part selection */
+.part-control.selected-section {
+  border-color: var(--accent-secondary);
+  box-shadow: 0 0 0 1px rgba(123, 47, 247, 0.35);
 }
 
-.mute-btn,
-.solo-btn {
-  padding: 2px 8px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  border: 1px solid var(--border-color);
+.my-section-badge {
+  font-size: 0.65rem;
+  background: var(--accent-secondary);
+  color: #fff;
+  padding: 2px 6px;
   border-radius: 4px;
-  background: var(--bg-tertiary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.part-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.2s;
 }
 
-.mute-btn:hover {
-  border-color: var(--error);
-  color: var(--error);
+.section-radio {
+  accent-color: var(--accent-secondary);
 }
 
-.solo-btn:hover {
-  border-color: var(--warning);
-  color: var(--warning);
+.part-control.selected-section .section-label {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
-.mute-btn.active {
-  background: var(--error);
-  border-color: var(--error);
-  color: #fff;
-}
-
-.solo-btn.active {
-  background: var(--warning);
-  border-color: var(--warning);
-  color: #fff;
-}
-
-/* Beat Indicator */
-.beat-indicator-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.beat-indicator {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--bg-tertiary);
-  border: 2px solid var(--border-color);
-  transition: background 0.05s, transform 0.05s;
-}
-
-.beat-indicator.flash {
-  background: var(--accent-primary);
-  border-color: var(--accent-primary);
-  transform: scale(1.3);
-}
-
-.beat-indicator.downbeat {
-  background: var(--success);
-  border-color: var(--success);
-  transform: scale(1.5);
-}
-
-/* Tap Tempo Button */
-.tap-btn {
-  padding: 0.4rem 0.7rem;
-  font-size: 0.75rem;
-}
-
-/* Transport Toolbar */
-.transport-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  padding: 0.75rem 1.5rem;
-  background: var(--bg-secondary);
+/* Presets Section */
+.presets-section {
   border-top: 1px solid var(--border-color);
-  z-index: 10;
+  padding: 0.75rem;
+  flex-shrink: 0;
 }
 
-.transport-controls {
+.presets-header h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.presets-list {
   display: flex;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.4rem;
 }
 
-.transport-btn {
-  padding: 0.5rem 1rem;
+.preset-btn {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   cursor: pointer;
   transition: all 0.2s;
+  text-align: left;
 }
 
-.transport-btn:hover {
+.preset-btn:hover {
   border-color: var(--accent-primary);
-  background: rgba(74, 158, 255, 0.1);
+  background: rgba(74, 158, 255, 0.08);
 }
 
-.transport-btn.active {
+.preset-btn.active {
   background: var(--accent-primary);
   border-color: var(--accent-primary);
   color: #fff;
+  font-weight: 500;
+}
+
+.preset-others-slider {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+.preset-others-slider label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  min-width: 45px;
+}
+
+/* Transport Toolbar — Apple-inspired minimal design */
+.transport-toolbar {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  z-index: 10;
+  padding: 0;
+}
+
+/* Full-width seek/progress bar */
+.transport-progress {
+  width: 100%;
+  padding: 0;
+  line-height: 0;
+}
+
+.seek-slider {
+  width: 100%;
+  height: 3px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--bg-tertiary);
+  border-radius: 0;
+  outline: none;
+  cursor: pointer;
+  margin: 0;
+  display: block;
+  transition: height 0.15s ease;
+}
+
+.seek-slider:hover {
+  height: 5px;
+}
+
+.seek-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.seek-slider:hover::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+}
+
+.seek-slider::-moz-range-thumb {
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  border: none;
+  cursor: pointer;
+}
+
+.seek-slider:hover::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+}
+
+/* Main controls row */
+.transport-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1.5rem;
+}
+
+/* Left section: time + tempo */
+.transport-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.seek-time {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 70px;
+  letter-spacing: -0.01em;
 }
 
 .tempo-control {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  flex: 1;
 }
 
-.tempo-control label {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-}
-
-.tempo-slider {
-  width: 150px;
-  height: 4px;
-  -webkit-appearance: none;
-  appearance: none;
+.tempo-scrubber {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 6px;
   background: var(--bg-tertiary);
-  border-radius: 2px;
-  outline: none;
-  cursor: pointer;
+  cursor: ew-resize;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background 0.15s, box-shadow 0.15s;
+  border: 1px solid transparent;
 }
 
-.tempo-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--accent-primary);
-  cursor: pointer;
+.tempo-scrubber:hover {
+  background: var(--bg-secondary);
+  border-color: var(--accent-primary);
 }
 
-.tempo-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--accent-primary);
-  cursor: pointer;
-  border: none;
+.tempo-scrubber.dragging {
+  background: var(--bg-secondary);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
 .tempo-value {
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: var(--accent-primary);
-  min-width: 30px;
+  font-weight: 500;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  min-width: 24px;
 }
 
 .tempo-unit {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--text-muted);
 }
 
-.mic-control {
-  margin-left: auto;
+/* Center: hero play/pause button */
+.transport-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.play-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent-primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 2px 8px rgba(74, 158, 255, 0.3);
+}
+
+.play-btn:hover {
+  transform: scale(1.08);
+  box-shadow: 0 4px 16px rgba(74, 158, 255, 0.4);
+}
+
+.play-btn:active {
+  transform: scale(0.95);
+}
+
+.play-btn .transport-icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Right: icon buttons */
+.transport-right {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.icon-btn {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+.icon-btn.active {
+  color: var(--accent-primary);
+  background: rgba(74, 158, 255, 0.1);
+}
+
+.icon-btn .transport-icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Beat dot on metronome button */
+.beat-dot {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background 0.05s, transform 0.05s;
+}
+
+.beat-dot.flash {
+  background: var(--accent-primary);
+  transform: scale(1.4);
+}
+
+.beat-dot.downbeat {
+  background: var(--success);
+  transform: scale(1.6);
+}
+
+/* SVG icon base */
+.transport-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
 }
 
 /* Error Message */
@@ -599,13 +775,26 @@ body {
     border-bottom: 1px solid var(--border-color);
   }
 
-  .transport-toolbar {
-    flex-wrap: wrap;
-    gap: 0.75rem;
+  .transport-row {
+    padding: 0.5rem 1rem;
   }
 
   .tempo-control {
-    order: 2;
-    width: 100%;
+    display: none;
+  }
+
+  .seek-time {
+    min-width: 50px;
+    font-size: 0.7rem;
+  }
+
+  .play-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .icon-btn {
+    width: 32px;
+    height: 32px;
   }
 }

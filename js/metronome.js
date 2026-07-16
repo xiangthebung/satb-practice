@@ -54,6 +54,9 @@ export class Metronome {
     this.isRunning = false;
     this.currentBeat = 0;
     this.lastBeatTime = 0;
+    this.startTime = 0;
+    this.nextScoreBeat = 0;
+    this.scoreToPlaybackBeat = beat => beat;
     this.schedulerTimer = null;
     this.lookaheadTime = 0.1; // seconds
     this.scheduleIntervalMs = 25; // ms
@@ -81,28 +84,36 @@ export class Metronome {
 
   /**
    * Start the metronome.
-   * @param {object} [syncOptions] - optional sync parameters
-   * @param {number} [syncOptions.startTime] - AudioContext time reference for beat 0
-   * @param {number} [syncOptions.currentBeat] - current beat position to sync from
+   * @param {object} [syncOptions] - optional score-aware synchronization
+   * @param {number} [syncOptions.startTime] - AudioContext time reference for score beat 0
+   * @param {number} [syncOptions.currentScoreBeat] - current quarter-note score position
+   * @param {(beat: number) => number} [syncOptions.scoreToPlaybackBeat] - fermata timeline mapping
    */
   start(syncOptions) {
     if (this.isRunning) return;
     this.isRunning = true;
 
+    const denominator = Number(this.timeSignature.denominator) || 4;
+    const scoreBeatStep = 4 / denominator;
     if (syncOptions && typeof syncOptions.startTime === 'number') {
-      // Sync to an external time reference (e.g., the audio engine)
-      const beatIntervalSec = 60 / this.tempo;
-      const elapsed = this.audioContext.currentTime - syncOptions.startTime;
-      const currentBeat = syncOptions.currentBeat || (elapsed / beatIntervalSec);
-      // Calculate the beat number and align lastBeatTime
-      this.currentBeat = Math.floor(currentBeat);
-      // Set lastBeatTime so that the next beat aligns correctly
-      this.lastBeatTime = syncOptions.startTime + this.currentBeat * beatIntervalSec;
+      this.startTime = syncOptions.startTime;
+      this.scoreToPlaybackBeat = typeof syncOptions.scoreToPlaybackBeat === 'function'
+        ? syncOptions.scoreToPlaybackBeat
+        : beat => beat;
+      const currentScoreBeat = Number(
+        syncOptions.currentScoreBeat ?? syncOptions.currentBeat ?? 0
+      );
+      this.nextScoreBeat = Math.max(
+        0,
+        Math.ceil((currentScoreBeat - 1e-6) / scoreBeatStep) * scoreBeatStep
+      );
     } else {
-      this.currentBeat = 0;
-      this.lastBeatTime = this.audioContext.currentTime;
+      this.startTime = this.audioContext.currentTime;
+      this.scoreToPlaybackBeat = beat => beat;
+      this.nextScoreBeat = 0;
     }
 
+    this.currentBeat = Math.round(this.nextScoreBeat / scoreBeatStep);
     this.schedule();
   }
 
@@ -117,39 +128,47 @@ export class Metronome {
     }
   }
 
-  /**
-   * Internal scheduling loop using setInterval + lookahead.
-   * Re-reads tempo on each tick so tempo changes take effect immediately.
-   */
+  /** Schedule score-beat clicks, mapping around fermata holds when provided. */
   schedule() {
-    this.schedulerTimer = setInterval(() => {
+    const scheduleAhead = () => {
       if (!this.isRunning) return;
 
-      const beatIntervalSec = 60 / this.tempo;
+      const quarterDuration = 60 / this.tempo;
+      const denominator = Number(this.timeSignature.denominator) || 4;
+      const numerator = Number(this.timeSignature.numerator) || 4;
+      const scoreBeatStep = 4 / denominator;
       const currentTime = this.audioContext.currentTime;
       const scheduleUntil = currentTime + this.lookaheadTime;
 
-      while (this.lastBeatTime + beatIntervalSec <= scheduleUntil) {
-        const beatTime = this.lastBeatTime + beatIntervalSec;
-        const isDownbeat = (this.currentBeat % this.timeSignature.numerator) === 0;
+      while (this.isRunning) {
+        const playbackBeat = this.scoreToPlaybackBeat(this.nextScoreBeat);
+        const clickTime = this.startTime + playbackBeat * quarterDuration;
+        if (clickTime > scheduleUntil) break;
 
-        this.scheduleClick(beatTime, isDownbeat);
+        const clickIndex = Math.round(this.nextScoreBeat / scoreBeatStep);
+        if (clickTime >= currentTime - 0.01) {
+          const beatInMeasure = ((clickIndex % numerator) + numerator) % numerator;
+          const isDownbeat = beatInMeasure === 0;
+          this.scheduleClick(clickTime, isDownbeat);
 
-        if (this.onBeat) {
-          // Use setTimeout to fire the callback near the actual beat time
-          const delay = Math.max(0, (beatTime - currentTime) * 1000);
-          const beatNum = this.currentBeat;
-          setTimeout(() => {
-            if (this.isRunning && this.onBeat) {
-              this.onBeat(beatNum, isDownbeat);
-            }
-          }, delay);
+          if (this.onBeat) {
+            const delay = Math.max(0, (clickTime - currentTime) * 1000);
+            setTimeout(() => {
+              if (this.isRunning && this.onBeat) {
+                this.onBeat(beatInMeasure + 1, isDownbeat);
+              }
+            }, delay);
+          }
         }
 
-        this.lastBeatTime = beatTime;
-        this.currentBeat++;
+        this.lastBeatTime = clickTime;
+        this.currentBeat = clickIndex;
+        this.nextScoreBeat += scoreBeatStep;
       }
-    }, this.scheduleIntervalMs);
+    };
+
+    scheduleAhead();
+    this.schedulerTimer = setInterval(scheduleAhead, this.scheduleIntervalMs);
   }
 
   /**

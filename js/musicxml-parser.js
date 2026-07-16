@@ -4,8 +4,6 @@
  * Dynamically detects part types using string matching heuristics.
  */
 
-import { calculateDuration } from './utils.js';
-
 // MXL (compressed MusicXML) ZIP signature bytes
 const ZIP_SIGNATURE = [0x50, 0x4B, 0x03, 0x04];
 
@@ -91,13 +89,161 @@ function parsePitch(pitchEl) {
 }
 
 /**
- * Parse a single measure element.
+ * Make a plain-object copy of the currently active clefs, keyed by staff.
+ * MusicXML clefs remain active until another <clef> changes them.
+ * @param {Object<number, object>} clefs
+ * @returns {Object<number, object>}
+ */
+function cloneClefs(clefs = {}) {
+  const copy = {};
+  for (const [staff, clef] of Object.entries(clefs)) {
+    copy[staff] = { ...clef };
+  }
+  return copy;
+}
+
+/**
+ * Parse a MusicXML <clef> into the small descriptor used by the renderer.
+ * @param {Element} clefEl
+ * @returns {{ sign: string, line: number, octaveChange: number, staff: number }}
+ */
+function parseClef(clefEl) {
+  const sign = (clefEl.querySelector('sign')?.textContent || 'G').trim().toUpperCase();
+  const defaultLine = sign === 'F' ? 4 : sign === 'C' ? 3 : 2;
+  const staff = parseInt(clefEl.getAttribute('number') || '1', 10) || 1;
+  const line = parseInt(clefEl.querySelector('line')?.textContent || String(defaultLine), 10) || defaultLine;
+  const octaveChange = parseInt(clefEl.querySelector('clef-octave-change')?.textContent || '0', 10) || 0;
+  return { sign, line, octaveChange, staff };
+}
+
+/**
+ * Find the staff used most often by a parsed part or split voice.
+ * @param {Array} measures
+ * @returns {number}
+ */
+function findPrimaryStaff(measures) {
+  const counts = new Map();
+  for (const measure of measures) {
+    for (const note of measure.notes) {
+      const staff = note.staff || 1;
+      counts.set(staff, (counts.get(staff) || 0) + 1);
+    }
+  }
+
+  let primaryStaff = 1;
+  let highestCount = -1;
+  for (const [staff, count] of counts) {
+    if (count > highestCount) {
+      primaryStaff = staff;
+      highestCount = count;
+    }
+  }
+  return primaryStaff;
+}
+
+/**
+ * Find the first active clef for a staff in a part or split voice.
+ * @param {Array} measures
+ * @param {number} staff
+ * @returns {object|null}
+ */
+function findClefForStaff(measures, staff) {
+  for (const measure of measures) {
+    const noteWithClef = measure.notes.find(note => note.staff === staff && note.clef);
+    if (noteWithClef) return { ...noteWithClef.clef };
+    if (measure.clefs?.[staff]) return { ...measure.clefs[staff] };
+  }
+  return null;
+}
+
+/**
+ * Lay out a measure's timing from an ordered list of timing events.
+ *
+ * This is the canonical MusicXML timing model: the <duration> value (measured
+ * in divisions per quarter note) is the single source of truth for how long a
+ * note sounds. Using it directly makes every note type correct - tuplets,
+ * dotted/double-dotted notes, breves, etc. - because <duration> already encodes
+ * the sounding length regardless of the visual <type>. A moving cursor honours
+ * <backup>/<forward> so multiple voices and staves line up, chords share their
+ * onset with the preceding note, and grace notes take no time.
+ *
+ * Pure (no DOM) so it can be unit tested directly.
+ *
+ * @param {Array} events - ordered events: { kind: 'note'|'backup'|'forward', ... }
+ * @param {number} divisions - divisions per quarter note for this measure
+ * @returns {{ notes: Array, beats: number }} notes with timing and measure length in beats
+ */
+export function layoutMeasure(events, divisions) {
+  const div = divisions > 0 ? divisions : 1;
+  const notes = [];
+  let cursor = 0;       // current time position within the measure, in divisions
+  let maxCursor = 0;    // furthest point reached (= measure length)
+  let lastStart = 0;    // onset of the last non-chord note, so chords can share it
+
+  for (const ev of events) {
+    if (ev.kind === 'backup') {
+      cursor = Math.max(0, cursor - (ev.duration || 0));
+      continue;
+    }
+    if (ev.kind === 'forward') {
+      cursor += ev.duration || 0;
+      if (cursor > maxCursor) maxCursor = cursor;
+      continue;
+    }
+
+    // kind === 'note'
+    const isChord = !!ev.isChord;
+    const isGrace = !!ev.isGrace;
+    const duration = ev.duration || 0;
+    const startDiv = isChord ? lastStart : cursor;
+
+    const note = {
+      isRest: !!ev.isRest,
+      isChord,
+      isGrace,
+      voice: ev.voice,
+      staff: ev.staff,
+      duration,
+      type: ev.type,
+      dots: ev.dots,
+      durationBeats: duration / div,
+      startBeatInMeasure: startDiv / div
+    };
+    if (ev.pitch) note.pitch = { ...ev.pitch };
+    if (ev.lyric) note.lyric = { ...ev.lyric };
+    if (ev.tie) note.tie = { ...ev.tie };
+    if (ev.ties) note.ties = ev.ties.map(tie => ({ ...tie }));
+    if (ev.stem) note.stem = ev.stem;
+    if (ev.beams) note.beams = ev.beams.map(beam => ({ ...beam }));
+    if (ev.timeModification) note.timeModification = { ...ev.timeModification };
+    if (ev.tuplets) note.tuplets = ev.tuplets.map(tuplet => ({ ...tuplet }));
+    if (ev.slurs) note.slurs = ev.slurs.map(slur => ({ ...slur }));
+    if (ev.fermata) note.fermata = { ...ev.fermata };
+    if (ev.clef) note.clef = { ...ev.clef };
+
+    notes.push(note);
+
+    if (!isChord) lastStart = startDiv;
+    // Chords and grace notes do not advance the time cursor.
+    if (!isChord && !isGrace) {
+      cursor = startDiv + duration;
+      if (cursor > maxCursor) maxCursor = cursor;
+    }
+  }
+
+  return { notes, beats: maxCursor / div };
+}
+
+/**
+ * Parse a single measure element into timing events, then lay them out.
  * @param {Element} measureEl - the <measure> element
  * @param {number} currentDivisions - current divisions value
  * @param {{ numerator: number, denominator: number }} currentTimeSignature
- * @returns {{ notes: Array, divisions: number, timeSignature: object, keySignature: object|null, tempo: number|null, voices: Set }}
+ * @param {Object<number, object>} currentClefs - clefs inherited from the previous measure
+ * @returns {{ notes: Array, divisions: number, timeSignature: object, keySignature: object|null, tempo: number|null, voices: Set, beats: number, clefs: Object }}
  */
-function parseMeasure(measureEl, currentDivisions, currentTimeSignature) {
+function parseMeasure(measureEl, currentDivisions, currentTimeSignature, currentClefs = {}) {
+  const clefs = cloneClefs(currentClefs);
   const result = {
     number: parseInt(measureEl.getAttribute('number') || '1', 10),
     notes: [],
@@ -105,92 +251,195 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature) {
     timeSignature: currentTimeSignature,
     keySignature: null,
     tempo: null,
-    voices: new Set()
+    voices: new Set(),
+    beats: 0,
+    barlineFermatas: [],
+    clefs: cloneClefs(clefs)
   };
 
-  // Check for attributes element (divisions, time signature, key signature)
-  const attributes = measureEl.querySelector('attributes');
-  if (attributes) {
-    const divisionsEl = attributes.querySelector('divisions');
-    if (divisionsEl) {
-      result.divisions = parseInt(divisionsEl.textContent, 10);
-    }
+  let divisions = currentDivisions;
+  const events = [];
 
-    const timeEl = attributes.querySelector('time');
-    if (timeEl) {
-      result.timeSignature = {
-        numerator: parseInt(timeEl.querySelector('beats')?.textContent || '4', 10),
-        denominator: parseInt(timeEl.querySelector('beat-type')?.textContent || '4', 10)
-      };
-    }
+  // Walk the measure's direct children in document order so <backup>/<forward>
+  // are interleaved with notes exactly as written.
+  for (const child of Array.from(measureEl.children)) {
+    const tag = child.tagName.toLowerCase();
 
-    const keyEl = attributes.querySelector('key');
-    if (keyEl) {
-      result.keySignature = {
-        fifths: parseInt(keyEl.querySelector('fifths')?.textContent || '0', 10),
-        mode: keyEl.querySelector('mode')?.textContent || 'major'
-      };
-    }
-  }
-
-  // Check for tempo in direction elements
-  const directions = measureEl.querySelectorAll('direction');
-  for (const dir of directions) {
-    const sound = dir.querySelector('sound');
-    if (sound && sound.getAttribute('tempo')) {
-      result.tempo = parseFloat(sound.getAttribute('tempo'));
-    }
-  }
-
-  // Parse notes
-  const noteElements = measureEl.querySelectorAll('note');
-  for (const noteEl of noteElements) {
-    const isRest = noteEl.querySelector('rest') !== null;
-    const isChord = noteEl.querySelector('chord') !== null;
-    const voice = parseInt(noteEl.querySelector('voice')?.textContent || '1', 10);
-    const staff = parseInt(noteEl.querySelector('staff')?.textContent || '1', 10);
-    const duration = parseInt(noteEl.querySelector('duration')?.textContent || '1', 10);
-    const type = noteEl.querySelector('type')?.textContent || null;
-    const dots = noteEl.querySelectorAll('dot').length;
-
-    result.voices.add(voice);
-
-    const noteData = {
-      isRest,
-      isChord,
-      voice,
-      staff,
-      duration,
-      type,
-      dots,
-      durationBeats: type ? calculateDuration(type, dots) : (duration / result.divisions)
-    };
-
-    if (!isRest) {
-      const pitchEl = noteEl.querySelector('pitch');
-      if (pitchEl) {
-        const pitch = parsePitch(pitchEl);
-        noteData.pitch = pitch;
+    if (tag === 'attributes') {
+      const divisionsEl = child.querySelector('divisions');
+      if (divisionsEl) {
+        divisions = parseInt(divisionsEl.textContent, 10) || divisions;
       }
-    }
+      const timeEl = child.querySelector('time');
+      if (timeEl) {
+        result.timeSignature = {
+          numerator: parseInt(timeEl.querySelector('beats')?.textContent || '4', 10),
+          denominator: parseInt(timeEl.querySelector('beat-type')?.textContent || '4', 10)
+        };
+      }
+      const keyEl = child.querySelector('key');
+      if (keyEl) {
+        result.keySignature = {
+          fifths: parseInt(keyEl.querySelector('fifths')?.textContent || '0', 10),
+          mode: keyEl.querySelector('mode')?.textContent || 'major'
+        };
+      }
+      for (const clefEl of child.querySelectorAll('clef')) {
+        const clef = parseClef(clefEl);
+        clefs[clef.staff] = clef;
+      }
+    } else if (tag === 'direction') {
+      const sound = child.querySelector('sound');
+      if (sound && sound.getAttribute('tempo')) {
+        result.tempo = parseFloat(sound.getAttribute('tempo'));
+      }
+    } else if (tag === 'sound') {
+      if (child.getAttribute('tempo')) {
+        result.tempo = parseFloat(child.getAttribute('tempo'));
+      }
+    } else if (tag === 'barline') {
+      const location = child.getAttribute('location') || 'right';
+      for (const fermataEl of child.querySelectorAll('fermata')) {
+        const type = fermataEl.getAttribute('type') || 'upright';
+        result.barlineFermatas.push({
+          type,
+          shape: fermataEl.textContent.trim() || 'normal',
+          placement: fermataEl.getAttribute('placement') || (type === 'inverted' ? 'below' : 'above'),
+          location
+        });
+      }
+    } else if (tag === 'backup') {
+      events.push({ kind: 'backup', duration: parseInt(child.querySelector('duration')?.textContent || '0', 10) });
+    } else if (tag === 'forward') {
+      events.push({ kind: 'forward', duration: parseInt(child.querySelector('duration')?.textContent || '0', 10) });
+    } else if (tag === 'note') {
+      const isRest = child.querySelector('rest') !== null;
+      const isChord = child.querySelector('chord') !== null;
+      const isGrace = child.querySelector('grace') !== null;
+      const voice = parseInt(child.querySelector('voice')?.textContent || '1', 10);
+      const staff = parseInt(child.querySelector('staff')?.textContent || '1', 10);
+      // Grace notes have no <duration>; everything else does.
+      const durationEl = child.querySelector('duration');
+      const duration = durationEl ? parseInt(durationEl.textContent, 10) : 0;
+      const type = child.querySelector('type')?.textContent || null;
+      const dots = child.querySelectorAll('dot').length;
 
-    // Check for lyric
-    const lyricEl = noteEl.querySelector('lyric');
-    if (lyricEl) {
-      const text = lyricEl.querySelector('text')?.textContent || '';
-      const syllabic = lyricEl.querySelector('syllabic')?.textContent || 'single';
-      noteData.lyric = { text, syllabic };
-    }
+      result.voices.add(voice);
 
-    // Check for tie
-    const tieEl = noteEl.querySelector('tie');
-    if (tieEl) {
-      noteData.tie = tieEl.getAttribute('type'); // 'start' or 'stop'
-    }
+      const ev = { kind: 'note', isRest, isChord, isGrace, voice, staff, duration, type, dots };
+      if (clefs[staff]) ev.clef = { ...clefs[staff] };
 
-    result.notes.push(noteData);
+      if (!isRest) {
+        const pitchEl = child.querySelector('pitch');
+        if (pitchEl) ev.pitch = parsePitch(pitchEl);
+      }
+
+      const lyricEl = child.querySelector('lyric');
+      if (lyricEl) {
+        ev.lyric = {
+          text: lyricEl.querySelector('text')?.textContent || '',
+          syllabic: lyricEl.querySelector('syllabic')?.textContent || 'single'
+        };
+      }
+
+      // Preserve the source stem and beam state so short notes can be drawn as
+      // one connected group instead of as individually flagged notes.
+      const stemEl = child.querySelector('stem');
+      if (stemEl?.textContent.trim()) {
+        ev.stem = stemEl.textContent.trim().toLowerCase();
+      }
+
+      const beamEls = Array.from(child.querySelectorAll('beam'));
+      if (beamEls.length) {
+        ev.beams = beamEls.map(beam => ({
+          number: parseInt(beam.getAttribute('number') || '1', 10),
+          type: beam.textContent.trim().toLowerCase(),
+          repeater: beam.getAttribute('repeater') === 'yes',
+          fan: beam.getAttribute('fan') || null
+        }));
+      }
+
+      const timeModificationEl = child.querySelector('time-modification');
+      if (timeModificationEl) {
+        const normalDots = timeModificationEl.querySelectorAll('normal-dot').length;
+        ev.timeModification = {
+          actualNotes: parseInt(timeModificationEl.querySelector('actual-notes')?.textContent || '0', 10),
+          normalNotes: parseInt(timeModificationEl.querySelector('normal-notes')?.textContent || '0', 10),
+          normalType: timeModificationEl.querySelector('normal-type')?.textContent?.trim() || null,
+          normalDots
+        };
+      }
+
+      const notationsEl = child.querySelector('notations');
+      if (notationsEl) {
+        const tupletEls = Array.from(notationsEl.querySelectorAll('tuplet'));
+        if (tupletEls.length) {
+          ev.tuplets = tupletEls.map(tuplet => ({
+            type: tuplet.getAttribute('type') || 'start',
+            number: parseInt(tuplet.getAttribute('number') || '1', 10),
+            bracket: tuplet.getAttribute('bracket'),
+            showNumber: tuplet.getAttribute('show-number') || 'actual',
+            showType: tuplet.getAttribute('show-type') || 'none',
+            placement: tuplet.getAttribute('placement') || null,
+            lineShape: tuplet.getAttribute('line-shape') || null
+          }));
+        }
+
+        const slurEls = Array.from(notationsEl.querySelectorAll('slur'));
+        if (slurEls.length) {
+          ev.slurs = slurEls.map(slur => ({
+            type: slur.getAttribute('type') || 'start',
+            number: parseInt(slur.getAttribute('number') || '1', 10),
+            placement: slur.getAttribute('placement') || null,
+            lineType: slur.getAttribute('line-type') || 'solid'
+          }));
+        }
+
+        const fermataEl = notationsEl.querySelector('fermata');
+        if (fermataEl) {
+          const type = fermataEl.getAttribute('type') || 'upright';
+          ev.fermata = {
+            type,
+            shape: fermataEl.textContent.trim() || 'normal',
+            placement: fermataEl.getAttribute('placement') || (type === 'inverted' ? 'below' : 'above')
+          };
+        }
+      }
+
+      // A note can carry two <tie> elements (stop then start). Some exporters
+      // only emit the equivalent <notations><tied> elements, so merge both.
+      const tieEls = Array.from(child.querySelectorAll('tie'));
+      const tiedEls = notationsEl
+        ? Array.from(notationsEl.querySelectorAll('tied'))
+        : [];
+      if (tieEls.length || tiedEls.length) {
+        let start = false;
+        let stop = false;
+        for (const tie of [...tieEls, ...tiedEls]) {
+          const tieType = tie.getAttribute('type');
+          if (tieType === 'start') start = true;
+          if (tieType === 'stop') stop = true;
+        }
+        ev.tie = { start, stop };
+        if (tiedEls.length) {
+          ev.ties = tiedEls.map(tied => ({
+            type: tied.getAttribute('type') || 'start',
+            number: parseInt(tied.getAttribute('number') || '1', 10),
+            placement: tied.getAttribute('placement') || null,
+            lineType: tied.getAttribute('line-type') || 'solid'
+          }));
+        }
+      }
+
+      events.push(ev);
+    }
   }
 
+  result.divisions = divisions;
+  result.clefs = cloneClefs(clefs);
+  const laid = layoutMeasure(events, divisions);
+  result.notes = laid.notes;
+  result.beats = laid.beats;
   return result;
 }
 
@@ -214,7 +463,12 @@ function splitByVoice(measures) {
         divisions: measure.divisions,
         timeSignature: measure.timeSignature,
         keySignature: measure.keySignature,
-        tempo: measure.tempo
+        tempo: measure.tempo,
+        barlineFermatas: measure.barlineFermatas.map(fermata => ({ ...fermata })),
+        clefs: cloneClefs(measure.clefs),
+        // Preserve absolute timing so every voice stays aligned to the same grid.
+        startBeat: measure.startBeat,
+        beats: measure.beats
       });
     }
   }
@@ -284,13 +538,24 @@ export function parseMusicXML(xmlString, xmlDoc) {
     const measureElements = partEl.querySelectorAll('measure');
     let currentDivisions = 1;
     let currentTimeSignature = { numerator: 4, denominator: 4 };
+    let currentClefs = {};
     const measures = [];
 
     for (const measureEl of measureElements) {
-      const parsed = parseMeasure(measureEl, currentDivisions, currentTimeSignature);
+      const parsed = parseMeasure(measureEl, currentDivisions, currentTimeSignature, currentClefs);
       currentDivisions = parsed.divisions;
       currentTimeSignature = parsed.timeSignature;
+      currentClefs = parsed.clefs;
       measures.push(parsed);
+    }
+
+    // Assign each measure an absolute start position (in quarter-note beats) by
+    // accumulating measure lengths. Downstream code positions notes as
+    // measure.startBeat + note.startBeatInMeasure.
+    let beatAccumulator = 0;
+    for (const m of measures) {
+      m.startBeat = beatAccumulator;
+      beatAccumulator += m.beats;
     }
 
     // Detect voice type
@@ -305,15 +570,12 @@ export function parseMusicXML(xmlString, xmlDoc) {
     }
 
     if (allVoices.size > 1) {
-      // Split into separate voice parts
+      // Split into separate voice parts while retaining each voice's source staff and clef.
       const voiceMap = splitByVoice(measures);
-      let voiceIndex = 0;
       for (const [voiceNum, voiceMeasures] of voiceMap) {
-        voiceIndex++;
-        const subPartName = allVoices.size === 2
-          ? `${info.name} (Voice ${voiceNum})`
-          : `${info.name} (Voice ${voiceNum})`;
+        const subPartName = `${info.name} (Voice ${voiceNum})`;
         const subVoiceType = detectVoiceType(subPartName);
+        const staffNumber = findPrimaryStaff(voiceMeasures);
 
         parts.push({
           id: `${info.id}_v${voiceNum}`,
@@ -322,26 +584,37 @@ export function parseMusicXML(xmlString, xmlDoc) {
           abbreviation: info.abbreviation,
           voiceType: subVoiceType !== subPartName.toLowerCase().trim() ? subVoiceType : voiceType,
           voiceNumber: voiceNum,
+          staffNumber,
+          clef: findClefForStaff(voiceMeasures, staffNumber),
           measures: voiceMeasures,
           isSubPart: true
         });
       }
     } else {
+      const partMeasures = measures.map(m => ({
+        number: m.number,
+        notes: m.notes,
+        divisions: m.divisions,
+        timeSignature: m.timeSignature,
+        keySignature: m.keySignature,
+        tempo: m.tempo,
+        barlineFermatas: m.barlineFermatas.map(fermata => ({ ...fermata })),
+        clefs: cloneClefs(m.clefs),
+        startBeat: m.startBeat,
+        beats: m.beats
+      }));
+      const staffNumber = findPrimaryStaff(partMeasures);
+
       parts.push({
         id: info.id,
         name: info.name,
         originalName: info.name,
         abbreviation: info.abbreviation,
         voiceType,
-        voiceNumber: 1,
-        measures: measures.map(m => ({
-          number: m.number,
-          notes: m.notes,
-          divisions: m.divisions,
-          timeSignature: m.timeSignature,
-          keySignature: m.keySignature,
-          tempo: m.tempo
-        })),
+        voiceNumber: allVoices.values().next().value || 1,
+        staffNumber,
+        clef: findClefForStaff(partMeasures, staffNumber),
+        measures: partMeasures,
         isSubPart: false
       });
     }

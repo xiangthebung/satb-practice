@@ -114,8 +114,10 @@ export function classifyAccuracy(cents) {
  * PitchDetector class - manages microphone input and real-time pitch detection.
  */
 export class PitchDetector {
-  constructor(audioContext) {
-    this.audioContext = audioContext;
+  constructor() {
+    // PitchDetector creates its own AudioContext dedicated to mic input.
+    // Sharing the playback context causes silent failures on many browsers.
+    this.audioContext = null;
     this.analyser = null;
     this.mediaStream = null;
     this.sourceNode = null;
@@ -134,6 +136,8 @@ export class PitchDetector {
    */
   async start() {
     try {
+      // Request mic permission first, before creating the AudioContext.
+      // Some browsers require this ordering.
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
@@ -141,6 +145,14 @@ export class PitchDetector {
           autoGainControl: false
         }
       });
+
+      // Create a dedicated AudioContext for mic analysis
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
 
       this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
       this.analyser = this.audioContext.createAnalyser();
@@ -180,6 +192,10 @@ export class PitchDetector {
       this.mediaStream = null;
     }
     this.analyser = null;
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
   }
 
   /**

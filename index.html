@@ -32,7 +32,7 @@
           <h3>Upload MusicXML File</h3>
           <p>Drag and drop a .xml or .musicxml file here</p>
           <p class="upload-hint">or click to browse</p>
-          <input type="file" id="file-input" accept=".xml,.musicxml,.mxl" hidden>
+          <input type="file" id="file-input" accept=".xml,.musicxml,.mxl" style="display:none">
         </div>
       </div>
 
@@ -52,23 +52,56 @@
 
   <!-- Bottom transport toolbar -->
   <footer class="transport-toolbar">
-    <div class="transport-controls">
-      <button id="play-btn" class="transport-btn" title="Play/Pause (Space)">Play</button>
-      <button id="stop-btn" class="transport-btn" title="Stop">Stop</button>
-      <button id="metronome-btn" class="transport-btn" title="Toggle Metronome (M)">Metronome</button>
+    <!-- Seek / progress bar spanning full width -->
+    <div class="transport-progress">
+      <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" class="seek-slider" title="Seek position">
     </div>
-    <div class="tempo-control">
-      <label for="tempo-slider">Tempo:</label>
-      <input type="range" id="tempo-slider" min="40" max="240" value="120" class="tempo-slider">
-      <span id="tempo-value" class="tempo-value">120</span>
-      <span class="tempo-unit">BPM</span>
-      <button id="tap-tempo-btn" class="transport-btn tap-btn" title="Tap Tempo">Tap</button>
-    </div>
-    <div class="beat-indicator-container">
-      <div id="beat-indicator" class="beat-indicator"></div>
-    </div>
-    <div class="mic-control">
-      <button id="mic-btn" class="transport-btn" title="Enable Microphone">Mic Off</button>
+
+    <!-- Main controls row -->
+    <div class="transport-row">
+      <!-- Left: time + tempo -->
+      <div class="transport-left">
+        <span id="seek-time" class="seek-time">0:00</span>
+        <div class="tempo-control" id="tempo-control">
+          <div class="tempo-scrubber" id="tempo-scrubber" title="Drag left/right to adjust tempo">
+            <span id="tempo-value" class="tempo-value">120</span>
+            <span class="tempo-unit">BPM</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Center: play/pause -->
+      <div class="transport-center">
+        <button id="play-btn" class="play-btn" title="Play/Pause (Space)">
+          <svg id="play-icon" class="transport-icon" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="6,4 20,12 6,20"/>
+          </svg>
+          <svg id="pause-icon" class="transport-icon" style="display:none" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="5" y="4" width="4" height="16"/>
+            <rect x="15" y="4" width="4" height="16"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Right: metronome, mic -->
+      <div class="transport-right">
+        <button id="metronome-btn" class="icon-btn" title="Toggle Metronome (M)">
+          <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L6 22h12L12 2z"/>
+            <line x1="12" y1="18" x2="16" y2="6"/>
+          </svg>
+          <div id="beat-indicator" class="beat-dot"></div>
+        </button>
+        <button id="mic-btn" class="icon-btn" title="Enable Microphone">
+          <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="1" width="6" height="12" rx="3"/>
+            <path d="M5 10a7 7 0 0 0 14 0"/>
+            <line x1="12" y1="17" x2="12" y2="21"/>
+            <line x1="8" y1="21" x2="16" y2="21"/>
+          </svg>
+        </button>
+
+      </div>
     </div>
   </footer>
 

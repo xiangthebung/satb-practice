@@ -21,6 +21,38 @@ const FLAT_TO_SHARP = {
   'Cb': 'B'
 };
 
+// Semitone offset (from C) for each diatonic step letter.
+const STEP_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+/**
+ * Convert an explicit pitch (step letter + chromatic alteration + octave) to a
+ * MIDI number. Unlike noteToMidi, this never throws: it works directly from the
+ * MusicXML data model, so it correctly handles E#, B#, Cb, Fb and double
+ * accidentals (alter = +/-2) that have no entry in the note-name tables.
+ * @param {string} step - diatonic letter 'C'..'B'
+ * @param {number} alter - semitone alteration (-2..2); 1 = sharp, -1 = flat
+ * @param {number} octave
+ * @returns {number} MIDI number
+ */
+export function pitchToMidi(step, alter, octave) {
+  const base = STEP_SEMITONES[String(step).toUpperCase()];
+  if (base === undefined) {
+    throw new Error(`Unknown pitch step: ${step}`);
+  }
+  return (octave + 1) * 12 + base + (alter || 0);
+}
+
+/**
+ * Convert an explicit pitch (step + alter + octave) to a frequency in Hz.
+ * @param {string} step
+ * @param {number} alter
+ * @param {number} octave
+ * @returns {number} frequency in Hz
+ */
+export function pitchToFrequency(step, alter, octave) {
+  return midiToFrequency(pitchToMidi(step, alter, octave));
+}
+
 /**
  * Convert a note name and octave to MIDI number.
  * @param {string} noteName - e.g. 'C', 'C#', 'Db'
