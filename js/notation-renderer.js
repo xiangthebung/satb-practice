@@ -530,6 +530,7 @@ export class NotationRenderer {
       measureBarWidth: 2,
       cursorColor: 'rgba(74, 158, 255, 0.6)',
       cursorWidth: 3,
+      cursorAnchorRatio: 0.4, // pin the playback cursor left of screen center
       pitchTrailMaxSamples: 240,
       ...options
     };
@@ -592,12 +593,7 @@ export class NotationRenderer {
     if (!Number.isFinite(nextBeat)) return;
 
     this.currentBeat = nextBeat;
-    if (options.ensureVisible) {
-      this.ensureBeatVisible(nextBeat, {
-        render: false,
-        pageTurn: options.pageTurn
-      });
-    } else if (options.autoScroll !== false && this.isAutoScrollEnabled) {
+    if (options.autoScroll !== false && this.isAutoScrollEnabled) {
       this.autoScroll();
     }
     this.render();
@@ -652,11 +648,7 @@ export class NotationRenderer {
     if (targetX < visibleLeft) {
       nextScroll = targetX - scoreLeft - padding;
     } else if (targetX > visibleRight) {
-      // Playback turns to the next page instead of tracking the cursor at the
-      // right edge. Manual navigation retains the smaller edge-only movement.
-      nextScroll = options.pageTurn
-        ? targetX - scoreLeft - padding
-        : targetX - this.canvas.width + padding;
+      nextScroll = targetX - this.canvas.width + padding;
     }
 
     const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
@@ -971,19 +963,18 @@ export class NotationRenderer {
   }
 
   /**
-   * Auto-scroll to keep the cursor visible.
+   * Keep the playback cursor pinned to a fixed anchor on the left side of
+   * center, scrolling the score beneath it like a teleprompter. Near the start
+   * the cursor sits at its natural position because the scroll offset is
+   * clamped at zero, and it stops advancing once the score end is reached.
    */
   autoScroll() {
     const cursorX = this.getScoreX(this.currentBeat);
-    const visibleWidth = this.canvas.width;
-    const scrollMargin = visibleWidth * 0.3;
-
-    if (cursorX - this.scrollX > visibleWidth - scrollMargin) {
-      this.scrollX = cursorX - scrollMargin;
-    }
-    if (cursorX - this.scrollX < scrollMargin && this.scrollX > 0) {
-      this.scrollX = Math.max(0, cursorX - scrollMargin);
-    }
+    const scoreLeft = this.config.marginLeft + this.config.clefWidth;
+    const anchorX = this.canvas.width * this.config.cursorAnchorRatio;
+    const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
+    const maxScroll = Math.max(0, contentWidth - this.canvas.width);
+    this.scrollX = Math.max(0, Math.min(maxScroll, cursorX - anchorX));
   }
 
   /**

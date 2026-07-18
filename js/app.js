@@ -456,12 +456,10 @@ class ChoirPracticeApp {
       if (this.isSeeking) return;
       this.state.currentBeat = beat;
       if (this.renderer) {
-        // Playback advances to the next visible sheet area only when the
-        // cursor leaves the viewport; it never recenters the score.
+        // Keep the playback cursor pinned on the left side of center while the
+        // score scrolls beneath it.
         this.renderer.setCurrentBeat(beat, {
-          autoScroll: false,
-          ensureVisible: this.state.isPlaying,
-          pageTurn: this.state.isPlaying
+          autoScroll: this.state.isPlaying
         });
       }
       this.updateSeekSlider();
