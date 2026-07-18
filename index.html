@@ -22,40 +22,41 @@
   </header>
 
   <main class="app-layout">
-    <!-- Sidebar for sample pieces and part controls -->
+    <!-- Sidebar for part controls -->
     <aside class="sidebar" id="sidebar">
-      <section class="sample-pieces-section" aria-labelledby="sample-pieces-title">
-        <div class="sidebar-header">
-          <h2 id="sample-pieces-title">Sample Pieces</h2>
-        </div>
-        <div id="sample-pieces-list" class="sample-pieces-list">
-          <button class="sample-piece" type="button" data-sample-file="Draw On, Sweet Night.musicxml">
-            <span class="sample-piece-title">Draw on, sweet night</span>
-            <span class="sample-piece-meta">John Wilbye</span>
-          </button>
-          <button class="sample-piece" type="button" data-sample-file="Northern lights.musicxml">
-            <span class="sample-piece-title">Northern lights</span>
-          </button>
-          <button class="sample-piece" type="button" data-sample-file="Quick we have but a second.musicxml">
-            <span class="sample-piece-title">Quick we have but a second</span>
-          </button>
-        </div>
-      </section>
-
       <section class="sidebar-parts" aria-labelledby="parts-title">
         <div class="sidebar-header">
           <h2 id="parts-title">Parts</h2>
         </div>
         <div id="parts-list" class="parts-list">
-          <p class="no-parts-message">Upload a MusicXML file to see parts</p>
+          <p class="no-parts-message">Choose a sample or upload a MusicXML file to see parts</p>
         </div>
       </section>
     </aside>
 
     <!-- Main content area -->
     <section class="main-content">
-      <!-- File upload zone -->
+      <!-- Home screen with sample pieces and file upload -->
       <div id="upload-prompt" class="upload-prompt">
+        <section class="home-samples" aria-labelledby="sample-pieces-title">
+          <div class="home-samples-heading">
+            <h2 id="sample-pieces-title">Try a sample piece</h2>
+            <p>Start practicing with one of these included MusicXML files.</p>
+          </div>
+          <div id="sample-pieces-list" class="home-sample-list">
+            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Draw On, Sweet Night.musicxml">
+              <span class="sample-piece-title">Draw on, sweet night</span>
+              <span class="sample-piece-meta">John Wilbye</span>
+            </button>
+            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Northern lights.musicxml">
+              <span class="sample-piece-title">Northern lights</span>
+            </button>
+            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">
+              <span class="sample-piece-title">Quick! We have but a second</span>
+            </button>
+          </div>
+        </section>
+
         <div id="file-upload-zone" class="file-upload-zone">
           <div class="upload-icon">&#9835;</div>
           <h3>Upload MusicXML File</h3>

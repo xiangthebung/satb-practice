@@ -1031,6 +1031,28 @@ export class AudioEngine {
   }
 
   /**
+   * Stop playback and reset all score-specific transport and part state while
+   * keeping the shared AudioContext and user synthesis preferences alive.
+   */
+  resetForNewScore() {
+    this.stop();
+
+    for (const gainNode of this.partGains.values()) {
+      try {
+        gainNode.disconnect();
+      } catch (e) { /* already disconnected */ }
+    }
+    this.partGains.clear();
+    this.partVolumeLevels.clear();
+    this.partMuted.clear();
+    this.partSoloed.clear();
+    this.parts = [];
+    this.schedule = [];
+    this.scheduleIndex = 0;
+    this.fermataHolds = [];
+  }
+
+  /**
    * Schedule all notes from the current position (legacy fallback, not used by lookahead).
    */
   scheduleAllNotes() {
@@ -1433,30 +1455,41 @@ export class AudioEngine {
       : articulation.legatoToNext ? 0.04 : 0.08;
     const release = Math.min(requestedRelease, Math.max(0.01, phraseEndTime - startTime));
     const releaseStart = Math.max(attackEnd, phraseEndTime - release);
+    const accentPeakTime = Math.min(startTime + 0.018, releaseStart - 0.04);
+    const accentEndTime = Math.min(startTime + 0.085, releaseStart - 0.005);
+    const accentGain = node.peakGain * 1.08;
+    const canAccent = isRepeatedPitch &&
+      accentPeakTime > startTime + 0.003 &&
+      accentEndTime > accentPeakTime + 0.008;
 
     gain.cancelScheduledValues(startTime);
     gain.setValueAtTime(currentGain, startTime);
-    if (attackEnd > startTime + 0.001) {
+    if (canAccent) {
+      // This is a brief stress accent, not a re-attack: the voiced tone never
+      // falls below its sustained level and returns smoothly to that level.
+      gain.linearRampToValueAtTime(accentGain, accentPeakTime);
+      gain.linearRampToValueAtTime(node.peakGain, accentEndTime);
+    } else if (attackEnd > startTime + 0.001) {
       gain.linearRampToValueAtTime(node.peakGain, attackEnd);
     }
     gain.setValueAtTime(node.peakGain, releaseStart);
     gain.linearRampToValueAtTime(0, phraseEndTime);
 
-    // Repeated pitches retain the voiced tone and its volume. Add only a small,
-    // smooth breath accent so the listener can perceive a new sung note without
-    // hearing a separate attack or a gap.
+    // Repeated pitches retain the voiced tone and its volume. Pair the smooth
+    // dynamic stress accent above with a stronger breath accent so the listener
+    // perceives a new sung note without hearing a separate attack or a gap.
     if (isRepeatedPitch && node.noiseGain && node.baseNoiseLevel > 0) {
       const breathGain = node.noiseGain.gain;
       const breathReleaseStart = phraseEndTime - Math.min(
         0.06,
         Math.max(0.01, (phraseEndTime - startTime) * 0.15)
       );
-      const accentPeakTime = Math.min(startTime + 0.012, breathReleaseStart - 0.02);
-      const accentEndTime = Math.min(startTime + 0.05, breathReleaseStart - 0.005);
+      const accentPeakTime = Math.min(startTime + 0.015, breathReleaseStart - 0.025);
+      const accentEndTime = Math.min(startTime + 0.065, breathReleaseStart - 0.005);
       if (accentPeakTime > startTime + 0.002 && accentEndTime > accentPeakTime + 0.004) {
         breathGain.cancelScheduledValues(startTime);
         breathGain.setValueAtTime(node.baseNoiseLevel, startTime);
-        breathGain.linearRampToValueAtTime(node.baseNoiseLevel * 1.35, accentPeakTime);
+        breathGain.linearRampToValueAtTime(node.baseNoiseLevel * 1.8, accentPeakTime);
         breathGain.linearRampToValueAtTime(node.baseNoiseLevel, accentEndTime);
         breathGain.setValueAtTime(node.baseNoiseLevel, breathReleaseStart);
         breathGain.linearRampToValueAtTime(node.baseNoiseLevel * 2, phraseEndTime);
@@ -1488,6 +1521,11 @@ export class AudioEngine {
     node.envelopeStartTime = startTime;
     node.envelopeStartGain = currentGain;
     node.attackEndTime = attackEnd;
+    node.dynamicAccent = canAccent ? {
+      peakTime: accentPeakTime,
+      peakGain: accentGain,
+      endTime: accentEndTime
+    } : null;
     node.releaseStartTime = releaseStart;
     node.noteEndTime = phraseEndTime;
   }
@@ -1767,8 +1805,18 @@ export class AudioEngine {
     const sustainGain = node.sustainGain;
     const releaseStart = node.releaseStartTime;
     const noteEnd = node.noteEndTime;
+    const dynamicAccent = node.dynamicAccent;
 
     if (time <= startTime) return startGain;
+    if (dynamicAccent && time < dynamicAccent.endTime) {
+      if (time < dynamicAccent.peakTime) {
+        const progress = (time - startTime) / (dynamicAccent.peakTime - startTime);
+        return startGain + (dynamicAccent.peakGain - startGain) * progress;
+      }
+      const progress = (time - dynamicAccent.peakTime) /
+        (dynamicAccent.endTime - dynamicAccent.peakTime);
+      return dynamicAccent.peakGain + (sustainGain - dynamicAccent.peakGain) * progress;
+    }
     if (attackEnd > startTime && time < attackEnd) {
       const progress = (time - startTime) / (attackEnd - startTime);
       return startGain + (sustainGain - startGain) * progress;

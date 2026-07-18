@@ -6,18 +6,6 @@
 
 import { frequencyToNote, getPartColor, pitchToMidi } from './utils.js';
 
-const PART_RANGE_PADDING_SEMITONES = 5;
-const MIN_PITCH_CONFIDENCE = 0.3;
-const TARGET_MATCH_TOLERANCE_SEMITONES = 1.5;
-const MIN_TARGET_CANDIDATE_CONFIDENCE_RATIO = 0.45;
-const DEFAULT_PART_RANGES = {
-  soprano: { min: 60, max: 84 },
-  alto: { min: 55, max: 79 },
-  tenor: { min: 48, max: 72 },
-  bass: { min: 40, max: 60 },
-  baritone: { min: 43, max: 67 }
-};
-
 const STEP_ORDER = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
 const NOTE_DURATION_BEATS = {
   maxima: 32,
@@ -706,8 +694,8 @@ export class NotationRenderer {
       isFermataHold: !!position.isFermataHold
     });
 
-    // A low-confidence frame should not move the marker. The next confident
-    // frame is still accepted immediately; no multi-frame wait is introduced.
+    // A valid smoothed detector frame advances the marker immediately; the
+    // detector has already rejected silence and out-of-range measurements.
     if (!selectedPitchData) {
       this.render();
       return this.currentPitchSample;
@@ -724,103 +712,20 @@ export class NotationRenderer {
   }
 
   /**
-   * Choose the best same-frame pitch candidate using score and voice context.
-   * This resolves likely octave errors without waiting for future frames.
+   * Normalize the restored single-frequency detector payload.
+   *
+   * Pitch estimation and smoothing are intentionally handled entirely by the
+   * detector. The renderer only preserves the score-relative target feedback,
+   * trail, and color behavior.
    * @param {object} pitchData
-   * @param {number} beat
-   * @param {{ isFermataHold?: boolean }} options
    * @returns {object|null}
    */
-  selectPitchCandidate(pitchData, beat, options = {}) {
-    const reportedConfidence = Number(pitchData?.confidence);
-    const frameConfidence = Number.isFinite(reportedConfidence) ? reportedConfidence : 1;
-    if (frameConfidence < MIN_PITCH_CONFIDENCE) {
+  selectPitchCandidate(pitchData) {
+    const frequency = Number(pitchData?.frequency);
+    if (!Number.isFinite(frequency) || frequency < 50 || frequency > 2000) {
       return null;
     }
-
-    const selected = this.getSelectedPartContext();
-    const rawFrequency = Number(pitchData?.rawFrequency || pitchData?.frequency);
-    const candidates = (Array.isArray(pitchData?.candidates)
-      ? pitchData.candidates
-      : [{ frequency: rawFrequency, confidence: frameConfidence }])
-      .map(candidate => ({
-        frequency: Number(candidate?.frequency),
-        confidence: Number.isFinite(Number(candidate?.confidence))
-          ? Number(candidate.confidence)
-          : frameConfidence
-      }))
-      .filter(candidate =>
-        candidate.frequency >= 50 &&
-        candidate.frequency <= 2000 &&
-        Number.isFinite(candidate.confidence)
-      );
-
-    if (!candidates.length) return null;
-
-    const targetCandidates = selected
-      ? this.findTargetCandidates(selected.part, beat, !!options.isFermataHold)
-      : [];
-    const targetMidis = targetCandidates.map(candidate => candidate.midi);
-    const range = selected ? this.getPartPitchRange(selected.part) : null;
-    const previousMidi = getDetectedMidi(this.userPitch);
-    const rawMidi = getDetectedMidi({ frequency: rawFrequency });
-    const maxConfidence = Math.max(...candidates.map(candidate => candidate.confidence));
-
-    const scored = candidates.map(candidate => {
-      const midi = getDetectedMidi(candidate);
-      const targetDistance = targetMidis.length
-        ? Math.min(...targetMidis.map(targetMidi => Math.abs(midi - targetMidi)))
-        : 0;
-      const continuityDistance = previousMidi === null
-        ? 0
-        : Math.abs(midi - previousMidi);
-      const rawDistance = rawMidi === null ? 0 : Math.abs(midi - rawMidi);
-      const rangeDistance = range
-        ? Math.max(range.min - midi, 0, midi - range.max)
-        : 0;
-
-      return {
-        candidate,
-        midi,
-        targetDistance,
-        continuityDistance,
-        rawDistance,
-        rangeDistance,
-        score:
-          candidate.confidence * 2 -
-          Math.min(targetDistance, 24) * 0.06 -
-          Math.min(continuityDistance, 24) * 0.12 -
-          Math.min(rawDistance, 24) * 0.08 -
-          Math.min(rangeDistance, 24) * 0.18
-      };
-    });
-
-    // When an octave-equivalent candidate is close to the written note, prefer
-    // it immediately as long as the detector also considers it plausible.
-    const targetMatch = scored
-      .filter(item =>
-        item.targetDistance <= TARGET_MATCH_TOLERANCE_SEMITONES &&
-        item.candidate.confidence >= maxConfidence * MIN_TARGET_CANDIDATE_CONFIDENCE_RATIO
-      )
-      .sort((left, right) =>
-        left.targetDistance - right.targetDistance ||
-        right.candidate.confidence - left.candidate.confidence
-      )[0];
-    const best = targetMatch || scored.reduce((winner, item) =>
-      item.score > winner.score ? item : winner
-    );
-    const noteInfo = frequencyToNote(best.candidate.frequency);
-    if (!noteInfo) return null;
-
-    return {
-      ...pitchData,
-      frequency: best.candidate.frequency,
-      noteName: noteInfo.noteName,
-      octave: noteInfo.octave,
-      cents: noteInfo.cents,
-      confidence: best.candidate.confidence,
-      selectedCandidate: best.candidate
-    };
+    return pitchData;
   }
 
   /**
@@ -858,51 +763,8 @@ export class NotationRenderer {
   }
 
   /**
-   * Derive a soft pitch range from the selected score part. Actual written
-   * notes are preferred; conventional voice ranges are only a fallback.
-   * @param {object} part
-   * @returns {{ min: number, max: number }} MIDI range including padding
-   */
-  getPartPitchRange(part) {
-    const writtenMidis = [];
-    for (const measure of part?.measures || []) {
-      for (const note of measure.notes || []) {
-        if (note.isRest || !note.pitch) continue;
-        try {
-          writtenMidis.push(pitchToMidi(
-            note.pitch.step,
-            note.pitch.alter,
-            note.pitch.octave
-          ));
-        } catch {
-          // Ignore malformed notes while deriving the soft prior.
-        }
-      }
-    }
-
-    if (writtenMidis.length) {
-      return {
-        min: Math.min(...writtenMidis) - PART_RANGE_PADDING_SEMITONES,
-        max: Math.max(...writtenMidis) + PART_RANGE_PADDING_SEMITONES
-      };
-    }
-
-    const label = [part?.voiceType, part?.name, part?.originalName]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    const fallbackKey = Object.keys(DEFAULT_PART_RANGES)
-      .find(key => label.includes(key));
-    const fallback = DEFAULT_PART_RANGES[fallbackKey] || { min: 36, max: 84 };
-    return {
-      min: fallback.min - PART_RANGE_PADDING_SEMITONES,
-      max: fallback.max + PART_RANGE_PADDING_SEMITONES
-    };
-  }
-
-  /**
    * Return every sounding target at a beat. Chords retain all members so the
-   * immediate pitch selector can use the closest expected note.
+   * live pitch can be compared with any expected chord member.
    * @param {object} part
    * @param {number} beat
    * @param {boolean} isFermataHold

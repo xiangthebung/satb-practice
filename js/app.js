@@ -46,6 +46,7 @@ class ChoirPracticeApp {
     this.committedTempo = this.state.tempo;
     this.pitchGuidePosition = 0;
     this.micStartGeneration = 0;
+    this.fileLoadGeneration = 0;
     this.micStartPending = false;
     this.pitchAnnouncementTimer = null;
 
@@ -153,7 +154,7 @@ class ChoirPracticeApp {
       this.samplePiecesList.addEventListener('click', (e) => {
         const sampleButton = e.target.closest('.sample-piece');
         if (!sampleButton) return;
-        this.handleSamplePiece(sampleButton.dataset.sampleFile, sampleButton);
+        this.handleSamplePiece(sampleButton.dataset.samplePath, sampleButton);
       });
     }
 
@@ -510,11 +511,12 @@ class ChoirPracticeApp {
 
   /**
    * Load one of the MusicXML files bundled with the app.
-   * @param {string} fileName
+   * @param {string} samplePath
    * @param {HTMLButtonElement} button
    */
-  async handleSamplePiece(fileName, button) {
-    if (!fileName) return;
+  async handleSamplePiece(samplePath, button) {
+    if (!samplePath) return;
+    const loadGeneration = ++this.fileLoadGeneration;
 
     if (button) {
       button.disabled = true;
@@ -522,16 +524,25 @@ class ChoirPracticeApp {
     }
 
     try {
-      const response = await fetch(`sample-pieces/${encodeURIComponent(fileName)}`);
+      // The HTML provides the complete path so sample files are loaded from
+      // the bundled directory without trying to discover them by filename.
+      const encodedPath = samplePath
+        .split('/')
+        .map(segment => encodeURIComponent(segment))
+        .join('/');
+      const response = await fetch(encodedPath);
       if (!response.ok) {
         throw new Error(`Could not load sample piece (${response.status}).`);
       }
 
       const blob = await response.blob();
+      const fileName = samplePath.split('/').pop();
       const file = new File([blob], fileName, { type: 'application/xml' });
-      await this.handleFile(file);
+      await this.handleFile(file, loadGeneration);
     } catch (err) {
-      this.showError(err.message);
+      if (loadGeneration === this.fileLoadGeneration) {
+        this.showError(err.message);
+      }
     } finally {
       if (button) {
         button.disabled = false;
@@ -540,9 +551,12 @@ class ChoirPracticeApp {
     }
   }
 
-  async handleFile(file) {
+  async handleFile(file, loadGeneration = ++this.fileLoadGeneration) {
     try {
       const result = await parseFile(file);
+      if (loadGeneration !== this.fileLoadGeneration) return;
+      this.resetScoreTransition();
+
       this.state.parts = result.parts;
       this.state.metadata = result.metadata;
       this.state.rawXml = result.rawXml || null;
@@ -585,12 +599,27 @@ class ChoirPracticeApp {
 
       // Initialize audio engine with parts
       await this.initAudioEngine();
+      if (loadGeneration !== this.fileLoadGeneration) return;
       this.audioEngine.setTempo(this.state.tempo);
       this.audioEngine.setSynthMode(this.state.synthMode);
       this.committedTempo = this.state.tempo;
       this.audioEngine.setParts(this.state.parts);
+      for (const part of this.state.parts) {
+        this.audioEngine.setPartVolume(part.id, this.state.partVolumes[part.id] ?? 100);
+      }
+
+      // Preserve non-custom volume presets as session preferences, but apply
+      // them to the newly loaded score's parts. Keep a fresh custom baseline
+      // for this score rather than restoring values from the previous score.
+      if (this.state.activePreset && this.state.activePreset !== 'custom') {
+        this.state.customVolumes = { ...this.state.partVolumes };
+        this.applyPreset(this.state.activePreset);
+      }
 
       // Set time signature from first measure if available
+      if (this.metronome) {
+        this.metronome.setTempo(this.state.tempo);
+      }
       if (this.state.parts.length > 0 && this.state.parts[0].measures.length > 0) {
         const ts = this.state.parts[0].measures[0].timeSignature;
         if (ts && this.metronome) {
@@ -605,23 +634,20 @@ class ChoirPracticeApp {
         this.metronome.setMeasureStartBeats(measureStarts);
       }
     } catch (err) {
-      this.showError(err.message);
+      if (loadGeneration === this.fileLoadGeneration) {
+        this.showError(err.message);
+      }
     }
   }
 
   /**
-   * Reset the app back to the home/upload screen.
+   * Clear score-specific state before loading a new file or returning home.
+   * Session preferences such as synth mode, fermata timing, repeat, metronome,
+   * and non-custom volume presets intentionally remain in state.
    */
-  resetToHome() {
-    // Stop playback if active
-    if (this.state.isPlaying) {
-      this.togglePlay();
-    }
-
-    // Cancel active or pending microphone capture.
-    this.stopMicrophone();
-
-    // Clear state
+  resetScoreTransition() {
+    this.state.isPlaying = false;
+    this.state.currentBeat = 0;
     this.state.parts = [];
     this.state.metadata = null;
     this.state.rawXml = null;
@@ -629,11 +655,65 @@ class ChoirPracticeApp {
     this.state.selectedSectionId = null;
     this.state.partVolumes = {};
     this.state.selectedParts = new Set();
+    this.state.customVolumes = {};
+    if (this.state.activePreset === 'custom') {
+      this.state.activePreset = null;
+    }
+    this._activePartEdit = null;
+    this.isSeeking = false;
 
-    // Reset UI
+    if (this.audioEngine) {
+      this.audioEngine.resetForNewScore();
+    }
+    if (this.metronome) {
+      this.metronome.reset();
+      this.metronome.setTimeSignature(4, 4);
+      this.metronome.setMeasureStartBeats(null);
+    }
+
+    if (this.seekSlider) {
+      this.seekSlider.value = 0;
+      this.seekSlider.style.background =
+        'linear-gradient(to right, var(--accent-primary) 0%, var(--bg-tertiary) 0%)';
+    }
+    if (this.seekTime) {
+      this.seekTime.textContent = '0:00';
+    }
+    if (this.tempoDisplay) {
+      this.tempoDisplay.textContent = '120';
+    }
+    this.state.tempo = 120;
+    this.committedTempo = 120;
+
     if (this.scoreTitle) {
       this.scoreTitle.textContent = '';
     }
+    if (this.partsList) {
+      this.partsList.innerHTML = '<p class="no-parts-message">Choose a sample or upload a MusicXML file to see parts</p>';
+    }
+    if (this.renderer) {
+      this.renderer = null;
+    }
+    this.pitchGuidePosition = 0;
+    this.updatePitchGuide(null);
+
+    if (this.playIcon) this.playIcon.style.display = '';
+    if (this.pauseIcon) this.pauseIcon.style.display = 'none';
+    if (this.playBtn) this.playBtn.classList.remove('active');
+  }
+
+  /**
+   * Reset the app back to the home/upload screen.
+   */
+  resetToHome() {
+    // Invalidate any file that is still parsing or downloading.
+    this.fileLoadGeneration++;
+    // No score should remain active on the home screen. Stop microphone
+    // capture separately because it is otherwise preserved across files.
+    this.stopMicrophone();
+    this.resetScoreTransition();
+    document.getElementById('presets-section')?.remove();
+
     if (this.uploadPrompt) {
       this.uploadPrompt.style.display = '';
     }
@@ -645,28 +725,6 @@ class ChoirPracticeApp {
     }
     if (this.exportBtn) {
       this.exportBtn.style.display = 'none';
-    }
-    if (this.partsList) {
-      this.partsList.innerHTML = '<p class="no-parts-message">Upload a MusicXML file to see parts</p>';
-    }
-
-    // Reset seek slider
-    if (this.seekSlider) {
-      this.seekSlider.value = 0;
-    }
-    if (this.seekTime) {
-      this.seekTime.textContent = '0:00';
-    }
-
-    // Reset tempo display
-    this.state.tempo = 120;
-    if (this.tempoDisplay) {
-      this.tempoDisplay.textContent = '120';
-    }
-
-    // Clean up renderer
-    if (this.renderer) {
-      this.renderer = null;
     }
   }
 
