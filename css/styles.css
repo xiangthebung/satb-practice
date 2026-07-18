@@ -265,11 +265,11 @@ body {
 /* Part Controls */
 .part-control {
   background: var(--bg-surface);
-  border-radius: 8px;
-  padding: 0.75rem;
-  margin-bottom: 0.5rem;
+  border-radius: 10px;
+  padding: 0.6rem;
+  margin-bottom: 0.4rem;
   border: 1px solid var(--border-color);
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   cursor: pointer;
 }
 
@@ -281,18 +281,18 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.3rem;
 }
 
 .select-section-btn {
   flex-shrink: 0;
-  padding: 0.22rem 0.42rem;
+  padding: 0.18rem 0.38rem;
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 0.66rem;
+  font-size: 0.62rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -315,7 +315,7 @@ body {
 
 .part-name {
   font-weight: 500;
-  font-size: 0.875rem;
+  font-size: 0.82rem;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -348,8 +348,8 @@ body {
 
 /* Mute button */
 .mute-btn {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: none;
   background: transparent;
@@ -379,7 +379,7 @@ body {
 
 .volume-slider {
   flex: 1;
-  height: 20px;
+  height: 16px;
   -webkit-appearance: none;
   appearance: none;
   background: var(--bg-tertiary);
@@ -390,16 +390,16 @@ body {
 
 .volume-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--accent-primary);
   cursor: pointer;
 }
 
 .volume-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--accent-primary);
   cursor: pointer;
@@ -678,6 +678,9 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
+  background:
+    radial-gradient(circle at 42% 0%, rgba(74, 158, 255, 0.055), transparent 35%),
+    var(--bg-primary);
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE/Edge */
 }
@@ -850,8 +853,9 @@ body {
 
 /* Part selection */
 .part-control.selected-section {
-  border-color: var(--accent-secondary);
-  box-shadow: 0 0 0 1px rgba(123, 47, 247, 0.35);
+  border-color: var(--accent-primary);
+  background: linear-gradient(135deg, rgba(74, 158, 255, 0.18), rgba(30, 42, 74, 0.98));
+  box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.3), 0 8px 18px rgba(0, 0, 0, 0.14);
 }
 
 .my-section-badge {
@@ -912,7 +916,7 @@ body {
 
 .preset-btn {
   width: 100%;
-  padding: 0.5rem 0.75rem;
+  padding: 0.42rem 0.65rem;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-surface);

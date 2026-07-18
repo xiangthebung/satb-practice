@@ -871,10 +871,16 @@ class ChoirPracticeApp {
     this.renderer.setFocusSelectedPart(this.state.focusMyPart);
   }
 
-  /** Keep source names intact while avoiding noisy exporter suffixes in the UI. */
+  /**
+   * Make split voices distinguishable in the sidebar without showing the
+   * parser's long parenthetical suffix on every row.
+   */
   getDisplayPartName(part) {
-    const name = String(part?.name || '').replace(/\s*\(voice\s+\d+\)\s*/i, '').trim();
-    return name || part?.voiceType || 'Part';
+    const name = String(part?.name || '').trim();
+    const voiceSuffix = name.match(/\s*\(voice\s+(\d+)\)\s*$/i);
+    const baseName = voiceSuffix ? name.slice(0, voiceSuffix.index).trim() : name;
+    if (voiceSuffix && baseName) return `${baseName} ${voiceSuffix[1]}`;
+    return baseName || part?.voiceType || 'Part';
   }
 
   renderParts() {

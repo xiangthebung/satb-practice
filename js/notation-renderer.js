@@ -518,7 +518,9 @@ export class NotationRenderer {
     // Layout configuration
     this.config = {
       staffHeight: 60,
-      staffSpacing: 160,
+      // Keep dense SATB scores comfortably scannable without forcing singers
+      // to scroll through large empty bands between adjacent staves.
+      staffSpacing: 124,
       lineSpacing: 12, // pixels between staff lines
       noteWidth: 40, // preferred horizontal space per beat
       minNoteSpacing: 30, // minimum center-to-center gap for distinct onsets
@@ -1310,8 +1312,8 @@ export class NotationRenderer {
       ? options.viewportWidth
       : this.canvas.width;
     ctx.save();
-    ctx.fillStyle = '#8394b8';
-    ctx.font = '600 10px sans-serif';
+    ctx.fillStyle = '#9aabd0';
+    ctx.font = '700 11px sans-serif';
     ctx.textAlign = 'left';
     for (let index = 0; index < this.horizontalLayout.measures.length; index++) {
       const measure = this.horizontalLayout.measures[index];
@@ -1353,9 +1355,15 @@ export class NotationRenderer {
       const dimmed = this.focusSelectedPart && !isSelected;
       const yOffset = this.config.marginTop + index * this.config.staffSpacing;
       ctx.save();
-      if (this.focusSelectedPart && isSelected) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.035)';
+      if (isSelected) {
+        // The selected card in the sidebar should have an equally clear
+        // counterpart on the score, even before Focus my part is enabled.
+        ctx.fillStyle = this.focusSelectedPart
+          ? 'rgba(74, 158, 255, 0.11)'
+          : 'rgba(74, 158, 255, 0.055)';
         ctx.fillRect(marginLeft - 12, yOffset - 22, totalWidth - marginLeft + 24, lineSpacing * 4 + 44);
+        ctx.fillStyle = 'rgba(74, 158, 255, 0.78)';
+        ctx.fillRect(marginLeft - 12, yOffset - 22, 3, lineSpacing * 4 + 44);
       }
       if (dimmed) ctx.globalAlpha = 0.3;
       for (let line = 0; line < 5; line++) {
