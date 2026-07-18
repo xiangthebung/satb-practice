@@ -8,7 +8,17 @@
 </head>
 <body>
   <header class="app-header">
-    <h1 class="app-title" id="app-title" style="cursor: pointer;" title="Back to Home">Choir Practice Tool</h1>
+    <h1 class="app-title">
+      <button id="app-title" class="app-home-link" type="button" title="Return to home" aria-label="Return to Choir Practice Tool home">
+        <svg class="app-home-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 10.8 12 3l9 7.8"/>
+          <path d="M5.5 9.2V21h13V9.2"/>
+          <path d="M9.5 21v-6h5v6"/>
+        </svg>
+        <span>Choir Practice Tool</span>
+        <span class="app-home-label" aria-hidden="true">Home</span>
+      </button>
+    </h1>
     <span id="score-title" class="score-title"></span>
     <span class="app-attribution">by Xiang Li · Created with AI</span>
     <button id="export-btn" class="export-btn" title="Export MusicXML with current settings" style="display:none">
@@ -45,14 +55,22 @@
           </div>
           <div id="sample-pieces-list" class="home-sample-list">
             <button class="sample-piece" type="button" data-sample-path="sample-pieces/Draw On, Sweet Night.musicxml">
+              <span class="sample-piece-art" aria-hidden="true">♪</span>
               <span class="sample-piece-title">Draw on, sweet night</span>
               <span class="sample-piece-meta">John Wilbye</span>
+              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
             </button>
             <button class="sample-piece" type="button" data-sample-path="sample-pieces/Northern lights.musicxml">
+              <span class="sample-piece-art" aria-hidden="true">♫</span>
               <span class="sample-piece-title">Northern lights</span>
+              <span class="sample-piece-meta">Ola Gjeilo</span>
+              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
             </button>
             <button class="sample-piece" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">
+              <span class="sample-piece-art" aria-hidden="true">♩</span>
               <span class="sample-piece-title">Quick! We have but a second</span>
+              <span class="sample-piece-meta">C. V. Stanford</span>
+              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
             </button>
           </div>
         </section>
