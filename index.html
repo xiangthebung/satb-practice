@@ -21,14 +21,24 @@
     </h1>
     <span id="score-title" class="score-title"></span>
     <span class="app-attribution">by Xiang Li · Created with AI</span>
-    <button id="export-btn" class="export-btn" title="Export MusicXML with current settings" style="display:none">
-      <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-        <polyline points="7 10 12 15 17 10"/>
-        <line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-      <span>Export</span>
-    </button>
+    <div class="export-group" id="export-group" style="display:none">
+      <button id="export-btn" class="export-btn" title="Export MusicXML with current settings">
+        <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span>MusicXML</span>
+      </button>
+      <button id="export-audio-btn" class="export-btn export-audio-btn" title="Export audio as WAV with current volume settings">
+        <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 18V5l12-2v13"/>
+          <circle cx="6" cy="18" r="3"/>
+          <circle cx="18" cy="16" r="3"/>
+        </svg>
+        <span class="export-audio-label">Export WAV</span>
+      </button>
+    </div>
   </header>
 
   <main class="app-layout">
@@ -64,6 +74,12 @@
               <span class="sample-piece-art" aria-hidden="true">♫</span>
               <span class="sample-piece-title">Northern lights</span>
               <span class="sample-piece-meta">Ola Gjeilo</span>
+              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
+            </button>
+            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Smavinir fagrir.musicxml">
+              <span class="sample-piece-art" aria-hidden="true">♭</span>
+              <span class="sample-piece-title">Smavinir fagrir</span>
+              <span class="sample-piece-meta">Johannes Björnsson</span>
               <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
             </button>
             <button class="sample-piece" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">

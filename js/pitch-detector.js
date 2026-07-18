@@ -8,6 +8,100 @@ import { frequencyToNote } from './utils.js';
 
 const MIN_PITCH_HZ = 50;
 const MAX_PITCH_HZ = 2000;
+const YIN_THRESHOLD = 0.15;
+
+/** Return the middle value without mutating the caller's array. */
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+/** Calculate the distance between two frequencies in cents. */
+function frequencyDistanceInCents(a, b) {
+  return 1200 * Math.abs(Math.log2(a / b));
+}
+
+/**
+ * Analyse one frame with YIN and keep the periodicity measurement alongside
+ * the estimate. Callers can use this confidence to reject ambiguous frames
+ * instead of treating every local minimum as a note.
+ *
+ * @returns {{ frequency: number, confidence: number, rms: number }|null}
+ */
+export function analysePitchYin(buffer, sampleRate) {
+  const bufferSize = buffer.length;
+  if (!bufferSize || !Number.isFinite(sampleRate) || sampleRate <= 0) return null;
+
+  let mean = 0;
+  let energy = 0;
+  for (let i = 0; i < bufferSize; i++) {
+    mean += buffer[i];
+    energy += buffer[i] * buffer[i];
+  }
+  mean /= bufferSize;
+  const rms = Math.sqrt(energy / bufferSize);
+  if (rms < 0.01) return null;
+
+  const minTau = Math.max(2, Math.floor(sampleRate / MAX_PITCH_HZ));
+  const maxTau = Math.min(
+    Math.floor(bufferSize / 2),
+    Math.floor(sampleRate / MIN_PITCH_HZ)
+  );
+  if (maxTau <= minTau + 2) return null;
+
+  // Give every tested period the same comparison window. The earlier version
+  // compared only half the buffer, which left low voices with very little
+  // periodic evidence and made harmonic/octave choices unstable.
+  const comparisonLength = bufferSize - maxTau;
+  const yinBuffer = new Float32Array(maxTau + 1);
+  for (let tau = 1; tau <= maxTau; tau++) {
+    let sum = 0;
+    for (let i = 0; i < comparisonLength; i++) {
+      const delta = (buffer[i] - mean) - (buffer[i + tau] - mean);
+      sum += delta * delta;
+    }
+    yinBuffer[tau] = sum;
+  }
+
+  let runningSum = 0;
+  yinBuffer[0] = 1;
+  for (let tau = 1; tau <= maxTau; tau++) {
+    runningSum += yinBuffer[tau];
+    yinBuffer[tau] = runningSum > 0
+      ? yinBuffer[tau] * tau / runningSum
+      : 1;
+  }
+
+  let tauEstimate = -1;
+  for (let tau = minTau; tau < maxTau; tau++) {
+    if (yinBuffer[tau] < YIN_THRESHOLD) {
+      while (tau + 1 <= maxTau && yinBuffer[tau + 1] < yinBuffer[tau]) tau++;
+      tauEstimate = tau;
+      break;
+    }
+  }
+
+  // Do not fall back to an arbitrary global minimum. That was the source of
+  // many false notes on breath, room noise, and accompaniment leakage.
+  if (tauEstimate < 0) return null;
+
+  const confidence = Math.max(0, Math.min(1, 1 - yinBuffer[tauEstimate]));
+  if (tauEstimate > minTau && tauEstimate < maxTau) {
+    const s0 = yinBuffer[tauEstimate - 1];
+    const s1 = yinBuffer[tauEstimate];
+    const s2 = yinBuffer[tauEstimate + 1];
+    const denominator = 2 * (2 * s1 - s2 - s0);
+    const adjustment = denominator === 0 ? 0 : (s2 - s0) / denominator;
+    if (Number.isFinite(adjustment) && Math.abs(adjustment) < 1) {
+      tauEstimate += adjustment;
+    }
+  }
+
+  return { frequency: sampleRate / tauEstimate, confidence, rms };
+}
 
 /**
  * Compute the autocorrelation-based pitch using a simplified YIN algorithm.
@@ -16,79 +110,7 @@ const MAX_PITCH_HZ = 2000;
  * @returns {number} detected frequency in Hz, or -1 if no pitch detected
  */
 export function detectPitchAutocorrelation(buffer, sampleRate) {
-  const bufferSize = buffer.length;
-
-  // Check if signal has enough energy (RMS threshold)
-  let rms = 0;
-  for (let i = 0; i < bufferSize; i++) {
-    rms += buffer[i] * buffer[i];
-  }
-  rms = Math.sqrt(rms / bufferSize);
-  if (rms < 0.01) return -1; // Too quiet
-
-  // YIN-style difference function
-  const halfBuffer = Math.floor(bufferSize / 2);
-  const yinBuffer = new Float32Array(halfBuffer);
-
-  // Step 1: Compute the difference function
-  for (let tau = 0; tau < halfBuffer; tau++) {
-    let sum = 0;
-    for (let i = 0; i < halfBuffer; i++) {
-      const delta = buffer[i] - buffer[i + tau];
-      sum += delta * delta;
-    }
-    yinBuffer[tau] = sum;
-  }
-
-  // Step 2: Cumulative mean normalized difference function
-  yinBuffer[0] = 1;
-  let runningSum = 0;
-  for (let tau = 1; tau < halfBuffer; tau++) {
-    runningSum += yinBuffer[tau];
-    yinBuffer[tau] = yinBuffer[tau] * tau / runningSum;
-  }
-
-  // Step 3: Find the first dip below threshold
-  const threshold = 0.2;
-  let tauEstimate = -1;
-  for (let tau = 2; tau < halfBuffer; tau++) {
-    if (yinBuffer[tau] < threshold) {
-      // Find the minimum in this dip
-      while (tau + 1 < halfBuffer && yinBuffer[tau + 1] < yinBuffer[tau]) {
-        tau++;
-      }
-      tauEstimate = tau;
-      break;
-    }
-  }
-
-  if (tauEstimate === -1) {
-    // No pitch found below threshold; try to find global minimum
-    let minVal = Infinity;
-    for (let tau = 2; tau < halfBuffer; tau++) {
-      if (yinBuffer[tau] < minVal) {
-        minVal = yinBuffer[tau];
-        tauEstimate = tau;
-      }
-    }
-
-    // Only accept if reasonably periodic
-    if (minVal > 0.5) return -1;
-  }
-
-  // Step 4: Parabolic interpolation for sub-sample accuracy
-  if (tauEstimate > 0 && tauEstimate < halfBuffer - 1) {
-    const s0 = yinBuffer[tauEstimate - 1];
-    const s1 = yinBuffer[tauEstimate];
-    const s2 = yinBuffer[tauEstimate + 1];
-    const adjustment = (s2 - s0) / (2 * (2 * s1 - s2 - s0));
-
-    if (Math.abs(adjustment) < 1) {
-      tauEstimate = tauEstimate + adjustment;
-    }
-  }
-
-  return sampleRate / tauEstimate;
+  return analysePitchYin(buffer, sampleRate)?.frequency ?? -1;
 }
 
 /**
@@ -129,9 +151,21 @@ export class PitchDetector {
     this.isActive = false;
     this.animationFrame = null;
     this.onPitchDetected = null;
-    this.fftSize = 2048;
-    this.smoothingFactor = 0.8;
+    // A 4096-sample window gives bass voices several full cycles at common
+    // sample rates. Detection is deliberately throttled below display rate;
+    // analysing near-identical frames on every paint adds jitter, not insight.
+    this.fftSize = 4096;
+    this.analysisIntervalMs = 33;
+    this.minimumConfidence = 0.82;
+    this.historySize = 3;
+    this.unvoicedHoldFrames = 4;
+    this.lastAnalysisAt = -Infinity;
     this.lastFrequency = -1;
+    this.smoothedLogFrequency = null;
+    this.logFrequencyHistory = [];
+    this.unvoicedFrames = 0;
+    this.pendingOctaveFrequency = -1;
+    this.pendingOctaveFrames = 0;
 
     // Browser-reported MediaTrack latency is often the requested buffer size,
     // not the complete hardware and capture pipeline. Keep a conservative
@@ -168,7 +202,9 @@ export class PitchDetector {
       this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = this.fftSize;
-      this.analyser.smoothingTimeConstant = this.smoothingFactor;
+      // This setting only affects frequency-domain reads. Pitch estimation
+      // uses time-domain audio, so temporal smoothing happens below instead.
+      this.analyser.smoothingTimeConstant = 0;
 
       const inputTrack = this.mediaStream.getAudioTracks()[0];
       const reportedLatency = Number(inputTrack?.getSettings?.().latency);
@@ -185,6 +221,12 @@ export class PitchDetector {
 
       this.buffer = new Float32Array(this.analyser.fftSize);
       this.lastFrequency = -1;
+      this.smoothedLogFrequency = null;
+      this.logFrequencyHistory = [];
+      this.unvoicedFrames = 0;
+      this.pendingOctaveFrequency = -1;
+      this.pendingOctaveFrames = 0;
+      this.lastAnalysisAt = -Infinity;
       this.processingLatencySeconds = 0;
       this.isActive = true;
       this.detectLoop();
@@ -194,6 +236,48 @@ export class PitchDetector {
       this.stop();
       return false;
     }
+  }
+
+  /**
+   * Reject one-frame octave errors, then smooth accepted frequencies in log
+   * space. Log smoothing corresponds to musical cents rather than raw Hz.
+   * @returns {number|null} a stable frequency, or null while confirming a jump
+   */
+  stabiliseFrequency(frequency) {
+    if (this.lastFrequency > 0 && frequencyDistanceInCents(frequency, this.lastFrequency) > 700) {
+      const matchesPending = this.pendingOctaveFrequency > 0 &&
+        frequencyDistanceInCents(frequency, this.pendingOctaveFrequency) < 100;
+      this.pendingOctaveFrequency = frequency;
+      this.pendingOctaveFrames = matchesPending ? this.pendingOctaveFrames + 1 : 1;
+
+      // A genuine octave change is accepted on its second consecutive frame;
+      // a single harmonic mistake is never shown to the singer.
+      if (this.pendingOctaveFrames < 2) return null;
+      this.logFrequencyHistory = [];
+      this.smoothedLogFrequency = null;
+    }
+
+    this.pendingOctaveFrequency = -1;
+    this.pendingOctaveFrames = 0;
+    this.logFrequencyHistory.push(Math.log(frequency));
+    if (this.logFrequencyHistory.length > this.historySize) {
+      this.logFrequencyHistory.shift();
+    }
+
+    const medianLogFrequency = median(this.logFrequencyHistory);
+    this.smoothedLogFrequency = this.smoothedLogFrequency === null
+      ? medianLogFrequency
+      : this.smoothedLogFrequency + (medianLogFrequency - this.smoothedLogFrequency) * 0.35;
+    this.lastFrequency = Math.exp(this.smoothedLogFrequency);
+    return this.lastFrequency;
+  }
+
+  clearStablePitch() {
+    this.lastFrequency = -1;
+    this.smoothedLogFrequency = null;
+    this.logFrequencyHistory = [];
+    this.pendingOctaveFrequency = -1;
+    this.pendingOctaveFrames = 0;
   }
 
   /**
@@ -229,23 +313,30 @@ export class PitchDetector {
     if (!this.isActive || !this.analyser) return;
 
     const analysisStartedAt = performance.now();
+    if (analysisStartedAt - this.lastAnalysisAt < this.analysisIntervalMs) {
+      this.animationFrame = requestAnimationFrame(() => this.detectLoop());
+      return;
+    }
+    this.lastAnalysisAt = analysisStartedAt;
+
     this.analyser.getFloatTimeDomainData(this.buffer);
-    const frequency = detectPitchAutocorrelation(
+    const estimate = analysePitchYin(
       this.buffer,
       this.audioContext.sampleRate
     );
     const now = performance.now();
 
-    if (frequency > MIN_PITCH_HZ && frequency < MAX_PITCH_HZ) {
-      // Restore the previous detector's temporal smoothing. The raw YIN
-      // estimate varies slightly from frame to frame as the analysis window
-      // moves through the waveform; retaining 30% of the previous estimate
-      // keeps the pitch, cents, trail, and color feedback stable.
-      if (this.lastFrequency > 0) {
-        const smoothed = this.lastFrequency * 0.3 + frequency * 0.7;
-        this.lastFrequency = smoothed;
-      } else {
-        this.lastFrequency = frequency;
+    const hasReliablePitch = estimate &&
+      estimate.frequency > MIN_PITCH_HZ &&
+      estimate.frequency < MAX_PITCH_HZ &&
+      estimate.confidence >= this.minimumConfidence;
+
+    if (hasReliablePitch) {
+      this.unvoicedFrames = 0;
+      const stableFrequency = this.stabiliseFrequency(estimate.frequency);
+      if (stableFrequency === null) {
+        this.animationFrame = requestAnimationFrame(() => this.detectLoop());
+        return;
       }
 
       const noteInfo = frequencyToNote(this.lastFrequency);
@@ -270,11 +361,12 @@ export class PitchDetector {
         });
       }
     } else {
-      // Match the previous detector: an unvoiced frame ends the current trail
-      // segment and allows the next voiced frame to start cleanly.
-      this.lastFrequency = -1;
-      if (this.onPitchDetected) {
-        this.onPitchDetected(null);
+      // Keep a reliable note visible through a small number of unvoiced or
+      // ambiguous frames. A singer's breath should not break the pitch trail.
+      this.unvoicedFrames++;
+      if (this.unvoicedFrames >= this.unvoicedHoldFrames) {
+        this.clearStablePitch();
+        if (this.onPitchDetected) this.onPitchDetected(null);
       }
     }
 

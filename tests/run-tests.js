@@ -21,9 +21,11 @@ import {
 } from '../js/utils.js';
 
 import {
+  analysePitchYin,
   detectPitchAutocorrelation,
   centsDifference,
-  classifyAccuracy
+  classifyAccuracy,
+  PitchDetector
 } from '../js/pitch-detector.js';
 
 import {
@@ -337,6 +339,37 @@ test('autocorrelation detects 220Hz sine wave', () => {
   const detected = detectPitchAutocorrelation(buffer, sampleRate);
   assert(detected > 0, 'Should detect a pitch');
   assert(approxEqual(detected, 220, 5), `Expected ~220Hz, got ${detected}Hz`);
+});
+
+test('YIN reports high confidence for a clean sung-pitch-like tone', () => {
+  const sampleRate = 44100;
+  const buffer = new Float32Array(4096);
+  for (let i = 0; i < buffer.length; i++) {
+    const phase = 2 * Math.PI * 196 * i / sampleRate;
+    buffer[i] = 0.45 * Math.sin(phase) + 0.1 * Math.sin(phase * 2);
+  }
+
+  const result = analysePitchYin(buffer, sampleRate);
+  assert(result, 'Should return an estimate');
+  assert(approxEqual(result.frequency, 196, 3));
+  assert(result.confidence > 0.9, `Expected high confidence, got ${result.confidence}`);
+});
+
+test('YIN rejects deterministic broadband noise', () => {
+  const buffer = new Float32Array(4096);
+  let seed = 123456789;
+  for (let i = 0; i < buffer.length; i++) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    buffer[i] = ((seed / 0x100000000) * 2 - 1) * 0.25;
+  }
+  assert.equal(analysePitchYin(buffer, 44100), null);
+});
+
+test('pitch stabiliser confirms an octave jump before showing it', () => {
+  const detector = new PitchDetector();
+  assert(approxEqual(detector.stabiliseFrequency(220), 220, 0.01));
+  assert.equal(detector.stabiliseFrequency(440), null);
+  assert(approxEqual(detector.stabiliseFrequency(440), 440, 0.01));
 });
 
 test('autocorrelation returns -1 for silence', () => {

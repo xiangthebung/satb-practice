@@ -1538,9 +1538,16 @@ body {
   text-align: right;
 }
 
+/* Export Group */
+.export-group {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 /* Export Button */
 .export-btn {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -1563,6 +1570,12 @@ body {
 
 .export-btn:active {
   transform: scale(0.96);
+}
+
+.export-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
 }
 
 .export-btn .export-icon {

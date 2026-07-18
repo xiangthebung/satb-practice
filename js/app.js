@@ -85,6 +85,8 @@ class ChoirPracticeApp {
     this.seekSlider = document.getElementById('seek-slider');
     this.seekTime = document.getElementById('seek-time');
     this.exportBtn = document.getElementById('export-btn');
+    this.exportAudioBtn = document.getElementById('export-audio-btn');
+    this.exportGroup = document.getElementById('export-group');
   }
 
   /**
@@ -221,9 +223,12 @@ class ChoirPracticeApp {
       this.appTitle.addEventListener('click', () => this.resetToHome());
     }
 
-    // Export button
+    // Export buttons
     if (this.exportBtn) {
       this.exportBtn.addEventListener('click', () => this.exportMusicXML());
+    }
+    if (this.exportAudioBtn) {
+      this.exportAudioBtn.addEventListener('click', () => this.exportWAV());
     }
 
     // Tempo scrubber — velocity-sensitive horizontal drag. Preview changes in
@@ -372,7 +377,10 @@ class ChoirPracticeApp {
         // Update filled track immediately while dragging
         this.seekSlider.style.background =
           `linear-gradient(to right, var(--accent-primary) ${percent}%, var(--bg-tertiary) ${percent}%)`;
-        this.seekToPercent(percent);
+        // When paused, move the sheet to the selected progress position so the
+        // cursor and visible notation stay in sync. Playback will continue to
+        // use its pinned-cursor auto-scroll behavior.
+        this.seekToPercent(percent, { moveSheet: !this.state.isPlaying });
       });
     }
 
@@ -587,8 +595,8 @@ class ChoirPracticeApp {
       if (this.notationArea) {
         this.notationArea.style.display = 'block';
       }
-      if (this.exportBtn) {
-        this.exportBtn.style.display = '';
+      if (this.exportGroup) {
+        this.exportGroup.style.display = '';
       }
 
       this.renderParts();
@@ -721,8 +729,8 @@ class ChoirPracticeApp {
     if (this.pitchIndicator) {
       this.pitchIndicator.style.display = 'none';
     }
-    if (this.exportBtn) {
-      this.exportBtn.style.display = 'none';
+    if (this.exportGroup) {
+      this.exportGroup.style.display = 'none';
     }
   }
 
@@ -1623,13 +1631,14 @@ class ChoirPracticeApp {
   /**
    * Seek to a percentage position in the score.
    * @param {number} percent - 0 to 100
+   * @param {{ moveSheet?: boolean }} options
    */
-  seekToPercent(percent) {
+  seekToPercent(percent, options = {}) {
     if (!this.audioEngine) return;
     const totalBeats = this.audioEngine.getTotalBeats();
     if (totalBeats <= 0) return;
     const targetBeat = (percent / 100) * totalBeats;
-    this.seekToBeat(targetBeat);
+    this.seekToBeat(targetBeat, options);
   }
 
   /**
@@ -1815,6 +1824,58 @@ class ChoirPracticeApp {
   commitActivePartEdit() {
     if (this._activePartEdit) {
       this._activePartEdit.commit();
+    }
+  }
+
+  /**
+   * Render the score with the current volume preset and download as a WAV file.
+   * Shows a progress indicator in the export button while rendering.
+   */
+  async exportWAV() {
+    if (!this.audioEngine || !this.state.parts.length) return;
+
+    // Make sure the engine is initialised (needs an AudioContext for the
+    // soft-clip curve builder even in offline mode).
+    await this.initAudioEngine();
+
+    const exportAudioBtn = document.getElementById('export-audio-btn');
+    if (exportAudioBtn) {
+      exportAudioBtn.disabled = true;
+      exportAudioBtn.querySelector('.export-audio-label').textContent = 'Rendering…';
+    }
+
+    try {
+      // Sync engine state so the offline render uses the latest tempo / parts.
+      this.audioEngine.setTempo(this.state.tempo);
+      this.audioEngine.setParts(this.state.parts);
+
+      const audioBuffer = await this.audioEngine.exportAudio({
+        onProgress: (ratio) => {
+          if (exportAudioBtn) {
+            const pct = Math.round(ratio * 100);
+            exportAudioBtn.querySelector('.export-audio-label').textContent =
+              pct < 100 ? `Rendering ${pct}%` : 'Encoding…';
+          }
+        }
+      });
+
+      const wav = AudioEngine.audioBufferToWav(audioBuffer);
+      const url = URL.createObjectURL(wav);
+      const a = document.createElement('a');
+      a.href = url;
+      const baseName = (this.state.fileName || 'score').replace(/\.(xml|musicxml|mxl)$/i, '');
+      a.download = `${baseName}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      this.showError('Audio export failed: ' + err.message);
+    } finally {
+      if (exportAudioBtn) {
+        exportAudioBtn.disabled = false;
+        exportAudioBtn.querySelector('.export-audio-label').textContent = 'Export WAV';
+      }
     }
   }
 

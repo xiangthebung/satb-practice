@@ -2136,6 +2136,217 @@ export class AudioEngine {
   }
 
   /**
+   * Render the entire score offline and return a stereo AudioBuffer.
+   * Uses the same synthesis code path as live playback — all part volumes,
+   * mute/solo state, panning, EQ, and fermata timing are honoured.
+   *
+   * @param {{ onProgress?: (ratio: number) => void }} [options]
+   * @returns {Promise<AudioBuffer>}
+   */
+  async exportAudio(options = {}) {
+    const { onProgress } = options;
+
+    // Build the note schedule using the live state so preset volumes are baked in.
+    const schedule = this.buildSchedule();
+    schedule.sort((a, b) =>
+      (a.playbackStartBeat ?? a.startBeat) - (b.playbackStartBeat ?? b.startBeat)
+    );
+
+    const totalPlaybackBeats = this.getTotalPlaybackBeats();
+    // Add a short tail so the last note's release fully decays before the file ends.
+    const tailSeconds = 2.5;
+    const totalSeconds = beatToTime(totalPlaybackBeats, this.tempo) + tailSeconds;
+    const sampleRate = 44100;
+
+    const offlineCtx = new OfflineAudioContext(2, Math.ceil(totalSeconds * sampleRate), sampleRate);
+
+    // --- Rebuild the same signal chain on the offline context ---
+
+    const masterGain = offlineCtx.createGain();
+    masterGain.gain.value = 0.7;
+
+    const compressor = offlineCtx.createDynamicsCompressor();
+    compressor.threshold.value = -14;
+    compressor.knee.value = 8;
+    compressor.ratio.value = 4;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.12;
+
+    const limiter = offlineCtx.createWaveShaper();
+    limiter.curve = this.buildSoftClipCurve();
+    limiter.oversample = '4x';
+
+    masterGain.connect(compressor);
+    compressor.connect(limiter);
+    limiter.connect(offlineCtx.destination);
+
+    // Per-part nodes mirroring the live setParts() chain
+    const offlinePartGains = new Map(); // partId -> gainNode on offline ctx
+
+    for (const part of this.parts) {
+      const voiceKey = resolveVoiceKey(part.id, this.parts);
+      const eqSettings = PART_EQ[voiceKey];
+      const panValue = PART_PAN[voiceKey];
+
+      const gainNode = offlineCtx.createGain();
+      // Use the live volume level (honours presets + mute + solo).
+      const anySoloed = Array.from(this.partSoloed.values()).some(v => v);
+      const isMuted   = this.partMuted.get(part.id);
+      const isSoloed  = this.partSoloed.get(part.id);
+      const isAudible = !isMuted && (!anySoloed || isSoloed);
+      const intendedVolume = isAudible
+        ? (this.partVolumeLevels.get(part.id) ?? 0.8)
+        : 0;
+      gainNode.gain.value = intendedVolume;
+
+      const lowShelf = offlineCtx.createBiquadFilter();
+      lowShelf.type = 'lowshelf';
+      lowShelf.frequency.value = eqSettings.lowShelf.frequency;
+      lowShelf.gain.value = eqSettings.lowShelf.gain;
+
+      const highShelf = offlineCtx.createBiquadFilter();
+      highShelf.type = 'highshelf';
+      highShelf.frequency.value = eqSettings.highShelf.frequency;
+      highShelf.gain.value = eqSettings.highShelf.gain;
+
+      const panner = offlineCtx.createStereoPanner();
+      panner.pan.value = panValue;
+
+      gainNode.connect(lowShelf);
+      lowShelf.connect(highShelf);
+      highShelf.connect(panner);
+      panner.connect(masterGain);
+
+      offlinePartGains.set(part.id, gainNode);
+    }
+
+    // --- Offline noise buffer (re-created for the offline context) ---
+    const noiseLength = sampleRate * 2;
+    const noiseBuffer = offlineCtx.createBuffer(1, noiseLength, sampleRate);
+    const noiseData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < noiseLength; i++) noiseData[i] = Math.random() * 2 - 1;
+
+    // --- Schedule all notes ---
+    // We drive the same synthesis functions but with the offline context and
+    // offline part gains. To avoid duplicating hundreds of lines, we temporarily
+    // swap audioContext / partGains / _noiseBuffer, schedule everything, then
+    // restore. This is safe because the offline render is synchronous after
+    // startRendering() — no interleaved live playback can occur.
+    const savedCtx         = this.audioContext;
+    const savedPartGains   = this.partGains;
+    const savedNoiseBuffer = this._noiseBuffer;
+    const savedStartTime   = this.startTime;
+    const savedScheduledNodes = this.scheduledNodes;
+    const savedVocalPhraseNodes = this.vocalPhraseNodes;
+
+    this.audioContext     = offlineCtx;
+    this.partGains        = offlinePartGains;
+    this._noiseBuffer     = noiseBuffer;
+    this.startTime        = 0;           // t=0 on the offline timeline
+    this.scheduledNodes   = [];
+    this.vocalPhraseNodes = new Map();
+
+    const lead = 0.05; // small lead so t=0 notes aren't dropped
+    for (const event of schedule) {
+      const playbackStartBeat = event.playbackStartBeat ?? event.startBeat;
+      const noteStartTime = lead + beatToTime(playbackStartBeat, this.tempo);
+      const playbackDuration = event.playbackDurationBeats ?? event.durationBeats;
+      const baseDuration = beatToTime(playbackDuration, this.tempo);
+      const overlap = event.legatoToNext ? Math.min(0.045, baseDuration * 0.12) : 0;
+      const articulation = {
+        legato: event.legato,
+        legatoFromPrevious: event.legatoFromPrevious,
+        legatoToNext: event.legatoToNext,
+        fermata: !!event.fermata
+      };
+      const timing = {
+        eventIndex: null,
+        playbackStartBeat,
+        playbackEndBeat: playbackStartBeat + playbackDuration,
+        playbackDurationBeats: playbackDuration,
+        legatoToNext: !!event.legatoToNext,
+        vocalPhraseId: event.vocalPhraseId,
+        vocalPhraseStartPlaybackBeat: event.vocalPhraseStartPlaybackBeat,
+        vocalPhraseEndPlaybackBeat: event.vocalPhraseEndPlaybackBeat
+      };
+      this.dispatchNote(event.partId, event.frequency, noteStartTime, baseDuration + overlap, articulation, timing);
+    }
+
+    // Restore live state before awaiting so the UI remains responsive
+    this.audioContext     = savedCtx;
+    this.partGains        = savedPartGains;
+    this._noiseBuffer     = savedNoiseBuffer;
+    this.startTime        = savedStartTime;
+    this.scheduledNodes   = savedScheduledNodes;
+    this.vocalPhraseNodes = savedVocalPhraseNodes;
+
+    // Progress polling — OfflineAudioContext fires oncomplete when done
+    let progressTimer = null;
+    if (onProgress) {
+      progressTimer = setInterval(() => {
+        // currentTime on an offline context advances as it renders
+        const ratio = Math.min(1, offlineCtx.currentTime / totalSeconds);
+        onProgress(ratio);
+      }, 200);
+    }
+
+    const rendered = await offlineCtx.startRendering();
+    if (progressTimer) {
+      clearInterval(progressTimer);
+      if (onProgress) onProgress(1);
+    }
+    return rendered;
+  }
+
+  /**
+   * Encode an AudioBuffer to a WAV Blob (PCM 16-bit stereo).
+   * @param {AudioBuffer} audioBuffer
+   * @returns {Blob}
+   */
+  static audioBufferToWav(audioBuffer) {
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate  = audioBuffer.sampleRate;
+    const numSamples  = audioBuffer.length;
+    const bytesPerSample = 2; // 16-bit PCM
+    const dataLength  = numSamples * numChannels * bytesPerSample;
+    const buffer      = new ArrayBuffer(44 + dataLength);
+    const view        = new DataView(buffer);
+
+    const writeString = (offset, str) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    const writeUint16 = (offset, v) => view.setUint16(offset, v, true);
+    const writeUint32 = (offset, v) => view.setUint32(offset, v, true);
+
+    // RIFF header
+    writeString(0,  'RIFF');
+    writeUint32(4,  36 + dataLength);
+    writeString(8,  'WAVE');
+    writeString(12, 'fmt ');
+    writeUint32(16, 16);                            // chunk size
+    writeUint16(20, 1);                             // PCM format
+    writeUint16(22, numChannels);
+    writeUint32(24, sampleRate);
+    writeUint32(28, sampleRate * numChannels * bytesPerSample); // byte rate
+    writeUint16(32, numChannels * bytesPerSample);  // block align
+    writeUint16(34, 16);                            // bits per sample
+    writeString(36, 'data');
+    writeUint32(40, dataLength);
+
+    // Interleaved PCM samples — clamp and convert float32 → int16
+    let offset = 44;
+    for (let i = 0; i < numSamples; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, audioBuffer.getChannelData(ch)[i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  }
+
+  /**
    * Cleanup and release resources.
    */
   dispose() {

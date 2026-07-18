@@ -891,13 +891,18 @@ export class NotationRenderer {
     let centsFromTarget = null;
     let isRightNote = false;
 
-    // Keep the marker on the pitch actually detected from the microphone.
-    // The score target remains separate and continues to drive cents, accuracy,
-    // and feedback color below.
-
     if (target && Number.isFinite(detectedMidi)) {
       centsFromTarget = Math.round((detectedMidi - target.midi) * 100);
       isRightNote = Math.round(detectedMidi) === target.midi;
+
+      // frequencyToNote always returns sharp spellings (e.g. A# instead of Bb).
+      // When the singer is within a semitone of the written note, borrow the
+      // score's diatonic step so the marker sits on the correct staff line/space
+      // and any flat or unusual accidental is represented faithfully.
+      if (Math.abs(centsFromTarget) <= 100) {
+        step = String(target.note.pitch.step).toUpperCase();
+        octave = Number(target.note.pitch.octave);
+      }
     }
 
     const feedback = getPitchFeedback(centsFromTarget, this.pitchAccuracyState);
