@@ -58,11 +58,18 @@ export class Metronome {
     this.nextScoreBeat = 0;
     this.scoreToPlaybackBeat = beat => beat;
     this.schedulerTimer = null;
+    this.scheduledClicks = new Set();
+    this.visualTimers = new Set();
     this.lookaheadTime = 0.1; // seconds
     this.scheduleIntervalMs = 25; // ms
     this.onBeat = null; // callback(beatNumber, isDownbeat)
     this.tapTimes = [];
     this.maxTapInterval = 2000; // max ms between taps before reset
+    // Measure boundaries from the score: sorted array of score-beat positions
+    // where each measure starts. Used to determine true downbeats (accents)
+    // instead of relying on a simple modulo counter which breaks on pickup
+    // measures and time signature changes.
+    this.measureStartBeats = null;
   }
 
   /**
@@ -80,6 +87,38 @@ export class Metronome {
    */
   setTimeSignature(numerator, denominator) {
     this.timeSignature = { numerator, denominator };
+  }
+
+  /**
+   * Set measure boundary data from the parsed score. This allows the metronome
+   * to accent on actual measure starts rather than using a naive modulo counter.
+   * @param {number[]} startBeats - sorted array of score-beat positions where measures begin
+   */
+  setMeasureStartBeats(startBeats) {
+    this.measureStartBeats = startBeats && startBeats.length > 0 ? startBeats : null;
+  }
+
+  /**
+   * Determine whether the given score beat falls on a measure boundary.
+   * Uses the score's actual measure start positions when available, otherwise
+   * falls back to modulo arithmetic against the time signature.
+   * @param {number} scoreBeat - position in score quarter-note beats
+   * @param {number} clickIndex - sequential click number (fallback for modulo)
+   * @returns {boolean}
+   */
+  isDownbeatAtScoreBeat(scoreBeat, clickIndex) {
+    if (this.measureStartBeats) {
+      const epsilon = 1e-3;
+      for (const start of this.measureStartBeats) {
+        if (start > scoreBeat + epsilon) break;
+        if (Math.abs(start - scoreBeat) < epsilon) return true;
+      }
+      return false;
+    }
+    // Fallback: simple modulo when no score data is available
+    const numerator = Number(this.timeSignature.numerator) || 4;
+    const beatInMeasure = ((clickIndex % numerator) + numerator) % numerator;
+    return beatInMeasure === 0;
   }
 
   /**
@@ -126,6 +165,25 @@ export class Metronome {
       clearInterval(this.schedulerTimer);
       this.schedulerTimer = null;
     }
+
+    for (const timer of this.visualTimers) {
+      clearTimeout(timer);
+    }
+    this.visualTimers.clear();
+
+    // The lookahead scheduler may have queued clicks that have not started yet.
+    // Silence and stop those nodes so restarting at a new tempo cannot play both
+    // the old and new click. Let an already-sounding 60 ms click finish naturally.
+    const now = this.audioContext.currentTime;
+    for (const click of this.scheduledClicks) {
+      if (click.startTime >= now) {
+        try {
+          click.gainNode.gain.cancelScheduledValues(now);
+          click.gainNode.gain.setValueAtTime(0, now);
+          click.oscillator.stop(now);
+        } catch (e) { /* already stopped */ }
+      }
+    }
   }
 
   /** Schedule score-beat clicks, mapping around fermata holds when provided. */
@@ -147,17 +205,32 @@ export class Metronome {
 
         const clickIndex = Math.round(this.nextScoreBeat / scoreBeatStep);
         if (clickTime >= currentTime - 0.01) {
-          const beatInMeasure = ((clickIndex % numerator) + numerator) % numerator;
-          const isDownbeat = beatInMeasure === 0;
+          const isDownbeat = this.isDownbeatAtScoreBeat(this.nextScoreBeat, clickIndex);
           this.scheduleClick(clickTime, isDownbeat);
 
           if (this.onBeat) {
+            // Compute the beat number within the current measure. When measure
+            // boundaries are available, count clicks since the last measure start.
+            // Otherwise fall back to modulo arithmetic.
+            let beatInMeasure;
+            if (this.measureStartBeats) {
+              let measureStart = 0;
+              for (const start of this.measureStartBeats) {
+                if (start > this.nextScoreBeat + 1e-3) break;
+                measureStart = start;
+              }
+              beatInMeasure = Math.round((this.nextScoreBeat - measureStart) / scoreBeatStep);
+            } else {
+              beatInMeasure = ((clickIndex % numerator) + numerator) % numerator;
+            }
             const delay = Math.max(0, (clickTime - currentTime) * 1000);
-            setTimeout(() => {
+            const visualTimer = setTimeout(() => {
+              this.visualTimers.delete(visualTimer);
               if (this.isRunning && this.onBeat) {
                 this.onBeat(beatInMeasure + 1, isDownbeat);
               }
             }, delay);
+            this.visualTimers.add(visualTimer);
           }
         }
 
@@ -198,7 +271,16 @@ export class Metronome {
     oscillator.start(time);
     oscillator.stop(time + 0.06);
 
+    const clickEntry = {
+      oscillator,
+      gainNode,
+      startTime: time,
+      endTime: time + 0.06
+    };
+    this.scheduledClicks.add(clickEntry);
+
     oscillator.onended = () => {
+      this.scheduledClicks.delete(clickEntry);
       try {
         oscillator.disconnect();
         gainNode.disconnect();

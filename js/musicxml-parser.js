@@ -42,21 +42,162 @@ const VOICE_TYPE_PATTERNS = [
 ];
 
 /**
+ * Single-letter abbreviations for the standard choral voices. Used to expand
+ * compound labels such as "S/A", "T/B" or the glued form "SATB".
+ */
+const VOICE_LETTER_TYPES = { S: 'soprano', A: 'alto', T: 'tenor', B: 'bass', M: 'mezzo-soprano' };
+
+/**
+ * Match a name against the known voice-type patterns.
+ * @param {string} name
+ * @returns {string|null} canonical voice type, or null when nothing matches
+ */
+function matchVoiceType(name) {
+  if (!name) return null;
+  for (const { pattern, type } of VOICE_TYPE_PATTERNS) {
+    if (pattern.test(name)) {
+      return type;
+    }
+  }
+  return null;
+}
+
+/**
  * Detect voice type from a part name using heuristics.
  * @param {string} partName - the part name from MusicXML
  * @returns {string} detected voice type or the original name if unknown
  */
 export function detectVoiceType(partName) {
   if (!partName) return 'unknown';
+  // Return the original name lowercase if no pattern matches.
+  return matchVoiceType(partName) || partName.toLowerCase().trim();
+}
 
-  for (const { pattern, type } of VOICE_TYPE_PATTERNS) {
-    if (pattern.test(partName)) {
-      return type;
-    }
+/**
+ * Detect whether a MusicXML part represents a piano or keyboard-piano part.
+ * Explicit instrument metadata takes precedence, while the part name remains
+ * a useful fallback for scores that only label the staff "Piano".
+ *
+ * @param {string} partName
+ * @param {Array<string>} instrumentNames
+ * @param {Array<string>} instrumentSounds
+ * @param {Array<number>} midiPrograms - General MIDI programs, 1-based
+ * @returns {boolean}
+ */
+export function detectPianoPart(
+  partName = '',
+  instrumentNames = [],
+  instrumentSounds = [],
+  midiPrograms = []
+) {
+  const text = [partName, ...instrumentNames, ...instrumentSounds]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/\bpiano\b|pianoforte|keyboard[._\s-]*piano/.test(text)) {
+    return true;
   }
 
-  // Return the original name lowercase if no pattern matches
-  return partName.toLowerCase().trim();
+  // General MIDI programs 1–8 are the acoustic/electric piano family.
+  return midiPrograms.some(program => {
+    const number = Number(program);
+    return Number.isInteger(number) && number >= 1 && number <= 8;
+  });
+}
+
+/**
+ * Expand a possibly-compound part label into an ordered list of voice types.
+ *
+ * Closed/condensed scores name a shared staff for several voices at once, e.g.
+ * "S/A", "T/B", "Sop/Alto", or the glued form "SATB". Each token maps to one
+ * voice, in written (top-to-bottom) order. Tokens that aren't recognizable
+ * voices become null so a voice's position in the list is still preserved.
+ *
+ * @param {string} label
+ * @returns {Array<string|null>}
+ */
+function expandVoiceLabel(label) {
+  if (!label) return [];
+  // Drop any "(Voice N)" tag the voice splitter appends before tokenizing.
+  const base = String(label).replace(/\(\s*voice\s*\d+\s*\)/i, '').trim();
+  const tokens = base.split(/[\/\\+,&·•|\-\s]+/).filter(Boolean);
+  const types = [];
+
+  for (const token of tokens) {
+    const matched = matchVoiceType(token);
+    if (matched) {
+      types.push(matched);
+      continue;
+    }
+    // A glued abbreviation such as "SATB", "SA" or "TB" carries one voice per
+    // letter. Word matches are tried first, so real words like "Bass" never
+    // reach this branch and get mis-split into letters.
+    const letters = token.toUpperCase();
+    if (/^[SATBM]+$/.test(letters)) {
+      for (const letter of letters) types.push(VOICE_LETTER_TYPES[letter]);
+    } else {
+      types.push(null);
+    }
+  }
+  return types;
+}
+
+/**
+ * Resolve the voice type for one split voice of a compound part.
+ * @param {string} baseName - the parent part name, e.g. "S/A"
+ * @param {number} voiceOrdinal - 0-based order of this voice within the part
+ * @returns {string|null} canonical voice type, or null when unresolved
+ */
+function resolveCompoundVoiceType(baseName, voiceOrdinal) {
+  const expanded = expandVoiceLabel(baseName);
+  if (expanded.length === 0) return null;
+  // A single-section label (e.g. "S" split a2) applies to every sub-voice.
+  if (expanded.length === 1) return expanded[0];
+  return expanded[voiceOrdinal] || null;
+}
+
+/**
+ * Extract explicit per-voice display names from a shared MusicXML part name.
+ * Exported names use " / " as the separator. Other common score separators
+ * are accepted for compatibility, while spaces and hyphens remain part of a
+ * name (for example "Mezzo Soprano" and "Mezzo-Soprano").
+ *
+ * @param {string} label
+ * @returns {Array<string>}
+ */
+export function expandCompoundVoiceNames(label) {
+  if (!label) return [];
+  const names = String(label)
+    .split(/\s*(?:\/|\\|\+|&|·|•|\||,)\s*/)
+    .map(name => name.trim())
+    .filter(Boolean);
+  return names.length > 1 ? names : [];
+}
+
+/**
+ * Build the source MusicXML part-name values for the app's logical parts.
+ * Multiple split voices are combined into one explicit compound label.
+ *
+ * @param {Array} parts
+ * @returns {Map<string, string>}
+ */
+export function buildPartNameUpdates(parts = []) {
+  const groupedPartNames = new Map();
+  for (const part of parts) {
+    const xmlId = part.sourcePartId || part.id.replace(/_v\d+$/, '');
+    if (!groupedPartNames.has(xmlId)) groupedPartNames.set(xmlId, []);
+    groupedPartNames.get(xmlId).push({
+      name: String(part.name || '').trim(),
+      voiceNumber: Number(part.voiceNumber) || 1
+    });
+  }
+
+  const updates = new Map();
+  for (const [xmlId, names] of groupedPartNames) {
+    names.sort((a, b) => a.voiceNumber - b.voiceNumber);
+    updates.set(xmlId, names.map(item => item.name).join(' / '));
+  }
+  return updates;
 }
 
 /**
@@ -207,7 +348,8 @@ export function layoutMeasure(events, divisions) {
       type: ev.type,
       dots: ev.dots,
       durationBeats: duration / div,
-      startBeatInMeasure: startDiv / div
+      startBeatInMeasure: startDiv / div,
+      staccato: !!ev.staccato
     };
     if (ev.pitch) note.pitch = { ...ev.pitch };
     if (ev.lyric) note.lyric = { ...ev.lyric };
@@ -395,6 +537,12 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
           }));
         }
 
+        // Preserve staccato so playback can distinguish intentionally detached
+        // notes from ordinary vocal note changes.
+        if (notationsEl.querySelector('articulations > staccato')) {
+          ev.staccato = true;
+        }
+
         const fermataEl = notationsEl.querySelector('fermata');
         if (fermataEl) {
           const type = fermataEl.getAttribute('type') || 'upright';
@@ -450,30 +598,77 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
  */
 function splitByVoice(measures) {
   const voiceMap = new Map();
+  const voices = new Set();
 
   for (const measure of measures) {
-    for (const voice of measure.voices) {
-      if (!voiceMap.has(voice)) {
-        voiceMap.set(voice, []);
-      }
-      const voiceNotes = measure.notes.filter(n => n.voice === voice);
-      voiceMap.get(voice).push({
-        number: measure.number,
-        notes: voiceNotes,
-        divisions: measure.divisions,
-        timeSignature: measure.timeSignature,
-        keySignature: measure.keySignature,
-        tempo: measure.tempo,
-        barlineFermatas: measure.barlineFermatas.map(fermata => ({ ...fermata })),
-        clefs: cloneClefs(measure.clefs),
-        // Preserve absolute timing so every voice stays aligned to the same grid.
-        startBeat: measure.startBeat,
-        beats: measure.beats
-      });
-    }
+    for (const voice of measure.voices) voices.add(voice);
+  }
+
+  // Preserve every measure for every voice, even when that voice is silent in
+  // a measure. This keeps measure ordinals, shared barlines, and audio timing
+  // aligned instead of shifting later measures left for one section.
+  for (const voice of voices) {
+    voiceMap.set(voice, measures.map(measure => ({
+      number: measure.number,
+      notes: measure.notes.filter(note => note.voice === voice),
+      divisions: measure.divisions,
+      timeSignature: measure.timeSignature,
+      keySignature: measure.keySignature,
+      tempo: measure.tempo,
+      barlineFermatas: measure.barlineFermatas.map(fermata => ({ ...fermata })),
+      clefs: cloneClefs(measure.clefs),
+      startBeat: measure.startBeat,
+      beats: measure.beats
+    })));
   }
 
   return voiceMap;
+}
+
+/**
+ * Give corresponding measures one canonical duration and absolute start across
+ * every section. Empty measures fall back to their time signature so notation,
+ * playback scheduling, the cursor, and barlines all advance together.
+ * @param {Array} parts
+ */
+function normalizePartMeasureTimelines(parts) {
+  const measureCount = Math.max(0, ...parts.map(part => part.measures?.length || 0));
+  const sharedDurations = [];
+
+  for (let measureIndex = 0; measureIndex < measureCount; measureIndex++) {
+    let duration = 0;
+    let fallbackDuration = 0;
+    for (const part of parts) {
+      const measure = part.measures?.[measureIndex];
+      if (!measure) continue;
+      duration = Math.max(duration, Number(measure.beats) || 0);
+      for (const note of measure.notes || []) {
+        duration = Math.max(
+          duration,
+          (Number(note.startBeatInMeasure) || 0) + (Number(note.durationBeats) || 0)
+        );
+      }
+      const numerator = Number(measure.timeSignature?.numerator);
+      const denominator = Number(measure.timeSignature?.denominator);
+      if (numerator > 0 && denominator > 0) {
+        fallbackDuration = Math.max(fallbackDuration, numerator * 4 / denominator);
+      }
+    }
+    sharedDurations.push(duration > 0 ? duration : fallbackDuration);
+  }
+
+  for (const part of parts) {
+    let startBeat = 0;
+    for (let measureIndex = 0; measureIndex < measureCount; measureIndex++) {
+      const duration = sharedDurations[measureIndex] || 0;
+      const measure = part.measures?.[measureIndex];
+      if (measure) {
+        measure.startBeat = startBeat;
+        measure.beats = duration;
+      }
+      startBeat += duration;
+    }
+  }
 }
 
 /**
@@ -526,7 +721,24 @@ export function parseMusicXML(xmlString, xmlDoc) {
     const id = sp.getAttribute('id');
     const name = sp.querySelector('part-name')?.textContent || id;
     const abbreviation = sp.querySelector('part-abbreviation')?.textContent || '';
-    partInfo.push({ id, name, abbreviation });
+    const instrumentNames = Array.from(sp.querySelectorAll('instrument-name'))
+      .map(element => element.textContent.trim())
+      .filter(Boolean);
+    const instrumentSounds = Array.from(sp.querySelectorAll('instrument-sound'))
+      .map(element => element.textContent.trim())
+      .filter(Boolean);
+    const midiPrograms = Array.from(sp.querySelectorAll('midi-program'))
+      .map(element => parseInt(element.textContent.trim(), 10))
+      .filter(Number.isInteger);
+    partInfo.push({
+      id,
+      name,
+      abbreviation,
+      instrumentNames,
+      instrumentSounds,
+      midiPrograms,
+      isPiano: detectPianoPart(name, instrumentNames, instrumentSounds, midiPrograms)
+    });
   }
 
   // Parse each part
@@ -572,24 +784,40 @@ export function parseMusicXML(xmlString, xmlDoc) {
     if (allVoices.size > 1) {
       // Split into separate voice parts while retaining each voice's source staff and clef.
       const voiceMap = splitByVoice(measures);
-      for (const [voiceNum, voiceMeasures] of voiceMap) {
-        const subPartName = `${info.name} (Voice ${voiceNum})`;
-        const subVoiceType = detectVoiceType(subPartName);
+      // Order voices by their number so a compound label like "S/A" assigns its
+      // first token to the upper voice, its second to the next, and so on.
+      const voiceEntries = [...voiceMap.entries()].sort((a, b) => a[0] - b[0]);
+      const compoundNames = expandCompoundVoiceNames(info.name);
+      const hasPerVoiceNames = compoundNames.length === voiceEntries.length;
+      voiceEntries.forEach(([voiceNum, voiceMeasures], voiceOrdinal) => {
+        // A shared MusicXML part has only one <part-name>. When that name is a
+        // compound label such as "Soprano / Alto", restore one display name per
+        // logical voice. Otherwise retain the explicit voice-number suffix.
+        const subPartName = hasPerVoiceNames
+          ? compoundNames[voiceOrdinal]
+          : `${info.name} (Voice ${voiceNum})`;
+        const compoundType = resolveCompoundVoiceType(info.name, voiceOrdinal);
+        const subVoiceType = compoundType || detectVoiceType(subPartName);
         const staffNumber = findPrimaryStaff(voiceMeasures);
 
         parts.push({
           id: `${info.id}_v${voiceNum}`,
+          sourcePartId: info.id,
           name: subPartName,
           originalName: info.name,
           abbreviation: info.abbreviation,
-          voiceType: subVoiceType !== subPartName.toLowerCase().trim() ? subVoiceType : voiceType,
+          instrumentNames: [...info.instrumentNames],
+          instrumentSounds: [...info.instrumentSounds],
+          midiPrograms: [...info.midiPrograms],
+          isPiano: info.isPiano,
+          voiceType: subVoiceType,
           voiceNumber: voiceNum,
           staffNumber,
           clef: findClefForStaff(voiceMeasures, staffNumber),
           measures: voiceMeasures,
           isSubPart: true
         });
-      }
+      });
     } else {
       const partMeasures = measures.map(m => ({
         number: m.number,
@@ -607,9 +835,14 @@ export function parseMusicXML(xmlString, xmlDoc) {
 
       parts.push({
         id: info.id,
+        sourcePartId: info.id,
         name: info.name,
         originalName: info.name,
         abbreviation: info.abbreviation,
+        instrumentNames: [...info.instrumentNames],
+        instrumentSounds: [...info.instrumentSounds],
+        midiPrograms: [...info.midiPrograms],
+        isPiano: info.isPiano,
         voiceType,
         voiceNumber: allVoices.values().next().value || 1,
         staffNumber,
@@ -619,6 +852,8 @@ export function parseMusicXML(xmlString, xmlDoc) {
       });
     }
   }
+
+  normalizePartMeasureTimelines(parts);
 
   // Extract global tempo if available
   let globalTempo = 120; // default
@@ -657,5 +892,7 @@ export async function parseFile(file) {
 
   // Parse as plain XML text
   const text = new TextDecoder('utf-8').decode(arrayBuffer);
-  return parseMusicXML(text);
+  const result = parseMusicXML(text);
+  result.rawXml = text;
+  return result;
 }
