@@ -58,6 +58,7 @@ class ChoirPracticeApp {
   initUI() {
     this.fileUploadZone = document.getElementById('file-upload-zone');
     this.fileInput = document.getElementById('file-input');
+    this.samplePiecesList = document.getElementById('sample-pieces-list');
     this.partsList = document.getElementById('parts-list');
     this.notationArea = document.getElementById('notation-area');
     this.tempoDisplay = document.getElementById('tempo-value');
@@ -71,6 +72,9 @@ class ChoirPracticeApp {
     this.scoreTitle = document.getElementById('score-title');
     this.appTitle = document.getElementById('app-title');
     this.micBtn = document.getElementById('mic-btn');
+    this.micPrompt = document.getElementById('mic-prompt');
+    this.micPromptCancel = document.getElementById('mic-prompt-cancel');
+    this.micPromptContinue = document.getElementById('mic-prompt-continue');
     this.pitchIndicator = document.getElementById('pitch-indicator');
     this.ensurePitchGuideUI();
     this.pitchGuidance = document.getElementById('pitch-guidance');
@@ -144,6 +148,15 @@ class ChoirPracticeApp {
       });
     }
 
+    // Bundled sample pieces
+    if (this.samplePiecesList) {
+      this.samplePiecesList.addEventListener('click', (e) => {
+        const sampleButton = e.target.closest('.sample-piece');
+        if (!sampleButton) return;
+        this.handleSamplePiece(sampleButton.dataset.sampleFile, sampleButton);
+      });
+    }
+
     // Drag and drop
     if (this.fileUploadZone) {
       this.fileUploadZone.addEventListener('dragover', (e) => {
@@ -186,6 +199,20 @@ class ChoirPracticeApp {
     }
     if (this.micBtn) {
       this.micBtn.addEventListener('click', () => this.toggleMic());
+    }
+    if (this.micPromptCancel) {
+      this.micPromptCancel.addEventListener('click', () => this.hideMicPrompt());
+    }
+    if (this.micPromptContinue) {
+      this.micPromptContinue.addEventListener('click', () => {
+        this.hideMicPrompt();
+        this.startMicrophone();
+      });
+    }
+    if (this.micPrompt) {
+      this.micPrompt.addEventListener('click', (e) => {
+        if (e.target === this.micPrompt) this.hideMicPrompt();
+      });
     }
 
     // App title click to return to home
@@ -374,6 +401,12 @@ class ChoirPracticeApp {
 
   initKeyboardShortcuts() {
     document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.micPrompt && !this.micPrompt.hidden) {
+        e.preventDefault();
+        this.hideMicPrompt();
+        return;
+      }
+
       // Ignore if typing in a text input or textarea (but allow range sliders)
       if (e.target.tagName === 'TEXTAREA') return;
       if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
@@ -472,6 +505,38 @@ class ChoirPracticeApp {
           }, 100);
         }
       };
+    }
+  }
+
+  /**
+   * Load one of the MusicXML files bundled with the app.
+   * @param {string} fileName
+   * @param {HTMLButtonElement} button
+   */
+  async handleSamplePiece(fileName, button) {
+    if (!fileName) return;
+
+    if (button) {
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+    }
+
+    try {
+      const response = await fetch(`sample-pieces/${encodeURIComponent(fileName)}`);
+      if (!response.ok) {
+        throw new Error(`Could not load sample piece (${response.status}).`);
+      }
+
+      const blob = await response.blob();
+      const file = new File([blob], fileName, { type: 'application/xml' });
+      await this.handleFile(file);
+    } catch (err) {
+      this.showError(err.message);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+      }
     }
   }
 
@@ -1338,14 +1403,47 @@ class ChoirPracticeApp {
   }
 
   /**
-   * Toggle microphone pitch detection.
+   * Open microphone setup guidance before requesting browser permission.
    */
-  async toggleMic() {
+  toggleMic() {
     if (this.state.micActive || this.micStartPending) {
       this.stopMicrophone();
       return;
     }
 
+    this.showMicPrompt();
+  }
+
+  /**
+   * Show the microphone setup guidance dialog.
+   */
+  showMicPrompt() {
+    if (!this.micPrompt) {
+      this.startMicrophone();
+      return;
+    }
+
+    this.micPrompt.hidden = false;
+    this.micPrompt.setAttribute('aria-hidden', 'false');
+    this.micPromptContinue?.focus();
+  }
+
+  /**
+   * Close the microphone setup guidance dialog.
+   */
+  hideMicPrompt() {
+    if (!this.micPrompt || this.micPrompt.hidden) return;
+
+    this.micPrompt.hidden = true;
+    this.micPrompt.setAttribute('aria-hidden', 'true');
+    this.micBtn?.focus();
+  }
+
+  /**
+   * Request microphone access and start pitch detection after the user has
+   * confirmed the headphone guidance.
+   */
+  async startMicrophone() {
     // PitchDetector owns a dedicated input context. Disable the control while
     // permission is pending so repeated clicks cannot create parallel streams.
     const requestGeneration = ++this.micStartGeneration;

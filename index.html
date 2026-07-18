@@ -10,6 +10,7 @@
   <header class="app-header">
     <h1 class="app-title" id="app-title" style="cursor: pointer;" title="Back to Home">Choir Practice Tool</h1>
     <span id="score-title" class="score-title"></span>
+    <span class="app-attribution">by Xiang Li · Created with AI</span>
     <button id="export-btn" class="export-btn" title="Export MusicXML with current settings" style="display:none">
       <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -21,14 +22,34 @@
   </header>
 
   <main class="app-layout">
-    <!-- Sidebar for part controls -->
+    <!-- Sidebar for sample pieces and part controls -->
     <aside class="sidebar" id="sidebar">
-      <div class="sidebar-header">
-        <h2>Parts</h2>
-      </div>
-      <div id="parts-list" class="parts-list">
-        <p class="no-parts-message">Upload a MusicXML file to see parts</p>
-      </div>
+      <section class="sample-pieces-section" aria-labelledby="sample-pieces-title">
+        <div class="sidebar-header">
+          <h2 id="sample-pieces-title">Sample Pieces</h2>
+        </div>
+        <div id="sample-pieces-list" class="sample-pieces-list">
+          <button class="sample-piece" type="button" data-sample-file="Draw On, Sweet Night.musicxml">
+            <span class="sample-piece-title">Draw on, sweet night</span>
+            <span class="sample-piece-meta">John Wilbye</span>
+          </button>
+          <button class="sample-piece" type="button" data-sample-file="Northern lights.musicxml">
+            <span class="sample-piece-title">Northern lights</span>
+          </button>
+          <button class="sample-piece" type="button" data-sample-file="Quick we have but a second.musicxml">
+            <span class="sample-piece-title">Quick we have but a second</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="sidebar-parts" aria-labelledby="parts-title">
+        <div class="sidebar-header">
+          <h2 id="parts-title">Parts</h2>
+        </div>
+        <div id="parts-list" class="parts-list">
+          <p class="no-parts-message">Upload a MusicXML file to see parts</p>
+        </div>
+      </section>
     </aside>
 
     <!-- Main content area -->
@@ -72,6 +93,36 @@
       ></span>
     </section>
   </main>
+
+  <!-- Microphone setup guidance -->
+  <div
+    id="mic-prompt"
+    class="mic-prompt"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="mic-prompt-title"
+    aria-describedby="mic-prompt-description"
+    aria-hidden="true"
+    hidden
+  >
+    <div class="mic-prompt-card" role="document">
+      <div class="mic-prompt-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 18v-3a9 9 0 0 1 18 0v3"/>
+          <path d="M3 17h3v4H3zM18 17h3v4h-3z"/>
+          <path d="M6 21h2a4 4 0 0 0 4-4"/>
+        </svg>
+      </div>
+      <h2 id="mic-prompt-title">Use headphones for microphone practice</h2>
+      <p id="mic-prompt-description">
+        For the best experience and to prevent audio feedback, connect headphones or earphones before turning on the microphone.
+      </p>
+      <div class="mic-prompt-actions">
+        <button id="mic-prompt-cancel" class="mic-prompt-btn secondary" type="button">Not now</button>
+        <button id="mic-prompt-continue" class="mic-prompt-btn primary" type="button">Continue to microphone</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Bottom transport toolbar -->
   <footer class="transport-toolbar">
