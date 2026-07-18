@@ -1455,46 +1455,25 @@ export class AudioEngine {
       : articulation.legatoToNext ? 0.04 : 0.08;
     const release = Math.min(requestedRelease, Math.max(0.01, phraseEndTime - startTime));
     const releaseStart = Math.max(attackEnd, phraseEndTime - release);
-    const accentPeakTime = Math.min(startTime + 0.018, releaseStart - 0.04);
-    const accentEndTime = Math.min(startTime + 0.085, releaseStart - 0.005);
-    const accentGain = node.peakGain * 1.08;
-    const canAccent = isRepeatedPitch &&
-      accentPeakTime > startTime + 0.003 &&
-      accentEndTime > accentPeakTime + 0.008;
+    const dipEndTime = Math.min(startTime + 0.018, releaseStart - 0.035);
+    const recoveryEndTime = Math.min(startTime + 0.065, releaseStart - 0.005);
+    const dipGain = node.peakGain * 0.82;
+    const canDip = isRepeatedPitch &&
+      dipEndTime > startTime + 0.003 &&
+      recoveryEndTime > dipEndTime + 0.008;
 
     gain.cancelScheduledValues(startTime);
     gain.setValueAtTime(currentGain, startTime);
-    if (canAccent) {
-      // This is a brief stress accent, not a re-attack: the voiced tone never
-      // falls below its sustained level and returns smoothly to that level.
-      gain.linearRampToValueAtTime(accentGain, accentPeakTime);
-      gain.linearRampToValueAtTime(node.peakGain, accentEndTime);
+    if (canDip) {
+      // Repeated notes remain one continuous vocal source. This shallow dip
+      // creates a clear boundary without silence, a new attack, or added noise.
+      gain.linearRampToValueAtTime(dipGain, dipEndTime);
+      gain.linearRampToValueAtTime(node.peakGain, recoveryEndTime);
     } else if (attackEnd > startTime + 0.001) {
       gain.linearRampToValueAtTime(node.peakGain, attackEnd);
     }
     gain.setValueAtTime(node.peakGain, releaseStart);
     gain.linearRampToValueAtTime(0, phraseEndTime);
-
-    // Repeated pitches retain the voiced tone and its volume. Pair the smooth
-    // dynamic stress accent above with a stronger breath accent so the listener
-    // perceives a new sung note without hearing a separate attack or a gap.
-    if (isRepeatedPitch && node.noiseGain && node.baseNoiseLevel > 0) {
-      const breathGain = node.noiseGain.gain;
-      const breathReleaseStart = phraseEndTime - Math.min(
-        0.06,
-        Math.max(0.01, (phraseEndTime - startTime) * 0.15)
-      );
-      const accentPeakTime = Math.min(startTime + 0.015, breathReleaseStart - 0.025);
-      const accentEndTime = Math.min(startTime + 0.065, breathReleaseStart - 0.005);
-      if (accentPeakTime > startTime + 0.002 && accentEndTime > accentPeakTime + 0.004) {
-        breathGain.cancelScheduledValues(startTime);
-        breathGain.setValueAtTime(node.baseNoiseLevel, startTime);
-        breathGain.linearRampToValueAtTime(node.baseNoiseLevel * 1.8, accentPeakTime);
-        breathGain.linearRampToValueAtTime(node.baseNoiseLevel, accentEndTime);
-        breathGain.setValueAtTime(node.baseNoiseLevel, breathReleaseStart);
-        breathGain.linearRampToValueAtTime(node.baseNoiseLevel * 2, phraseEndTime);
-      }
-    }
 
     // A resumed phrase can be close to its original stop time. Extend the
     // scheduled source stop when the release was clamped to the safe minimum.
@@ -1521,10 +1500,10 @@ export class AudioEngine {
     node.envelopeStartTime = startTime;
     node.envelopeStartGain = currentGain;
     node.attackEndTime = attackEnd;
-    node.dynamicAccent = canAccent ? {
-      peakTime: accentPeakTime,
-      peakGain: accentGain,
-      endTime: accentEndTime
+    node.repeatedPitchDip = canDip ? {
+      bottomTime: dipEndTime,
+      bottomGain: dipGain,
+      recoveryEndTime
     } : null;
     node.releaseStartTime = releaseStart;
     node.noteEndTime = phraseEndTime;
@@ -1723,8 +1702,6 @@ export class AudioEngine {
       noteGain,
       stopGain,
       vibratoGain,
-      noiseGain,
-      baseNoiseLevel,
       initialFrequency: frequency,
       currentFrequency: frequency,
       vocalTransitions: [],
@@ -1805,17 +1782,18 @@ export class AudioEngine {
     const sustainGain = node.sustainGain;
     const releaseStart = node.releaseStartTime;
     const noteEnd = node.noteEndTime;
-    const dynamicAccent = node.dynamicAccent;
+    const repeatedPitchDip = node.repeatedPitchDip;
 
     if (time <= startTime) return startGain;
-    if (dynamicAccent && time < dynamicAccent.endTime) {
-      if (time < dynamicAccent.peakTime) {
-        const progress = (time - startTime) / (dynamicAccent.peakTime - startTime);
-        return startGain + (dynamicAccent.peakGain - startGain) * progress;
+    if (repeatedPitchDip && time < repeatedPitchDip.recoveryEndTime) {
+      if (time < repeatedPitchDip.bottomTime) {
+        const progress = (time - startTime) / (repeatedPitchDip.bottomTime - startTime);
+        return startGain + (repeatedPitchDip.bottomGain - startGain) * progress;
       }
-      const progress = (time - dynamicAccent.peakTime) /
-        (dynamicAccent.endTime - dynamicAccent.peakTime);
-      return dynamicAccent.peakGain + (sustainGain - dynamicAccent.peakGain) * progress;
+      const progress = (time - repeatedPitchDip.bottomTime) /
+        (repeatedPitchDip.recoveryEndTime - repeatedPitchDip.bottomTime);
+      return repeatedPitchDip.bottomGain +
+        (sustainGain - repeatedPitchDip.bottomGain) * progress;
     }
     if (attackEnd > startTime && time < attackEnd) {
       const progress = (time - startTime) / (attackEnd - startTime);

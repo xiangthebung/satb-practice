@@ -899,13 +899,9 @@ export class NotationRenderer {
     let centsFromTarget = null;
     let isRightNote = false;
 
-    if (target) {
-      // Keep the marker on the written target so harmonic/octave detector errors
-      // cannot move it to another staff position. The detected frequency still
-      // drives cents, accuracy, and the pitch guide below.
-      step = String(target.note.pitch.step).charAt(0).toUpperCase();
-      octave = Number(target.note.pitch.octave);
-    }
+    // Keep the marker on the pitch actually detected from the microphone.
+    // The score target remains separate and continues to drive cents, accuracy,
+    // and feedback color below.
 
     if (target && Number.isFinite(detectedMidi)) {
       centsFromTarget = Math.round((detectedMidi - target.midi) * 100);
