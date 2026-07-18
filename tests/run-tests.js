@@ -41,7 +41,8 @@ import {
 
 import {
   getNoteStaffPosition,
-  getClefForPart
+  getClefForPart,
+  NotationRenderer
 } from '../js/notation-renderer.js';
 
 import {
@@ -636,6 +637,81 @@ test('baritone should use bass clef', () => {
 
 test('Bass 2 should use bass clef', () => {
   assert.equal(getClefForPart('Bass 2'), 'bass');
+});
+
+console.log('');
+
+console.log('Notation Renderer - Pitch Timeline:');
+
+function createPitchTimelineHarness(parts) {
+  return {
+    parts,
+    pitchTimelineByPart: new Map(),
+    findTimelineIndex: NotationRenderer.prototype.findTimelineIndex,
+    findTimelineBoundary: NotationRenderer.prototype.findTimelineBoundary
+  };
+}
+
+test('pitch timeline finds active notes and fermata-held notes', () => {
+  const part = {
+    id: 'P1',
+    measures: [{
+      startBeat: 0,
+      notes: [
+        {
+          isRest: false,
+          pitch: { step: 'C', alter: 0, octave: 4 },
+          durationBeats: 1,
+          startBeatInMeasure: 0,
+          clef: { sign: 'G', line: 2 }
+        },
+        {
+          isRest: false,
+          pitch: { step: 'D', alter: 0, octave: 4 },
+          durationBeats: 1,
+          startBeatInMeasure: 1,
+          fermata: { type: 'upright' },
+          clef: { sign: 'F', line: 4 }
+        }
+      ]
+    }]
+  };
+  const harness = createPitchTimelineHarness([part]);
+  NotationRenderer.prototype.buildPitchTimelines.call(harness);
+
+  const active = NotationRenderer.prototype.findTargetCandidates.call(harness, part, 0.5);
+  const held = NotationRenderer.prototype.findTargetCandidates.call(harness, part, 2, true);
+  const normalFermataBoundary = NotationRenderer.prototype.findTargetCandidates.call(harness, part, 2);
+
+  assert.equal(active.length, 1);
+  assert.equal(active[0].note.pitch.step, 'C');
+  assert.equal(held.length, 1);
+  assert.equal(held[0].note.pitch.step, 'D');
+  assert.equal(normalFermataBoundary.length, 1);
+  assert.equal(normalFermataBoundary[0].note.pitch.step, 'D');
+});
+
+test('pitch timeline resolves the latest clef at the current beat', () => {
+  const part = {
+    id: 'P1',
+    measures: [{
+      startBeat: 0,
+      notes: [
+        { isRest: true, durationBeats: 1, startBeatInMeasure: 0, clef: { sign: 'G', line: 2 } },
+        { isRest: true, durationBeats: 1, startBeatInMeasure: 1, clef: { sign: 'F', line: 4 } }
+      ]
+    }]
+  };
+  const harness = createPitchTimelineHarness([part]);
+  NotationRenderer.prototype.buildPitchTimelines.call(harness);
+  const clef = NotationRenderer.prototype.findClefAtBeat.call(
+    harness,
+    part,
+    1.5,
+    { sign: 'G', line: 2 }
+  );
+  assert.equal(clef.sign, 'F');
+  assert.equal(clef.line, 4);
 });
 
 console.log('');

@@ -539,7 +539,7 @@ export class NotationRenderer {
     this.metadata = null;
     this.horizontalLayout = buildHorizontalScoreLayout([], this.config);
     this.scrollX = 0;
-    this.currentBeat = 0;
+    this.scrollX = 0;
     this.userPitch = null; // { frequency, noteName, octave, cents, accuracy }
     this.currentPitchSample = null;
     this.userPitchTrail = [];
@@ -547,6 +547,19 @@ export class NotationRenderer {
     this.pitchAccuracyState = 'neutral';
     this.selectedPartId = null;
     this.isAutoScrollEnabled = true;
+    this.focusSelectedPart = false;
+    // Pitch feedback runs roughly 30 times per second while the microphone is
+    // active. Keep a compact, score-time index so feedback does not have to
+    // walk every measure and note for every analysis frame.
+    this.pitchTimelineByPart = new Map();
+
+    // The notation itself is unchanged while the transport moves. Cache it in
+    // small horizontal tiles so normal playback only composites the visible
+    // score and draws the live cursor/pitch overlay. Tiles avoid creating one
+    // enormous canvas for long imported scores.
+    this.staticScoreTiles = new Map();
+    this.staticTileAccess = 0;
+    this.renderFrame = null;
   }
 
   /**
@@ -558,12 +571,14 @@ export class NotationRenderer {
     this.parts = Array.isArray(parts) ? parts : [];
     this.metadata = metadata;
     this.horizontalLayout = buildHorizontalScoreLayout(this.parts, this.config);
-    this.scrollX = 0;
+    this.buildPitchTimelines();
+    this.currentBeat = 0;
     this.userPitch = null;
     this.currentPitchSample = null;
     this.userPitchTrail = [];
     this.isPitchContinuous = false;
     this.pitchAccuracyState = 'neutral';
+    this.invalidateStaticScore();
     this.resize();
     this.render();
   }
@@ -576,12 +591,145 @@ export class NotationRenderer {
   resize() {
     if (!this.canvas || !this.canvas.parentElement) return;
     const parent = this.canvas.parentElement;
-    this.canvas.width = parent.clientWidth;
+    const width = parent.clientWidth;
 
     const requiredHeight = this.parts.length > 0
       ? this.config.marginTop + this.parts.length * this.config.staffSpacing + 40
       : parent.clientHeight;
-    this.canvas.height = Math.max(parent.clientHeight, requiredHeight);
+    const height = Math.max(parent.clientHeight, requiredHeight);
+
+    // Changing a canvas dimension clears it, and the static score cache is
+    // sized for that exact viewport height. Avoid doing either during resize
+    // events that do not change the rendered dimensions.
+    if (this.canvas.width === width && this.canvas.height === height) return;
+    this.canvas.width = width;
+    this.canvas.height = height;
+    this.invalidateStaticScore();
+  }
+
+  /** Drop cached score tiles after a score or viewport change. */
+  invalidateStaticScore() {
+    this.staticScoreTiles.clear();
+    this.staticTileAccess = 0;
+  }
+
+  /**
+   * Build lookup data used by live microphone feedback. Each segment contains
+   * precisely the sounding notes between two score-time boundaries; clefs are
+   * stored as a small ordered change list. This turns per-frame feedback from
+   * a complete score scan into two binary searches.
+   */
+  buildPitchTimelines() {
+    this.pitchTimelineByPart.clear();
+
+    for (const part of this.parts) {
+      const boundaries = new Map();
+      const clefChanges = [];
+      const endingNotes = new Map();
+      const fermataEndingNotes = new Map();
+      const addBoundary = (beat) => {
+        if (!boundaries.has(beat)) boundaries.set(beat, { starting: [], ending: [] });
+        return boundaries.get(beat);
+      };
+      const addEndingNote = (collection, beat, candidate) => {
+        const notes = collection.get(beat) || [];
+        notes.push(candidate);
+        collection.set(beat, notes);
+      };
+
+      for (const measure of part.measures || []) {
+        const measureStart = Number(measure.startBeat) || 0;
+        for (const note of measure.notes || []) {
+          const startBeat = measureStart + (Number(note.startBeatInMeasure) || 0);
+          const noteClef = normalizeClef(note.clef);
+          if (noteClef) clefChanges.push({ beat: startBeat, clef: noteClef });
+
+          if (note.isRest || !note.pitch) continue;
+          const duration = Number(note.durationBeats) || 0;
+          if (duration <= 0) continue;
+
+          let midi;
+          try {
+            midi = pitchToMidi(note.pitch.step, note.pitch.alter, note.pitch.octave);
+          } catch {
+            continue;
+          }
+
+          const candidate = { note, midi };
+          const endBeat = startBeat + duration;
+          addBoundary(startBeat).starting.push(candidate);
+          addBoundary(endBeat).ending.push(candidate);
+          addEndingNote(endingNotes, endBeat, candidate);
+          if (note.fermata) addEndingNote(fermataEndingNotes, endBeat, candidate);
+        }
+      }
+
+      const beats = [...boundaries.keys()].sort((left, right) => left - right);
+      const segments = [];
+      const active = new Set();
+      for (let index = 0; index < beats.length; index++) {
+        const beat = beats[index];
+        const boundary = boundaries.get(beat);
+        for (const candidate of boundary.ending) active.delete(candidate);
+        for (const candidate of boundary.starting) active.add(candidate);
+        const nextBeat = beats[index + 1];
+        if (nextBeat !== undefined && nextBeat > beat) {
+          segments.push({ startBeat: beat, endBeat: nextBeat, candidates: [...active] });
+        }
+      }
+
+      // When multiple notes introduce a clef at the same beat, the final
+      // source-order value is the one the renderer historically used.
+      clefChanges.sort((left, right) => left.beat - right.beat);
+      this.pitchTimelineByPart.set(part.id, {
+        segments,
+        segmentStarts: segments.map(segment => segment.startBeat),
+        clefChanges,
+        clefStarts: clefChanges.map(change => change.beat),
+        endingNotes,
+        endingBeats: [...endingNotes.keys()].sort((left, right) => left - right),
+        fermataEndingNotes,
+        fermataEndingBeats: [...fermataEndingNotes.keys()].sort((left, right) => left - right)
+      });
+    }
+  }
+
+  /** Return the last index whose ordered value is at or before target. */
+  findTimelineIndex(values, target) {
+    let low = 0;
+    let high = values.length - 1;
+    let result = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (values[middle] <= target + 1e-6) {
+        result = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return result;
+  }
+
+  /** Find an end-boundary collection, allowing for harmless float drift. */
+  findTimelineBoundary(timeline, beatsKey, collectionKey, beat) {
+    const beats = timeline?.[beatsKey] || [];
+    const index = this.findTimelineIndex(beats, beat);
+    if (index < 0 || Math.abs(beats[index] - beat) > 1e-6) return [];
+    return timeline[collectionKey].get(beats[index]) || [];
+  }
+
+  /** Schedule at most one paint for a burst of transport and mic updates. */
+  requestRender() {
+    if (this.renderFrame !== null) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      this.render();
+      return;
+    }
+    this.renderFrame = requestAnimationFrame(() => {
+      this.renderFrame = null;
+      this.render();
+    });
   }
 
   /**
@@ -596,7 +744,43 @@ export class NotationRenderer {
     if (options.autoScroll !== false && this.isAutoScrollEnabled) {
       this.autoScroll();
     }
-    this.render();
+    this.requestRender();
+  }
+
+  /** Move the viewport directly, for editor-style drag panning. */
+  setScrollX(scrollX) {
+    const scoreLeft = this.config.marginLeft + this.config.clefWidth;
+    const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
+    const maxScroll = Math.max(0, contentWidth - this.canvas.width);
+    const nextScroll = Math.max(0, Math.min(maxScroll, Number(scrollX) || 0));
+    if (Math.abs(nextScroll - this.scrollX) < 0.01) return;
+    this.scrollX = nextScroll;
+    this.requestRender();
+  }
+
+  /** Emphasize the selected part while leaving an all-parts view available. */
+  setFocusSelectedPart(enabled) {
+    const nextValue = !!enabled;
+    if (nextValue === this.focusSelectedPart) return;
+    this.focusSelectedPart = nextValue;
+    this.invalidateStaticScore();
+    this.requestRender();
+  }
+
+  /** Return friendly playback context for the transport, if score data exists. */
+  getMeasureContext(beat) {
+    const measures = this.horizontalLayout?.measures || [];
+    const target = Math.max(0, Number(beat) || 0);
+    for (let index = measures.length - 1; index >= 0; index--) {
+      const measure = measures[index];
+      if (target >= measure.startBeat - 1e-6) {
+        return {
+          number: measure.number || index + 1,
+          beat: Math.max(1, Math.floor(target - measure.startBeat) + 1)
+        };
+      }
+    }
+    return null;
   }
 
   /**
@@ -629,6 +813,30 @@ export class NotationRenderer {
       }
     }
     return nearest.beat;
+  }
+
+  /**
+   * Map a score-space x coordinate back to a continuous beat for timeline
+   * scrubbing. Unlike click selection, this intentionally permits positions
+   * between note onsets so the score can glide beneath the fixed playhead.
+   */
+  getBeatAtScoreX(scoreX) {
+    const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
+    const targetX = Math.max(0, Number(scoreX) - scoreOrigin);
+    const anchors = this.horizontalLayout?.timelineAnchors || [];
+    if (anchors.length === 0) return 0;
+    if (targetX <= anchors[0].x) return anchors[0].beat;
+
+    for (let index = 1; index < anchors.length; index++) {
+      const right = anchors[index];
+      if (targetX > right.x) continue;
+      const left = anchors[index - 1];
+      const span = right.x - left.x;
+      if (span <= 0) return right.beat;
+      const progress = (targetX - left.x) / span;
+      return left.beat + (right.beat - left.beat) * progress;
+    }
+    return this.horizontalLayout.totalBeats;
   }
 
   /**
@@ -672,7 +880,7 @@ export class NotationRenderer {
       this.currentPitchSample = null;
       this.isPitchContinuous = false;
       this.pitchAccuracyState = 'neutral';
-      this.render();
+      this.requestRender();
       return null;
     }
 
@@ -689,7 +897,7 @@ export class NotationRenderer {
     // A valid smoothed detector frame advances the marker immediately; the
     // detector has already rejected silence and out-of-range measurements.
     if (!selectedPitchData) {
-      this.render();
+      this.requestRender();
       return this.currentPitchSample;
     }
 
@@ -699,7 +907,7 @@ export class NotationRenderer {
     });
     this.currentPitchSample = sample;
     if (sample) this.recordUserPitchPosition(sample);
-    this.render();
+    this.requestRender();
     return sample;
   }
 
@@ -730,8 +938,9 @@ export class NotationRenderer {
       this.selectedPartId = partId;
       this.clearUserPitchTrail();
       this.currentPitchSample = null;
+      if (this.focusSelectedPart) this.invalidateStaticScore();
     }
-    this.render();
+    this.requestRender();
   }
 
   /**
@@ -763,50 +972,25 @@ export class NotationRenderer {
    * @returns {Array<{ note: object, midi: number }>}
    */
   findTargetCandidates(part, beat, isFermataHold = false) {
-    const activeCandidates = [];
-    const heldFermataCandidates = [];
-    const boundaryHeldCandidates = [];
-    const boundaryTolerance = 1e-6;
+    const timeline = this.pitchTimelineByPart.get(part?.id);
+    if (!timeline) return [];
 
-    for (const measure of part.measures || []) {
-      const measureStart = Number(measure.startBeat) || 0;
-      for (const note of measure.notes || []) {
-        if (note.isRest || !note.pitch) continue;
-        const startBeat = measureStart + (Number(note.startBeatInMeasure) || 0);
-        const duration = Number(note.durationBeats) || 0;
-        if (duration <= 0) continue;
+    const boundaryHeldCandidates = this.findTimelineBoundary(
+      timeline, 'endingBeats', 'endingNotes', beat
+    );
+    if (isFermataHold) return boundaryHeldCandidates;
 
-        let candidate;
-        try {
-          candidate = {
-            note,
-            midi: pitchToMidi(note.pitch.step, note.pitch.alter, note.pitch.octave)
-          };
-        } catch {
-          // Ignore malformed imported pitches; the live indicator can still use
-          // the clef active at this beat and neutral feedback.
-          continue;
-        }
+    const heldFermataCandidates = this.findTimelineBoundary(
+      timeline, 'fermataEndingBeats', 'fermataEndingNotes', beat
+    );
+    if (heldFermataCandidates.length) return heldFermataCandidates;
 
-        const endBeat = startBeat + duration;
-        if (isFermataHold && Math.abs(beat - endBeat) <= boundaryTolerance) {
-          boundaryHeldCandidates.push(candidate);
-        }
-        if (note.fermata && Math.abs(beat - endBeat) <= boundaryTolerance) {
-          heldFermataCandidates.push(candidate);
-        } else if (beat >= startBeat && beat < endBeat) {
-          activeCandidates.push(candidate);
-        }
-      }
-    }
-
-    // During an expanded hold, notes ending at this boundary are still sounding;
-    // do not grade against a following note whose notated start is identical.
-    return isFermataHold
-      ? boundaryHeldCandidates
-      : heldFermataCandidates.length
-        ? heldFermataCandidates
-        : activeCandidates;
+    const segmentIndex = this.findTimelineIndex(timeline.segmentStarts, beat);
+    if (segmentIndex < 0) return [];
+    const segment = timeline.segments[segmentIndex];
+    return beat >= segment.startBeat && beat < segment.endBeat
+      ? segment.candidates
+      : [];
   }
 
   /**
@@ -838,24 +1022,10 @@ export class NotationRenderer {
    * @returns {object}
    */
   findClefAtBeat(part, beat, fallbackClef) {
-    let activeClef = fallbackClef;
-    let latestStartBeat = -Infinity;
-
-    for (const measure of part.measures || []) {
-      const measureStart = Number(measure.startBeat) || 0;
-      for (const note of measure.notes || []) {
-        const noteClef = normalizeClef(note.clef);
-        if (!noteClef) continue;
-
-        const startBeat = measureStart + (Number(note.startBeatInMeasure) || 0);
-        if (startBeat <= beat && startBeat >= latestStartBeat) {
-          activeClef = noteClef;
-          latestStartBeat = startBeat;
-        }
-      }
-    }
-
-    return activeClef;
+    const timeline = this.pitchTimelineByPart.get(part?.id);
+    if (!timeline) return fallbackClef;
+    const changeIndex = this.findTimelineIndex(timeline.clefStarts, beat);
+    return changeIndex >= 0 ? timeline.clefChanges[changeIndex].clef : fallbackClef;
   }
 
   /**
@@ -988,6 +1158,12 @@ export class NotationRenderer {
   render() {
     if (!this.ctx || !this.canvas) return;
 
+    // A direct render supersedes a queued transport or microphone update.
+    if (this.renderFrame !== null) {
+      cancelAnimationFrame(this.renderFrame);
+      this.renderFrame = null;
+    }
+
     const ctx = this.ctx;
     const { width, height } = this.canvas;
 
@@ -1003,15 +1179,27 @@ export class NotationRenderer {
       return;
     }
 
+    // The score body is expensive to lay out and does not change while the
+    // current beat changes. Composite its cached tiles, then paint only the
+    // elements that are genuinely dynamic.
+    // Staff lines and clefs intentionally remain fixed in the left gutter as
+    // notes scroll beneath them. They are cheap to draw, so keep that small
+    // layer live and cache only the scrolling notation.
+    this.drawPartScaffolds(ctx);
+    const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
     ctx.save();
-    ctx.translate(-this.scrollX, 0);
+    ctx.beginPath();
+    ctx.rect(scoreOrigin, 0, Math.max(0, width - scoreOrigin), height);
+    ctx.clip();
+    this.drawStaticScore(ctx);
+    ctx.restore();
+    this.drawPartNames(ctx);
 
-    // Draw each part's staff
-    for (let i = 0; i < this.parts.length; i++) {
-      const part = this.parts[i];
-      const yOffset = this.config.marginTop + i * this.config.staffSpacing;
-      this.drawPartStaff(ctx, part, yOffset, i);
-    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(scoreOrigin, 0, Math.max(0, width - scoreOrigin), height);
+    ctx.clip();
+    ctx.translate(-this.scrollX, 0);
 
     // Draw the recent sung-pitch trail underneath the live cursor/marker.
     if (this.userPitchTrail.length > 0) {
@@ -1029,6 +1217,164 @@ export class NotationRenderer {
     ctx.restore();
   }
 
+  /** Return the horizontal span required by the cached score tiles. */
+  getStaticScoreWidth() {
+    const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
+    const scoreWidth = scoreOrigin + this.horizontalLayout.totalWidth + this.config.marginRight;
+    return Math.max(1, Math.ceil(Math.max(this.canvas.width, scoreWidth)));
+  }
+
+  /**
+   * Return one lazily-built score tile. Keeping a small LRU cache prevents a
+   * lengthy imported score from allocating a single oversized canvas.
+   */
+  getStaticScoreTile(tileIndex) {
+    const tileWidth = 2048;
+    const contentWidth = this.getStaticScoreWidth();
+    const tileStart = tileIndex * tileWidth;
+    if (tileStart >= contentWidth) return null;
+
+    const cached = this.staticScoreTiles.get(tileIndex);
+    if (cached) {
+      cached.lastUsed = ++this.staticTileAccess;
+      return cached.canvas;
+    }
+
+    const tile = document.createElement('canvas');
+    tile.width = Math.min(tileWidth, contentWidth - tileStart);
+    tile.height = this.canvas.height;
+    const tileCtx = tile.getContext('2d');
+    if (!tileCtx) return null;
+
+    tileCtx.save();
+    tileCtx.translate(-tileStart, 0);
+    for (let i = 0; i < this.parts.length; i++) {
+      const yOffset = this.config.marginTop + i * this.config.staffSpacing;
+      this.drawPartStaff(tileCtx, this.parts[i], yOffset, i, {
+        includePartName: false,
+        includeScaffold: false,
+        scrollX: tileStart,
+        viewportWidth: tile.width,
+        staticViewport: true
+      });
+    }
+    this.drawMeasureNumbers(tileCtx, {
+      scrollX: tileStart,
+      viewportWidth: tile.width
+    });
+    tileCtx.restore();
+
+    this.staticScoreTiles.set(tileIndex, {
+      canvas: tile,
+      lastUsed: ++this.staticTileAccess
+    });
+
+    // Six 2048px tiles cover several desktop viewports without allowing a
+    // single unusually long score to accumulate unbounded image memory.
+    const maxTiles = 6;
+    if (this.staticScoreTiles.size > maxTiles) {
+      let oldestIndex = null;
+      let oldestAccess = Infinity;
+      for (const [index, entry] of this.staticScoreTiles) {
+        if (entry.lastUsed < oldestAccess) {
+          oldestIndex = index;
+          oldestAccess = entry.lastUsed;
+        }
+      }
+      if (oldestIndex !== null) this.staticScoreTiles.delete(oldestIndex);
+    }
+
+    return tile;
+  }
+
+  /** Composite just the score tiles visible in the current canvas viewport. */
+  drawStaticScore(ctx) {
+    const tileWidth = 2048;
+    const contentWidth = this.getStaticScoreWidth();
+    const firstTile = Math.floor(Math.max(0, this.scrollX) / tileWidth);
+    const finalX = Math.min(contentWidth - 1, this.scrollX + this.canvas.width - 1);
+    const lastTile = Math.floor(Math.max(0, finalX) / tileWidth);
+
+    for (let tileIndex = firstTile; tileIndex <= lastTile; tileIndex++) {
+      const tile = this.getStaticScoreTile(tileIndex);
+      if (tile) ctx.drawImage(tile, tileIndex * tileWidth - this.scrollX, 0);
+    }
+  }
+
+  /** Draw compact measure labels once in the score layer for rehearsal context. */
+  drawMeasureNumbers(ctx, options = {}) {
+    const { marginLeft, clefWidth, marginTop } = this.config;
+    const scoreOrigin = marginLeft + clefWidth;
+    const viewportScrollX = Number.isFinite(options.scrollX) ? options.scrollX : this.scrollX;
+    const viewportWidth = Number.isFinite(options.viewportWidth)
+      ? options.viewportWidth
+      : this.canvas.width;
+    ctx.save();
+    ctx.fillStyle = '#8394b8';
+    ctx.font = '600 10px sans-serif';
+    ctx.textAlign = 'left';
+    for (let index = 0; index < this.horizontalLayout.measures.length; index++) {
+      const measure = this.horizontalLayout.measures[index];
+      const x = scoreOrigin + measure.startX + 4;
+      const screenX = x - viewportScrollX;
+      if (screenX < scoreOrigin || screenX > viewportWidth) continue;
+      ctx.fillText(`M. ${measure.number || index + 1}`, x, Math.max(16, marginTop - 18));
+    }
+    ctx.restore();
+  }
+
+  /** Draw part labels in the fixed left gutter above the cached score body. */
+  drawPartNames(ctx) {
+    const { lineSpacing, marginLeft } = this.config;
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    for (let i = 0; i < this.parts.length; i++) {
+      const dimmed = this.focusSelectedPart && this.parts[i].id !== this.selectedPartId;
+      ctx.save();
+      if (dimmed) ctx.globalAlpha = 0.3;
+      const yOffset = this.config.marginTop + i * this.config.staffSpacing;
+      ctx.fillStyle = getPartColor(this.parts[i].voiceType);
+      ctx.fillText(this.parts[i].name, marginLeft - 70, yOffset + lineSpacing * 2 + 4);
+      ctx.restore();
+    }
+  }
+
+  /** Draw the fixed staff lines and clef gutter above the cached note tiles. */
+  drawPartScaffolds(ctx) {
+    const { lineSpacing, marginLeft, marginRight, clefWidth, measureBarWidth } = this.config;
+    const scoreOrigin = marginLeft + clefWidth;
+    const contentEnd = scoreOrigin + this.horizontalLayout.totalWidth + marginRight;
+    const totalWidth = Math.max(this.canvas.width, contentEnd - this.scrollX);
+
+    ctx.strokeStyle = '#3a4a6a';
+    ctx.lineWidth = 1;
+    for (let index = 0; index < this.parts.length; index++) {
+      const isSelected = this.parts[index].id === this.selectedPartId;
+      const dimmed = this.focusSelectedPart && !isSelected;
+      const yOffset = this.config.marginTop + index * this.config.staffSpacing;
+      ctx.save();
+      if (this.focusSelectedPart && isSelected) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.035)';
+        ctx.fillRect(marginLeft - 12, yOffset - 22, totalWidth - marginLeft + 24, lineSpacing * 4 + 44);
+      }
+      if (dimmed) ctx.globalAlpha = 0.3;
+      for (let line = 0; line < 5; line++) {
+        const y = yOffset + line * lineSpacing;
+        ctx.beginPath();
+        ctx.moveTo(marginLeft, y);
+        ctx.lineTo(totalWidth, y);
+        ctx.stroke();
+      }
+      this.drawClef(
+        ctx,
+        getClefDescriptorForPart(this.parts[index], index, this.parts.length),
+        marginLeft + 10,
+        yOffset
+      );
+      ctx.restore();
+    }
+  }
+
   /**
    * Draw a single part's staff with notes.
    * @param {CanvasRenderingContext2D} ctx
@@ -1036,34 +1382,55 @@ export class NotationRenderer {
    * @param {number} yOffset - vertical position of the staff top
    * @param {number} partIndex - section index, used for SATB clef fallback
    */
-  drawPartStaff(ctx, part, yOffset, partIndex = 0) {
+  drawPartStaff(ctx, part, yOffset, partIndex = 0, options = {}) {
     const { lineSpacing, marginLeft, marginRight, clefWidth, measureBarWidth } = this.config;
     const color = getPartColor(part.voiceType);
     const clef = getClefDescriptorForPart(part, partIndex, this.parts.length);
     const scoreOrigin = marginLeft + clefWidth;
-
-    // Draw part name
-    ctx.fillStyle = color;
-    ctx.font = 'bold 12px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(part.name, marginLeft - 70 + this.scrollX, yOffset + lineSpacing * 2 + 4);
-
-    // Draw 5 staff lines across the full shared score width. The viewport-sized
-    // fallback keeps lines continuous when the score is shorter than the canvas.
-    ctx.strokeStyle = '#3a4a6a';
-    ctx.lineWidth = 1;
-    const contentEnd = scoreOrigin + this.horizontalLayout.totalWidth + marginRight;
-    const totalWidth = Math.max(this.canvas.width + this.scrollX, contentEnd);
-    for (let line = 0; line < 5; line++) {
-      const y = yOffset + line * lineSpacing;
-      ctx.beginPath();
-      ctx.moveTo(marginLeft + this.scrollX, y);
-      ctx.lineTo(totalWidth, y);
-      ctx.stroke();
+    const viewportScrollX = Number.isFinite(options.scrollX) ? options.scrollX : this.scrollX;
+    const viewportWidth = Number.isFinite(options.viewportWidth)
+      ? options.viewportWidth
+      : this.canvas.width;
+    const staticViewport = options.staticViewport === true;
+    const dimmed = this.focusSelectedPart && part.id !== this.selectedPartId;
+    if (dimmed) {
+      ctx.save();
+      ctx.globalAlpha = 0.3;
     }
 
-    // Draw the score's clef (or the SATB fallback) at the start of the staff.
-    this.drawClef(ctx, clef, marginLeft + 10 + this.scrollX, yOffset);
+    // Draw part name
+    if (options.includePartName !== false) {
+      ctx.fillStyle = color;
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        part.name,
+        marginLeft - 70 + (staticViewport ? 0 : viewportScrollX),
+        yOffset + lineSpacing * 2 + 4
+      );
+    }
+
+    if (options.includeScaffold !== false) {
+      // Draw 5 staff lines across the full shared score width. The viewport-sized
+      // fallback keeps lines continuous when the score is shorter than the canvas.
+      ctx.strokeStyle = '#3a4a6a';
+      ctx.lineWidth = 1;
+      const contentEnd = scoreOrigin + this.horizontalLayout.totalWidth + marginRight;
+      const totalWidth = Math.max(
+        viewportWidth + (staticViewport ? 0 : viewportScrollX),
+        contentEnd
+      );
+      for (let line = 0; line < 5; line++) {
+        const y = yOffset + line * lineSpacing;
+        ctx.beginPath();
+        ctx.moveTo(marginLeft + (staticViewport ? 0 : viewportScrollX), y);
+        ctx.lineTo(totalWidth, y);
+        ctx.stroke();
+      }
+
+      // Draw the score's clef (or the SATB fallback) at the start of the staff.
+      this.drawClef(ctx, clef, marginLeft + 10 + (staticViewport ? 0 : viewportScrollX), yOffset);
+    }
 
     // Every staff uses the same measure boundaries, including sections with an
     // empty or omitted source measure. This keeps all barlines vertically aligned.
@@ -1098,8 +1465,8 @@ export class NotationRenderer {
         const localBeat = Number(note.startBeatInMeasure) || 0;
         const absoluteBeat = measureLayout.startBeat + localBeat;
         const x = scoreOrigin + this.horizontalLayout.getNoteX(measure, mIdx, localBeat, note);
-        const screenX = x - this.scrollX;
-        const visible = screenX >= scoreOrigin && screenX <= this.canvas.width + 40;
+        const screenX = x - viewportScrollX;
+        const visible = screenX >= scoreOrigin && screenX <= viewportWidth + 40;
         const noteClef = normalizeClef(note.clef) || clef;
         let y = yOffset + lineSpacing * 2;
         if (!note.isRest && note.pitch) {
@@ -1123,11 +1490,11 @@ export class NotationRenderer {
         const x = scoreOrigin + (fermata.location === 'left'
           ? measureLayout.startX
           : measureLayout.endX);
-        const screenX = x - this.scrollX;
+        const screenX = x - viewportScrollX;
         barlineLayouts.push({
           fermata,
           x,
-          visible: screenX >= scoreOrigin && screenX <= this.canvas.width + 40
+          visible: screenX >= scoreOrigin && screenX <= viewportWidth + 40
         });
       }
     }
@@ -1170,6 +1537,7 @@ export class NotationRenderer {
     for (const boundary of barlineLayouts) {
       if (boundary.visible) this.drawBarlineFermata(ctx, boundary, yOffset, color);
     }
+    if (dimmed) ctx.restore();
   }
 
   /** Prepare explicit MusicXML beam groups and shared stem geometry. */

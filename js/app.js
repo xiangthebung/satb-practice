@@ -36,7 +36,8 @@ class ChoirPracticeApp {
       othersVolume: 30,
       fermataMultiplier: 2.0,
       synthMode: 'vocal',
-      repeatActive: false
+      repeatActive: false,
+      focusMyPart: false
     };
 
     this.renderer = null;
@@ -49,6 +50,8 @@ class ChoirPracticeApp {
     this.fileLoadGeneration = 0;
     this.micStartPending = false;
     this.pitchAnnouncementTimer = null;
+    this.resizeFrame = null;
+    this.lastTransportUiUpdateAt = -Infinity;
 
     this.initUI();
     this.initEventListeners();
@@ -73,9 +76,11 @@ class ChoirPracticeApp {
     this.scoreTitle = document.getElementById('score-title');
     this.appTitle = document.getElementById('app-title');
     this.micBtn = document.getElementById('mic-btn');
+    this.micStatus = document.getElementById('mic-status');
     this.micPrompt = document.getElementById('mic-prompt');
     this.micPromptCancel = document.getElementById('mic-prompt-cancel');
     this.micPromptContinue = document.getElementById('mic-prompt-continue');
+    this.micPromptDontShow = document.getElementById('mic-prompt-dont-show');
     this.pitchIndicator = document.getElementById('pitch-indicator');
     this.ensurePitchGuideUI();
     this.pitchGuidance = document.getElementById('pitch-guidance');
@@ -87,6 +92,8 @@ class ChoirPracticeApp {
     this.exportBtn = document.getElementById('export-btn');
     this.exportAudioBtn = document.getElementById('export-audio-btn');
     this.exportGroup = document.getElementById('export-group');
+    this.focusPartBtn = document.getElementById('focus-part-btn');
+    if (this.focusPartBtn) this.focusPartBtn.disabled = true;
   }
 
   /**
@@ -203,11 +210,18 @@ class ChoirPracticeApp {
     if (this.micBtn) {
       this.micBtn.addEventListener('click', () => this.toggleMic());
     }
+    if (this.micStatus) this.micStatus.textContent = 'Mic off';
+    if (this.focusPartBtn) {
+      this.focusPartBtn.addEventListener('click', () => this.togglePartFocus());
+    }
     if (this.micPromptCancel) {
       this.micPromptCancel.addEventListener('click', () => this.hideMicPrompt());
     }
     if (this.micPromptContinue) {
       this.micPromptContinue.addEventListener('click', () => {
+        if (this.micPromptDontShow?.checked) {
+          localStorage.setItem('mic-prompt-skip', '1');
+        }
         this.hideMicPrompt();
         this.startMicrophone();
       });
@@ -368,6 +382,18 @@ class ChoirPracticeApp {
           }, 150);
         }
       });
+
+      this.tempoScrubber.addEventListener('keydown', (e) => {
+        const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
+          ? 1
+          : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
+            ? -1
+            : 0;
+        if (!direction) return;
+        e.preventDefault();
+        const step = e.shiftKey ? 5 : 1;
+        this.setTempo(this.state.tempo + direction * step);
+      });
     }
 
     // Seek slider
@@ -384,11 +410,57 @@ class ChoirPracticeApp {
       });
     }
 
-    // Clicking the sheet selects the nearest note or measure onset. Manual
-    // selection must not trigger the renderer's automatic scroll-to-cursor.
+    // The notation behaves like an editor timeline: drag the score beneath
+    // the fixed playhead to scrub through time, while a short click still
+    // selects the nearest note.
     if (this.notationCanvas) {
+      let isScrubbing = false;
+      let didScrub = false;
+      let pointerId = null;
+      let startX = 0;
+      let startBeat = 0;
+
+      this.notationCanvas.addEventListener('pointerdown', (e) => {
+        if (!this.renderer || e.button !== 0) return;
+        isScrubbing = true;
+        didScrub = false;
+        pointerId = e.pointerId;
+        startX = e.clientX;
+        startBeat = this.state.currentBeat;
+        this.notationCanvas.setPointerCapture?.(pointerId);
+        this.notationCanvas.classList.add('is-scrubbing');
+      });
+
+      this.notationCanvas.addEventListener('pointermove', (e) => {
+        if (!isScrubbing || e.pointerId !== pointerId || !this.renderer) return;
+        const distance = e.clientX - startX;
+        if (Math.abs(distance) > 4) didScrub = true;
+        if (!didScrub) return;
+        e.preventDefault();
+        const startScoreX = this.renderer.getScoreX(startBeat);
+        const targetBeat = this.renderer.getBeatAtScoreX(startScoreX - distance);
+        this.renderer.isAutoScrollEnabled = true;
+        this.seekToBeat(targetBeat, { followScore: true });
+      });
+
+      const finishScrub = (e) => {
+        if (!isScrubbing || e.pointerId !== pointerId) return;
+        isScrubbing = false;
+        pointerId = null;
+        this.notationCanvas.classList.remove('is-scrubbing');
+        if (didScrub) {
+          this.wasNotationDragged = true;
+        }
+      };
+      this.notationCanvas.addEventListener('pointerup', finishScrub);
+      this.notationCanvas.addEventListener('pointercancel', finishScrub);
+
       this.notationCanvas.addEventListener('click', (e) => {
         if (!this.renderer) return;
+        if (this.wasNotationDragged) {
+          this.wasNotationDragged = false;
+          return;
+        }
         const rect = this.notationCanvas.getBoundingClientRect();
         if (!rect.width) return;
         const canvasX = (e.clientX - rect.left) * (this.notationCanvas.width / rect.width);
@@ -401,10 +473,16 @@ class ChoirPracticeApp {
 
     // Window resize
     window.addEventListener('resize', () => {
-      if (this.renderer) {
-        this.renderer.resize();
-        this.renderer.render();
-      }
+      // Resize events arrive in bursts while a window is dragged. Keep the
+      // expensive canvas resize/cache rebuild to one pass per paint frame.
+      if (this.resizeFrame !== null) return;
+      this.resizeFrame = requestAnimationFrame(() => {
+        this.resizeFrame = null;
+        if (this.renderer) {
+          this.renderer.resize();
+          this.renderer.render();
+        }
+      });
     });
   }
 
@@ -470,7 +548,10 @@ class ChoirPracticeApp {
           autoScroll: this.state.isPlaying
         });
       }
-      this.updateSeekSlider();
+      // Cursor rendering is frame-coalesced by the renderer. The range
+      // control itself has a 0.1% step, so refreshing it at 20fps keeps it
+      // visually smooth while avoiding repeated style/layout work per frame.
+      this.updateSeekSlider({ throttle: true });
     };
 
     // Reset UI when playback reaches the end naturally
@@ -598,6 +679,7 @@ class ChoirPracticeApp {
       if (this.exportGroup) {
         this.exportGroup.style.display = '';
       }
+      if (this.focusPartBtn) this.focusPartBtn.disabled = false;
 
       this.renderParts();
       this.renderPresets();
@@ -639,6 +721,7 @@ class ChoirPracticeApp {
         const measureStarts = this.state.parts[0].measures.map(m => m.startBeat);
         this.metronome.setMeasureStartBeats(measureStarts);
       }
+      this.updateSeekSlider();
     } catch (err) {
       if (loadGeneration === this.fileLoadGeneration) {
         this.showError(err.message);
@@ -732,6 +815,11 @@ class ChoirPracticeApp {
     if (this.exportGroup) {
       this.exportGroup.style.display = 'none';
     }
+    if (this.focusPartBtn) {
+      this.focusPartBtn.disabled = true;
+      this.focusPartBtn.setAttribute('aria-pressed', 'false');
+      this.focusPartBtn.classList.remove('active');
+    }
   }
 
   /**
@@ -743,6 +831,13 @@ class ChoirPracticeApp {
     this.renderer = new NotationRenderer(this.notationCanvas);
     this.renderer.setData(this.state.parts, this.state.metadata);
     this.renderer.setSelectedPart(this.state.selectedSectionId);
+    this.renderer.setFocusSelectedPart(this.state.focusMyPart);
+  }
+
+  /** Keep source names intact while avoiding noisy exporter suffixes in the UI. */
+  getDisplayPartName(part) {
+    const name = String(part?.name || '').replace(/\s*\(voice\s+\d+\)\s*/i, '').trim();
+    return name || part?.voiceType || 'Part';
   }
 
   renderParts() {
@@ -765,8 +860,7 @@ class ChoirPracticeApp {
       partEl.innerHTML = `
         <div class="part-header">
           <span class="part-color-dot" style="background: ${color}"></span>
-          <span class="part-name" title="Double-click to rename">${part.name}</span>
-          <span class="part-type-badge">${part.voiceType}</span>
+          <span class="part-name" title="Double-click to rename">${this.getDisplayPartName(part)}</span>
           ${part.id === this.state.selectedSectionId ? '<span class="my-section-badge">My Section</span>' : ''}
         </div>
         <div class="part-volume">
@@ -823,8 +917,12 @@ class ChoirPracticeApp {
             part.voiceType = detectVoiceType(newName);
             const badge = partEl.querySelector('.part-type-badge');
             if (badge) badge.textContent = part.voiceType;
+            // Part colour is baked into the static notation layer. Refresh it
+            // only after a committed rename, never while the user is typing.
+            this.renderer?.invalidateStaticScore();
+            this.renderer?.requestRender();
           } else {
-            partNameEl.textContent = part.name;
+            partNameEl.textContent = this.getDisplayPartName(part);
           }
         };
 
@@ -833,7 +931,7 @@ class ChoirPracticeApp {
             ke.preventDefault();
             partNameEl.blur();
           } else if (ke.key === 'Escape') {
-            partNameEl.textContent = part.name;
+            partNameEl.textContent = this.getDisplayPartName(part);
             partNameEl.blur();
           }
         };
@@ -919,6 +1017,17 @@ class ChoirPracticeApp {
     }
   }
 
+  /** Toggle a rehearsal-focused score view that quiets the other parts. */
+  togglePartFocus() {
+    this.state.focusMyPart = !this.state.focusMyPart;
+    if (this.focusPartBtn) {
+      this.focusPartBtn.classList.toggle('active', this.state.focusMyPart);
+      this.focusPartBtn.setAttribute('aria-pressed', String(this.state.focusMyPart));
+      this.focusPartBtn.textContent = this.state.focusMyPart ? 'Show all parts' : 'Focus my part';
+    }
+    this.renderer?.setFocusSelectedPart(this.state.focusMyPart);
+  }
+
   /**
    * Render the volume presets panel at the bottom of the sidebar.
    */
@@ -937,13 +1046,13 @@ class ChoirPracticeApp {
         <h3>Volume Presets</h3>
       </div>
       <div class="presets-list">
-        <button class="preset-btn ${this.state.activePreset === 'custom' ? 'active' : ''}" data-preset="custom">
+        <button class="preset-btn ${this.state.activePreset === 'custom' ? 'active' : ''}" data-preset="custom" aria-pressed="${this.state.activePreset === 'custom'}">
           Custom
         </button>
-        <button class="preset-btn ${this.state.activePreset === 'just-yours' ? 'active' : ''}" data-preset="just-yours">
+        <button class="preset-btn ${this.state.activePreset === 'just-yours' ? 'active' : ''}" data-preset="just-yours" aria-pressed="${this.state.activePreset === 'just-yours'}">
           Just Yours
         </button>
-        <button class="preset-btn preset-scrubber ${this.state.activePreset === 'mostly-yours' ? 'active' : ''}" data-preset="mostly-yours">
+        <button class="preset-btn preset-scrubber ${this.state.activePreset === 'mostly-yours' ? 'active' : ''}" data-preset="mostly-yours" aria-pressed="${this.state.activePreset === 'mostly-yours'}">
           <span class="preset-scrubber-label">Mostly Yours</span>
           <span class="preset-scrubber-control">
             <svg class="scrubber-drag-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -955,10 +1064,10 @@ class ChoirPracticeApp {
             <span id="others-volume-value">${this.state.othersVolume}%</span>
           </span>
         </button>
-        <button class="preset-btn ${this.state.activePreset === 'all' ? 'active' : ''}" data-preset="all">
+        <button class="preset-btn ${this.state.activePreset === 'all' ? 'active' : ''}" data-preset="all" aria-pressed="${this.state.activePreset === 'all'}">
           All
         </button>
-        <button class="preset-btn ${this.state.activePreset === 'everything-but-yours' ? 'active' : ''}" data-preset="everything-but-yours">
+        <button class="preset-btn ${this.state.activePreset === 'everything-but-yours' ? 'active' : ''}" data-preset="everything-but-yours" aria-pressed="${this.state.activePreset === 'everything-but-yours'}">
           Everything But Yours
         </button>
       </div>
@@ -1294,7 +1403,9 @@ class ChoirPracticeApp {
     const presetsEl = document.getElementById('presets-section');
     if (presetsEl) {
       presetsEl.querySelectorAll('.preset-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.preset === preset);
+        const isActive = btn.dataset.preset === preset;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-pressed', String(isActive));
       });
       // Update the displayed volume value on the scrubber button
       const othersValueEl = presetsEl.querySelector('#others-volume-value');
@@ -1323,6 +1434,10 @@ class ChoirPracticeApp {
     this.state.tempo = newTempo;
     if (this.tempoDisplay) {
       this.tempoDisplay.textContent = newTempo;
+    }
+    if (this.tempoScrubber) {
+      this.tempoScrubber.setAttribute('aria-valuenow', String(newTempo));
+      this.tempoScrubber.setAttribute('aria-valuetext', `${newTempo} BPM`);
     }
     if (newTempo === this.committedTempo) return;
 
@@ -1359,6 +1474,7 @@ class ChoirPracticeApp {
     } else {
       // Play
       this.state.isPlaying = true;
+      if (this.renderer) this.renderer.isAutoScrollEnabled = true;
       this.audioEngine.setTempo(this.state.tempo);
       this.committedTempo = this.state.tempo;
       this.audioEngine.setParts(this.state.parts);
@@ -1412,6 +1528,7 @@ class ChoirPracticeApp {
     this.state.metronomeActive = !this.state.metronomeActive;
     if (this.metronomeBtn) {
       this.metronomeBtn.classList.toggle('active', this.state.metronomeActive);
+      this.metronomeBtn.setAttribute('aria-pressed', String(this.state.metronomeActive));
     }
 
     if (this.state.metronomeActive) {
@@ -1433,6 +1550,7 @@ class ChoirPracticeApp {
     this.state.repeatActive = !this.state.repeatActive;
     if (this.repeatBtn) {
       this.repeatBtn.classList.toggle('active', this.state.repeatActive);
+      this.repeatBtn.setAttribute('aria-pressed', String(this.state.repeatActive));
     }
   }
 
@@ -1456,6 +1574,7 @@ class ChoirPracticeApp {
       this.micBtn.setAttribute('aria-label', 'Enable microphone');
       this.micBtn.title = 'Enable Microphone';
     }
+    if (this.micStatus) this.micStatus.textContent = 'Mic off';
     if (this.pitchIndicator) this.pitchIndicator.style.display = 'none';
     if (this.pitchAnnouncementTimer) {
       clearTimeout(this.pitchAnnouncementTimer);
@@ -1487,6 +1606,17 @@ class ChoirPracticeApp {
       return;
     }
 
+    // Skip dialog if the user previously chose "don't show again"
+    if (localStorage.getItem('mic-prompt-skip') === '1') {
+      this.startMicrophone();
+      return;
+    }
+
+    // Sync checkbox to stored preference (always unchecked when prompt is shown)
+    if (this.micPromptDontShow) {
+      this.micPromptDontShow.checked = false;
+    }
+
     this.micPrompt.hidden = false;
     this.micPrompt.setAttribute('aria-hidden', 'false');
     this.micPromptContinue?.focus();
@@ -1515,6 +1645,7 @@ class ChoirPracticeApp {
     this.pitchDetector = detector;
     this.micStartPending = true;
     if (this.micBtn) this.micBtn.disabled = true;
+    if (this.micStatus) this.micStatus.textContent = 'Connecting…';
 
     detector.onPitchDetected = pitchData => {
       if (requestGeneration === this.micStartGeneration) {
@@ -1542,10 +1673,12 @@ class ChoirPracticeApp {
         this.micBtn.setAttribute('aria-label', 'Disable microphone');
         this.micBtn.title = 'Disable Microphone';
       }
+      if (this.micStatus) this.micStatus.textContent = 'Listening';
       this.updatePitchGuide(null);
       if (this.pitchIndicator) this.pitchIndicator.style.display = 'flex';
     } else {
       this.pitchDetector = null;
+      if (this.micStatus) this.micStatus.textContent = 'Mic unavailable';
       this.showError('Could not access microphone. Please allow microphone permissions.');
     }
   }
@@ -1676,7 +1809,7 @@ class ChoirPracticeApp {
     // opt into a minimal scroll only when its target is outside the viewport.
     if (this.renderer) {
       this.renderer.clearUserPitchTrail();
-      this.renderer.setCurrentBeat(targetBeat, { autoScroll: false });
+      this.renderer.setCurrentBeat(targetBeat, { autoScroll: options.followScore === true });
       if (options.moveSheet) {
         this.renderer.ensureBeatVisible(targetBeat);
       }
@@ -1785,8 +1918,12 @@ class ChoirPracticeApp {
   /**
    * Update the seek slider and time display to reflect the current position.
    */
-  updateSeekSlider() {
+  updateSeekSlider(options = {}) {
     if (!this.seekSlider || !this.audioEngine) return;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (options.throttle && now - this.lastTransportUiUpdateAt < 50) return;
+    this.lastTransportUiUpdateAt = now;
+
     const totalBeats = this.audioEngine.getTotalBeats();
     if (totalBeats <= 0) return;
     const percent = (this.state.currentBeat / totalBeats) * 100;

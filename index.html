@@ -16,28 +16,32 @@
           <path d="M9.5 21v-6h5v6"/>
         </svg>
         <span>Choir Practice Tool</span>
-        <span class="app-home-label" aria-hidden="true">Home</span>
       </button>
     </h1>
     <span id="score-title" class="score-title"></span>
     <span class="app-attribution">by Xiang Li · Created with AI</span>
     <div class="export-group" id="export-group" style="display:none">
-      <button id="export-btn" class="export-btn" title="Export MusicXML with current settings">
+      <details class="export-menu">
+        <summary class="export-menu-trigger" aria-label="Export score">Export</summary>
+        <div class="export-menu-popover">
+          <button id="export-btn" class="export-btn" title="Export MusicXML with current settings">
         <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="7 10 12 15 17 10"/>
           <line x1="12" y1="15" x2="12" y2="3"/>
         </svg>
         <span>MusicXML</span>
-      </button>
-      <button id="export-audio-btn" class="export-btn export-audio-btn" title="Export audio as WAV with current volume settings">
+          </button>
+          <button id="export-audio-btn" class="export-btn export-audio-btn" title="Export audio as WAV with current volume settings">
         <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 18V5l12-2v13"/>
           <circle cx="6" cy="18" r="3"/>
           <circle cx="18" cy="16" r="3"/>
         </svg>
         <span class="export-audio-label">Export WAV</span>
-      </button>
+          </button>
+        </div>
+      </details>
     </div>
   </header>
 
@@ -47,6 +51,7 @@
       <section class="sidebar-parts" aria-labelledby="parts-title">
         <div class="sidebar-header">
           <h2 id="parts-title">Parts</h2>
+          <button id="focus-part-btn" class="focus-part-btn" type="button" aria-pressed="false" title="Emphasize your selected part">Focus my part</button>
         </div>
         <div id="parts-list" class="parts-list">
           <p class="no-parts-message">Choose a sample or upload a MusicXML file to see parts</p>
@@ -152,6 +157,10 @@
       <p id="mic-prompt-description">
         For the best experience and to prevent audio feedback, connect headphones or earphones before turning on the microphone.
       </p>
+      <label class="mic-prompt-dont-show">
+        <input type="checkbox" id="mic-prompt-dont-show">
+        Don't show again
+      </label>
       <div class="mic-prompt-actions">
         <button id="mic-prompt-cancel" class="mic-prompt-btn secondary" type="button">Not now</button>
         <button id="mic-prompt-continue" class="mic-prompt-btn primary" type="button">Continue to microphone</button>
@@ -172,7 +181,7 @@
       <div class="transport-left">
         <span id="seek-time" class="seek-time">0:00</span>
         <div class="tempo-control" id="tempo-control">
-          <div class="tempo-scrubber" id="tempo-scrubber" title="Drag left/right to adjust tempo">
+          <div class="tempo-scrubber" id="tempo-scrubber" role="spinbutton" tabindex="0" aria-label="Tempo" aria-valuemin="40" aria-valuemax="240" aria-valuenow="120" title="Drag left/right, scroll, or use arrow keys to adjust tempo">
             <span id="tempo-value" class="tempo-value">120</span>
             <span class="tempo-unit">BPM</span>
           </div>
@@ -194,7 +203,7 @@
 
       <!-- Right: metronome, repeat, mic -->
       <div class="transport-right">
-        <button id="repeat-btn" class="icon-btn" title="Toggle Repeat (R)">
+        <button id="repeat-btn" class="icon-btn" title="Toggle Repeat (R)" aria-label="Toggle repeat" aria-pressed="false">
           <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M17 1l4 4-4 4"/>
             <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
@@ -202,7 +211,7 @@
             <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
           </svg>
         </button>
-        <button id="metronome-btn" class="icon-btn" title="Toggle Metronome (M)">
+        <button id="metronome-btn" class="icon-btn" title="Toggle Metronome (M)" aria-label="Toggle metronome" aria-pressed="false">
           <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2L6 22h12L12 2z"/>
             <line x1="12" y1="18" x2="16" y2="6"/>
@@ -217,6 +226,7 @@
             <line x1="8" y1="21" x2="16" y2="21"/>
           </svg>
         </button>
+        <span id="mic-status" class="mic-status" aria-live="polite">Mic off</span>
         <div class="settings-menu-wrapper">
           <button id="settings-btn" class="icon-btn" title="Settings">
             <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
