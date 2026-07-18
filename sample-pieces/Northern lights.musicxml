@@ -15,7 +15,7 @@
       <miscellaneous-field name="platform">Unknown</miscellaneous-field>
       <miscellaneous-field name="sourceRevisionId">88937909</miscellaneous-field>
       </miscellaneous>
-    </identification>
+    <creator type="composer">Ola Gjeilo</creator></identification>
   <defaults>
     <scaling>
       <millimeters>6.99912</millimeters>
