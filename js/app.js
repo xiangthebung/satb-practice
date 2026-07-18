@@ -195,6 +195,12 @@ class ChoirPracticeApp {
           this.fileInput?.click();
         }
       });
+
+      this.fileUploadZone.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        this.fileInput?.click();
+      });
     }
 
     // Transport controls
@@ -494,8 +500,30 @@ class ChoirPracticeApp {
         return;
       }
 
+      if (e.key === 'Tab' && this.micPrompt && !this.micPrompt.hidden) {
+        const focusable = Array.from(this.micPrompt.querySelectorAll(
+          'button:not([disabled]), input:not([disabled])'
+        ));
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+
+      // Component-level controls consume their own keys (for example the
+      // tempo and fermata spinbuttons). Do not also treat those as transport
+      // shortcuts when the event reaches the document.
+      if (e.defaultPrevented) return;
+
       // Ignore if typing in a text input or textarea (but allow range sliders)
-      if (e.target.tagName === 'TEXTAREA') return;
+      if (e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
       if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
 
       // Ignore if modifier keys are pressed (Cmd/Ctrl, Alt, etc.)
@@ -745,6 +773,7 @@ class ChoirPracticeApp {
     this.state.partVolumes = {};
     this.state.selectedParts = new Set();
     this.state.customVolumes = {};
+    this.state.focusMyPart = false;
     if (this.state.activePreset === 'custom') {
       this.state.activePreset = null;
     }
@@ -788,7 +817,15 @@ class ChoirPracticeApp {
 
     if (this.playIcon) this.playIcon.style.display = '';
     if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-    if (this.playBtn) this.playBtn.classList.remove('active');
+    if (this.playBtn) {
+      this.playBtn.classList.remove('active');
+      this.playBtn.setAttribute('aria-label', 'Play');
+    }
+    if (this.focusPartBtn) {
+      this.focusPartBtn.textContent = 'Focus my part';
+      this.focusPartBtn.setAttribute('aria-pressed', 'false');
+      this.focusPartBtn.classList.remove('active');
+    }
   }
 
   /**
@@ -859,12 +896,12 @@ class ChoirPracticeApp {
 
       partEl.innerHTML = `
         <div class="part-header">
-          <span class="part-color-dot" style="background: ${color}"></span>
-          <span class="part-name" title="Double-click to rename">${this.getDisplayPartName(part)}</span>
-          ${part.id === this.state.selectedSectionId ? '<span class="my-section-badge">My Section</span>' : ''}
+          <span class="part-color-dot"></span>
+          <span class="part-name" title="Double-click to rename"></span>
+          <button class="select-section-btn" type="button"></button>
         </div>
         <div class="part-volume">
-          <button class="mute-btn" data-part-id="${part.id}" title="Mute">
+          <button class="mute-btn" type="button" title="Mute" aria-label="Mute part">
             <svg class="mute-icon unmuted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
               <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
@@ -876,16 +913,32 @@ class ChoirPracticeApp {
               <line x1="17" y1="9" x2="23" y2="15"/>
             </svg>
           </button>
-          <input type="range" min="0" max="100" value="${this.state.partVolumes[part.id]}"
-                 class="volume-slider" data-part-id="${part.id}">
-          <span class="volume-value">${this.state.partVolumes[part.id]}%</span>
+          <input type="range" min="0" max="100" class="volume-slider" aria-label="Part volume">
+          <span class="volume-value"></span>
         </div>
       `;
+
+      partEl.setAttribute('role', 'group');
+      partEl.setAttribute('aria-label', `${this.getDisplayPartName(part)} controls`);
+      const colorDot = partEl.querySelector('.part-color-dot');
+      colorDot.style.background = color;
+      const partNameEl = partEl.querySelector('.part-name');
+      partNameEl.textContent = this.getDisplayPartName(part);
+      const selectSectionBtn = partEl.querySelector('.select-section-btn');
+      const isSelected = part.id === this.state.selectedSectionId;
+      selectSectionBtn.textContent = isSelected ? 'My Section' : 'Set as my section';
+      selectSectionBtn.setAttribute('aria-pressed', String(isSelected));
+      const slider = partEl.querySelector('.volume-slider');
+      slider.value = String(this.state.partVolumes[part.id]);
+      slider.dataset.partId = part.id;
+      const valueDisplay = partEl.querySelector('.volume-value');
+      valueDisplay.textContent = `${this.state.partVolumes[part.id]}%`;
+      const muteBtn = partEl.querySelector('.mute-btn');
+      muteBtn.dataset.partId = part.id;
 
       this.partsList.appendChild(partEl);
 
       // Double-click part name to edit inline
-      const partNameEl = partEl.querySelector('.part-name');
       partNameEl.addEventListener('dblclick', (e) => {
         e.stopPropagation();
         if (partNameEl.contentEditable === 'true') return;
@@ -949,9 +1002,9 @@ class ChoirPracticeApp {
         this.selectSection(part.id);
       });
 
+      selectSectionBtn.addEventListener('click', () => this.selectSection(part.id));
+
       // Volume slider event
-      const slider = partEl.querySelector('.volume-slider');
-      const valueDisplay = partEl.querySelector('.volume-value');
       slider.addEventListener('input', (e) => {
         const volume = parseInt(e.target.value, 10);
         this.state.partVolumes[part.id] = volume;
@@ -962,7 +1015,6 @@ class ChoirPracticeApp {
       });
 
       // Mute button event
-      const muteBtn = partEl.querySelector('.mute-btn');
       muteBtn.addEventListener('click', () => {
         const isMuted = this.state.selectedParts.has(part.id);
         if (isMuted) {
@@ -970,6 +1022,7 @@ class ChoirPracticeApp {
           muteBtn.classList.add('active');
           muteBtn.querySelector('.unmuted').style.display = 'none';
           muteBtn.querySelector('.muted').style.display = '';
+          muteBtn.setAttribute('aria-label', 'Unmute part');
           if (this.audioEngine) {
             this.audioEngine.setPartMuted(part.id, true);
           }
@@ -978,6 +1031,7 @@ class ChoirPracticeApp {
           muteBtn.classList.remove('active');
           muteBtn.querySelector('.unmuted').style.display = '';
           muteBtn.querySelector('.muted').style.display = 'none';
+          muteBtn.setAttribute('aria-label', 'Mute part');
           if (this.audioEngine) {
             this.audioEngine.setPartMuted(part.id, false);
           }
@@ -997,15 +1051,10 @@ class ChoirPracticeApp {
     this.partsList.querySelectorAll('.part-control').forEach(control => {
       const isSelected = control.dataset.partId === partId;
       control.classList.toggle('selected-section', isSelected);
-      const badge = control.querySelector('.my-section-badge');
-      if (isSelected && !badge) {
-        const header = control.querySelector('.part-header');
-        const badgeEl = document.createElement('span');
-        badgeEl.className = 'my-section-badge';
-        badgeEl.textContent = 'My Section';
-        header.appendChild(badgeEl);
-      } else if (!isSelected && badge) {
-        badge.remove();
+      const selectButton = control.querySelector('.select-section-btn');
+      if (selectButton) {
+        selectButton.textContent = isSelected ? 'My Section' : 'Set as my section';
+        selectButton.setAttribute('aria-pressed', String(isSelected));
       }
     });
     if (this.renderer) {
@@ -1093,6 +1142,27 @@ class ChoirPracticeApp {
       let lastX = 0;
       let accumulatedDelta = 0;
 
+      const updateOthersVolume = (volume) => {
+        const nextVolume = Math.max(0, Math.min(100, volume));
+        if (nextVolume === this.state.othersVolume) return false;
+        this.state.othersVolume = nextVolume;
+        const valueEl = presetsEl.querySelector('#others-volume-value');
+        if (valueEl) valueEl.textContent = nextVolume + '%';
+        scrubberBtn.setAttribute(
+          'aria-label',
+          `Mostly Yours; other parts volume ${nextVolume}%`
+        );
+        if (this.state.activePreset === 'mostly-yours') {
+          this.applyPreset('mostly-yours');
+        }
+        return true;
+      };
+
+      scrubberBtn.setAttribute(
+        'aria-label',
+        `Mostly Yours; other parts volume ${this.state.othersVolume}%`
+      );
+
       const startDrag = (x) => {
         isDragging = true;
         lastX = x;
@@ -1111,15 +1181,7 @@ class ChoirPracticeApp {
         const volumeChange = Math.trunc(accumulatedDelta);
         if (volumeChange !== 0) {
           accumulatedDelta -= volumeChange;
-          const newVolume = Math.max(0, Math.min(100, this.state.othersVolume + volumeChange));
-          if (newVolume !== this.state.othersVolume) {
-            this.state.othersVolume = newVolume;
-            const valueEl = presetsEl.querySelector('#others-volume-value');
-            if (valueEl) valueEl.textContent = newVolume + '%';
-            if (this.state.activePreset === 'mostly-yours') {
-              this.applyPreset('mostly-yours');
-            }
-          }
+          updateOthersVolume(this.state.othersVolume + volumeChange);
         }
         lastX = x;
       };
@@ -1187,13 +1249,21 @@ class ChoirPracticeApp {
         }
         const direction = e.deltaY > 0 ? -1 : 1;
         const step = e.shiftKey ? 10 : 5;
-        const newVolume = Math.max(0, Math.min(100, this.state.othersVolume + direction * step));
-        if (newVolume !== this.state.othersVolume) {
-          this.state.othersVolume = newVolume;
-          const valueEl = presetsEl.querySelector('#others-volume-value');
-          if (valueEl) valueEl.textContent = newVolume + '%';
+        updateOthersVolume(this.state.othersVolume + direction * step);
+      });
+
+      scrubberBtn.addEventListener('keydown', (e) => {
+        const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
+          ? 1
+          : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
+            ? -1
+            : 0;
+        if (!direction) return;
+        e.preventDefault();
+        if (this.state.activePreset !== 'mostly-yours') {
           this.applyPreset('mostly-yours');
         }
+        updateOthersVolume(this.state.othersVolume + direction * (e.shiftKey ? 10 : 5));
       });
     }
   }
@@ -1216,6 +1286,7 @@ class ChoirPracticeApp {
       const isOpen = popover.style.display !== 'none';
       popover.style.display = isOpen ? 'none' : '';
       settingsBtn.classList.toggle('active', !isOpen);
+      settingsBtn.setAttribute('aria-expanded', String(!isOpen));
     });
 
     // Close popover when clicking outside
@@ -1223,6 +1294,7 @@ class ChoirPracticeApp {
       if (!popover.contains(e.target) && e.target !== settingsBtn) {
         popover.style.display = 'none';
         settingsBtn.classList.remove('active');
+        settingsBtn.setAttribute('aria-expanded', 'false');
       }
     });
 
@@ -1249,6 +1321,12 @@ class ChoirPracticeApp {
       fermataValue.textContent = this.state.fermataMultiplier.toFixed(1) + 'x';
     }
 
+    const updateFermataAccessibility = () => {
+      scrubber?.setAttribute('aria-valuenow', String(this.state.fermataMultiplier));
+      scrubber?.setAttribute('aria-valuetext', `${this.state.fermataMultiplier.toFixed(1)} times`);
+    };
+    updateFermataAccessibility();
+
     // Fermata scrubber — horizontal drag
     if (scrubber) {
       let isDragging = false;
@@ -1273,6 +1351,7 @@ class ChoirPracticeApp {
           accumulatedDelta = 0;
           this.state.fermataMultiplier = newVal;
           if (fermataValue) fermataValue.textContent = newVal.toFixed(1) + 'x';
+          updateFermataAccessibility();
           if (this.audioEngine) {
             this.audioEngine.setFermataMultiplier(newVal);
           }
@@ -1327,10 +1406,30 @@ class ChoirPracticeApp {
         if (newVal !== this.state.fermataMultiplier) {
           this.state.fermataMultiplier = newVal;
           if (fermataValue) fermataValue.textContent = newVal.toFixed(1) + 'x';
+          updateFermataAccessibility();
           if (this.audioEngine) {
             this.audioEngine.setFermataMultiplier(newVal);
           }
         }
+      });
+
+      scrubber.addEventListener('keydown', (e) => {
+        const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
+          ? 1
+          : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
+            ? -1
+            : 0;
+        if (!direction) return;
+        e.preventDefault();
+        const step = e.shiftKey ? 0.5 : 0.1;
+        const newVal = Math.max(1.0, Math.min(4.0,
+          Math.round((this.state.fermataMultiplier + direction * step) * 10) / 10
+        ));
+        if (newVal === this.state.fermataMultiplier) return;
+        this.state.fermataMultiplier = newVal;
+        if (fermataValue) fermataValue.textContent = newVal.toFixed(1) + 'x';
+        updateFermataAccessibility();
+        this.audioEngine?.setFermataMultiplier(newVal);
       });
     }
   }
@@ -1470,7 +1569,10 @@ class ChoirPracticeApp {
       }
       if (this.playIcon) this.playIcon.style.display = '';
       if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-      if (this.playBtn) this.playBtn.classList.remove('active');
+      if (this.playBtn) {
+        this.playBtn.classList.remove('active');
+        this.playBtn.setAttribute('aria-label', 'Play');
+      }
     } else {
       // Play
       this.state.isPlaying = true;
@@ -1493,7 +1595,10 @@ class ChoirPracticeApp {
       }
       if (this.playIcon) this.playIcon.style.display = 'none';
       if (this.pauseIcon) this.pauseIcon.style.display = '';
-      if (this.playBtn) this.playBtn.classList.add('active');
+      if (this.playBtn) {
+        this.playBtn.classList.add('active');
+        this.playBtn.setAttribute('aria-label', 'Pause');
+      }
     }
     this.updateSeekSlider();
   }
@@ -1515,7 +1620,10 @@ class ChoirPracticeApp {
     }
     if (this.playIcon) this.playIcon.style.display = '';
     if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-    if (this.playBtn) this.playBtn.classList.remove('active');
+    if (this.playBtn) {
+      this.playBtn.classList.remove('active');
+      this.playBtn.setAttribute('aria-label', 'Play');
+    }
     this.updateSeekSlider();
   }
 
@@ -1617,6 +1725,7 @@ class ChoirPracticeApp {
       this.micPromptDontShow.checked = false;
     }
 
+    this.lastFocusedElement = document.activeElement;
     this.micPrompt.hidden = false;
     this.micPrompt.setAttribute('aria-hidden', 'false');
     this.micPromptContinue?.focus();
@@ -1630,7 +1739,13 @@ class ChoirPracticeApp {
 
     this.micPrompt.hidden = true;
     this.micPrompt.setAttribute('aria-hidden', 'true');
-    this.micBtn?.focus();
+    const returnFocus = this.lastFocusedElement;
+    this.lastFocusedElement = null;
+    if (returnFocus instanceof HTMLElement && document.contains(returnFocus)) {
+      returnFocus.focus();
+    } else {
+      this.micBtn?.focus();
+    }
   }
 
   /**
@@ -2105,6 +2220,7 @@ class ChoirPracticeApp {
   showError(message) {
     const errorEl = document.createElement('div');
     errorEl.className = 'error-message';
+    errorEl.setAttribute('role', 'alert');
     errorEl.textContent = message;
     errorEl.addEventListener('click', () => errorEl.remove());
 

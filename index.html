@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="A browser-based rehearsal tool for practicing choir parts with MusicXML scores.">
+  <meta name="theme-color" content="#1a1a2e">
   <title>Choir Practice Tool</title>
   <link rel="stylesheet" href="css/styles.css?v=mic-sync-3">
 </head>
@@ -96,12 +98,12 @@
           </div>
         </section>
 
-        <div id="file-upload-zone" class="file-upload-zone">
+        <div id="file-upload-zone" class="file-upload-zone" role="button" tabindex="0" aria-controls="file-input" aria-label="Upload a MusicXML file">
           <div class="upload-icon">&#9835;</div>
           <h3>Upload MusicXML File</h3>
           <p>Drag and drop a .musicxml file here</p>
           <p class="upload-hint">or click to browse</p>
-          <input type="file" id="file-input" accept=".musicxml,.mxl" style="display:none">
+          <input type="file" id="file-input" accept=".musicxml" style="display:none">
         </div>
       </div>
 
@@ -155,7 +157,7 @@
       </div>
       <h2 id="mic-prompt-title">Use headphones for microphone practice</h2>
       <p id="mic-prompt-description">
-        For the best experience and to prevent audio feedback, connect headphones or earphones before turning on the microphone.
+        For the best experience and to prevent audio feedback, connect headphones or earphones before turning on the microphone. Audio is analysed locally in your browser and is never recorded or uploaded by this app.
       </p>
       <label class="mic-prompt-dont-show">
         <input type="checkbox" id="mic-prompt-dont-show">
@@ -190,7 +192,7 @@
 
       <!-- Center: play/pause -->
       <div class="transport-center">
-        <button id="play-btn" class="play-btn" title="Play/Pause (Space)">
+        <button id="play-btn" class="play-btn" type="button" title="Play/Pause (Space)" aria-label="Play">
           <svg id="play-icon" class="transport-icon" viewBox="0 0 24 24" fill="currentColor">
             <polygon points="6,4 20,12 6,20"/>
           </svg>
@@ -228,7 +230,7 @@
         </button>
         <span id="mic-status" class="mic-status" aria-live="polite">Mic off</span>
         <div class="settings-menu-wrapper">
-          <button id="settings-btn" class="icon-btn" title="Settings">
+          <button id="settings-btn" class="icon-btn" type="button" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="settings-popover">
             <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="3"/>
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z"/>
@@ -244,7 +246,7 @@
             </div>
             <div class="settings-popover-row">
               <label class="settings-popover-label" title="How long fermatas are held (1.0x = no extra hold)">Fermata</label>
-              <div class="fermata-scrubber" id="fermata-scrubber" title="Drag left/right to adjust">
+              <div class="fermata-scrubber" id="fermata-scrubber" role="spinbutton" tabindex="0" aria-label="Fermata duration" aria-valuemin="1" aria-valuemax="4" aria-valuenow="2" aria-valuetext="2.0 times" title="Drag left/right, scroll, or use arrow keys to adjust">
                 <svg class="scrubber-drag-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M4 8H12"/>
                   <path d="M6 6L4 8L6 10"/>
