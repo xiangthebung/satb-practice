@@ -49,6 +49,31 @@ const PITCH_FEEDBACK_COLORS = {
 };
 
 /**
+ * Decide whether a score-space x coordinate should be painted for one render
+ * viewport. Cached score tiles do not contain the fixed clef/name gutter, so
+ * their visible range begins at the tile edge rather than at scoreOrigin.
+ *
+ * @param {number} x score-space coordinate
+ * @param {number} viewportScrollX score-space coordinate at the viewport left
+ * @param {number} viewportWidth viewport width in pixels
+ * @param {number} scoreOrigin width of the fixed gutter in a live viewport
+ * @param {boolean} staticViewport true while rendering an off-screen cache tile
+ * @param {number} padding extra paint range for glyphs crossing an edge
+ */
+export function isScoreElementVisible(
+  x,
+  viewportScrollX,
+  viewportWidth,
+  scoreOrigin,
+  staticViewport = false,
+  padding = 40
+) {
+  const screenX = Number(x) - Number(viewportScrollX);
+  const left = staticViewport ? -padding : Number(scoreOrigin);
+  return screenX >= left && screenX <= Number(viewportWidth) + padding;
+}
+
+/**
  * Convert detector output into a fractional MIDI value without losing cents.
  * @param {object} pitchData
  * @returns {number|null}
@@ -1262,7 +1287,8 @@ export class NotationRenderer {
     }
     this.drawMeasureNumbers(tileCtx, {
       scrollX: tileStart,
-      viewportWidth: tile.width
+      viewportWidth: tile.width,
+      staticViewport: true
     });
     tileCtx.restore();
 
@@ -1311,6 +1337,7 @@ export class NotationRenderer {
     const viewportWidth = Number.isFinite(options.viewportWidth)
       ? options.viewportWidth
       : this.canvas.width;
+    const staticViewport = options.staticViewport === true;
     ctx.save();
     ctx.fillStyle = '#9aabd0';
     ctx.font = '700 11px sans-serif';
@@ -1318,8 +1345,13 @@ export class NotationRenderer {
     for (let index = 0; index < this.horizontalLayout.measures.length; index++) {
       const measure = this.horizontalLayout.measures[index];
       const x = scoreOrigin + measure.startX + 4;
-      const screenX = x - viewportScrollX;
-      if (screenX < scoreOrigin || screenX > viewportWidth) continue;
+      if (!isScoreElementVisible(
+        x,
+        viewportScrollX,
+        viewportWidth,
+        scoreOrigin,
+        staticViewport
+      )) continue;
       ctx.fillText(`M. ${measure.number || index + 1}`, x, Math.max(16, marginTop - 18));
     }
     ctx.restore();
@@ -1473,8 +1505,13 @@ export class NotationRenderer {
         const localBeat = Number(note.startBeatInMeasure) || 0;
         const absoluteBeat = measureLayout.startBeat + localBeat;
         const x = scoreOrigin + this.horizontalLayout.getNoteX(measure, mIdx, localBeat, note);
-        const screenX = x - viewportScrollX;
-        const visible = screenX >= scoreOrigin && screenX <= viewportWidth + 40;
+        const visible = isScoreElementVisible(
+          x,
+          viewportScrollX,
+          viewportWidth,
+          scoreOrigin,
+          staticViewport
+        );
         const noteClef = normalizeClef(note.clef) || clef;
         let y = yOffset + lineSpacing * 2;
         if (!note.isRest && note.pitch) {
@@ -1498,11 +1535,16 @@ export class NotationRenderer {
         const x = scoreOrigin + (fermata.location === 'left'
           ? measureLayout.startX
           : measureLayout.endX);
-        const screenX = x - viewportScrollX;
         barlineLayouts.push({
           fermata,
           x,
-          visible: screenX >= scoreOrigin && screenX <= viewportWidth + 40
+          visible: isScoreElementVisible(
+            x,
+            viewportScrollX,
+            viewportWidth,
+            scoreOrigin,
+            staticViewport
+          )
         });
       }
     }
@@ -1535,7 +1577,10 @@ export class NotationRenderer {
     for (const group of this.collectTupletGroups(allLayouts)) {
       this.drawTupletGroup(ctx, group, yOffset, color);
     }
-    this.drawConnectionCurves(ctx, allLayouts, yOffset, color);
+    this.drawConnectionCurves(ctx, allLayouts, yOffset, color, {
+      left: viewportScrollX,
+      right: viewportScrollX + viewportWidth
+    });
 
     for (const layout of allLayouts) {
       if (layout.visible && layout.note.fermata) {
@@ -1811,7 +1856,7 @@ export class NotationRenderer {
   }
 
   /** Draw legato slurs and ties after all note geometry is known. */
-  drawConnectionCurves(ctx, layouts, yOffset, color) {
+  drawConnectionCurves(ctx, layouts, yOffset, color, viewportBounds = null) {
     const activeSlurs = new Map();
     const activeTies = new Map();
     const pitchKey = layout => {
@@ -1826,7 +1871,16 @@ export class NotationRenderer {
         const key = `${layout.note.voice || 1}:${slur.number || 1}`;
         const start = activeSlurs.get(key);
         if (start) {
-          this.drawConnectionCurve(ctx, start.layout, layout, slur.placement || start.marker.placement || 'above', color, false, start.marker.lineType);
+          this.drawConnectionCurve(
+            ctx,
+            start.layout,
+            layout,
+            slur.placement || start.marker.placement || 'above',
+            color,
+            false,
+            start.marker.lineType,
+            viewportBounds
+          );
           activeSlurs.delete(key);
         }
       }
@@ -1846,7 +1900,8 @@ export class NotationRenderer {
           stopMarker?.placement || start.marker?.placement || defaultPlacement,
           color,
           true,
-          start.marker?.lineType
+          start.marker?.lineType,
+          viewportBounds
         );
         activeTies.delete(key);
       }
@@ -1858,8 +1913,22 @@ export class NotationRenderer {
   }
 
   /** Draw one slur/tie Bezier curve. */
-  drawConnectionCurve(ctx, start, end, placement, color, isTie = false, lineType = 'solid') {
-    if (!start.visible || !end.visible || end.x <= start.x) return;
+  drawConnectionCurve(
+    ctx,
+    start,
+    end,
+    placement,
+    color,
+    isTie = false,
+    lineType = 'solid',
+    viewportBounds = null
+  ) {
+    if (end.x <= start.x) return;
+    if (viewportBounds) {
+      if (end.x < viewportBounds.left || start.x > viewportBounds.right) return;
+    } else if (!start.visible || !end.visible) {
+      return;
+    }
     const below = placement === 'below';
     const direction = below ? 1 : -1;
     const inset = isTie ? 4 : 1;

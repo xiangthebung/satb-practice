@@ -11,7 +11,7 @@ import {
   buildPartNameUpdates
 } from './musicxml-parser.js';
 import { getPartColor } from './utils.js';
-import { NotationRenderer } from './notation-renderer.js?v=mic-sync-3';
+import { NotationRenderer } from './notation-renderer.js?v=score-tiles-1';
 import { AudioEngine } from './audio-engine.js?v=mic-sync-3';
 import { PitchDetector } from './pitch-detector.js?v=mic-sync-3';
 import { Metronome } from './metronome.js';

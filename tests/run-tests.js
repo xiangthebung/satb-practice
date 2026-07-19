@@ -42,6 +42,7 @@ import {
 import {
   getNoteStaffPosition,
   getClefForPart,
+  isScoreElementVisible,
   NotationRenderer
 } from '../js/notation-renderer.js';
 
@@ -107,6 +108,31 @@ test('G#5 should be MIDI 80', () => {
 
 test('Bb2 should be MIDI 46', () => {
   assert.equal(noteToMidi('Bb', 2), 46);
+});
+
+console.log('');
+
+console.log('Notation Renderer - Tile Boundaries:');
+
+test('cached tiles render score elements immediately after a tile seam', () => {
+  const tileStart = 2048;
+  assert.equal(
+    isScoreElementVisible(tileStart + 8, tileStart, 2048, 170, true),
+    true
+  );
+});
+
+test('cached tiles include glyph overhang immediately before a tile seam', () => {
+  const tileStart = 2048;
+  assert.equal(
+    isScoreElementVisible(tileStart - 20, tileStart, 2048, 170, true),
+    true
+  );
+});
+
+test('live viewport still reserves the fixed clef and label gutter', () => {
+  assert.equal(isScoreElementVisible(120, 0, 1200, 170, false), false);
+  assert.equal(isScoreElementVisible(180, 0, 1200, 170, false), true);
 });
 
 console.log('');
