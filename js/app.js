@@ -63,6 +63,9 @@ class ChoirPracticeApp {
     this.fileUploadZone = document.getElementById('file-upload-zone');
     this.fileInput = document.getElementById('file-input');
     this.samplePiecesList = document.getElementById('sample-pieces-list');
+    this.mainContent = document.getElementById('main-content');
+    this.loadingStatus = document.getElementById('loading-status');
+    this.loadingStatusText = document.getElementById('loading-status-text');
     this.partsList = document.getElementById('parts-list');
     this.notationArea = document.getElementById('notation-area');
     this.tempoDisplay = document.getElementById('tempo-value');
@@ -94,6 +97,51 @@ class ChoirPracticeApp {
     this.exportGroup = document.getElementById('export-group');
     this.focusPartBtn = document.getElementById('focus-part-btn');
     if (this.focusPartBtn) this.focusPartBtn.disabled = true;
+    this.setScoreControlsEnabled(false);
+  }
+
+  /**
+   * Keep transport controls unavailable until a playable score is ready.
+   * This prevents a first-time user from triggering audio actions on the home
+   * screen and makes the next useful action visually obvious.
+   */
+  setScoreControlsEnabled(enabled) {
+    const controls = [
+      this.playBtn,
+      this.repeatBtn,
+      this.metronomeBtn,
+      this.micBtn,
+      this.seekSlider,
+      this.tempoScrubber
+    ];
+    controls.forEach(control => {
+      if (!control) return;
+      control.disabled = !enabled;
+      control.setAttribute('aria-disabled', String(!enabled));
+    });
+  }
+
+  /** Show progress while a score is being downloaded or parsed. */
+  setLoadingState(isLoading, message = 'Opening score…') {
+    if (this.loadingStatus) {
+      this.loadingStatus.hidden = !isLoading;
+      this.loadingStatus.setAttribute('aria-hidden', String(!isLoading));
+    }
+    if (this.loadingStatusText && isLoading) {
+      this.loadingStatusText.textContent = message;
+    }
+    this.mainContent?.setAttribute('aria-busy', String(isLoading));
+    if (this.fileInput) this.fileInput.disabled = isLoading;
+    if (this.fileUploadZone) {
+      this.fileUploadZone.classList.toggle('is-loading', isLoading);
+      this.fileUploadZone.setAttribute('aria-busy', String(isLoading));
+      this.fileUploadZone.setAttribute('aria-disabled', String(isLoading));
+    }
+    this.samplePiecesList?.querySelectorAll('.sample-piece').forEach(button => {
+      button.disabled = isLoading;
+      button.setAttribute('aria-busy', String(isLoading));
+    });
+    if (isLoading) this.setScoreControlsEnabled(false);
   }
 
   /**
@@ -390,6 +438,7 @@ class ChoirPracticeApp {
       });
 
       this.tempoScrubber.addEventListener('keydown', (e) => {
+        if (this.tempoScrubber.getAttribute('aria-disabled') === 'true') return;
         const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
           ? 1
           : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
@@ -632,6 +681,7 @@ class ChoirPracticeApp {
   async handleSamplePiece(samplePath, button) {
     if (!samplePath) return;
     const loadGeneration = ++this.fileLoadGeneration;
+    this.setLoadingState(true, 'Opening sample piece…');
 
     if (button) {
       button.disabled = true;
@@ -663,13 +713,21 @@ class ChoirPracticeApp {
         button.disabled = false;
         button.removeAttribute('aria-busy');
       }
+      if (loadGeneration === this.fileLoadGeneration) {
+        this.setLoadingState(false);
+        this.setScoreControlsEnabled(this.state.parts.length > 0);
+      }
     }
   }
 
   async handleFile(file, loadGeneration = ++this.fileLoadGeneration) {
+    this.setLoadingState(true, `Reading ${file?.name || 'score'}…`);
     try {
       const result = await parseFile(file);
       if (loadGeneration !== this.fileLoadGeneration) return;
+      if (!result.parts?.length) {
+        throw new Error('No playable parts were found in this file. Choose a MusicXML score with at least one part.');
+      }
       this.resetScoreTransition();
 
       this.state.parts = result.parts;
@@ -750,8 +808,12 @@ class ChoirPracticeApp {
         this.metronome.setMeasureStartBeats(measureStarts);
       }
       this.updateSeekSlider();
+      this.setScoreControlsEnabled(true);
+      this.setLoadingState(false);
     } catch (err) {
       if (loadGeneration === this.fileLoadGeneration) {
+        this.setLoadingState(false);
+        this.setScoreControlsEnabled(this.state.parts.length > 0);
         this.showError(err.message);
       }
     }
@@ -807,7 +869,7 @@ class ChoirPracticeApp {
       this.scoreTitle.textContent = '';
     }
     if (this.partsList) {
-      this.partsList.innerHTML = '<p class="no-parts-message">Choose a sample or upload a MusicXML file to see parts</p>';
+      this.partsList.innerHTML = '<p class="no-parts-message">Your parts will appear here after you open a score.</p>';
     }
     if (this.renderer) {
       this.renderer = null;
@@ -826,6 +888,7 @@ class ChoirPracticeApp {
       this.focusPartBtn.setAttribute('aria-pressed', 'false');
       this.focusPartBtn.classList.remove('active');
     }
+    this.setScoreControlsEnabled(false);
   }
 
   /**
@@ -834,6 +897,7 @@ class ChoirPracticeApp {
   resetToHome() {
     // Invalidate any file that is still parsing or downloading.
     this.fileLoadGeneration++;
+    this.setLoadingState(false);
     // No score should remain active on the home screen. Stop microphone
     // capture separately because it is otherwise preserved across files.
     this.stopMicrophone();
@@ -869,6 +933,11 @@ class ChoirPracticeApp {
     this.renderer.setData(this.state.parts, this.state.metadata);
     this.renderer.setSelectedPart(this.state.selectedSectionId);
     this.renderer.setFocusSelectedPart(this.state.focusMyPart);
+    const scoreName = this.scoreTitle?.textContent || 'score';
+    this.notationCanvas.setAttribute(
+      'aria-label',
+      `Interactive score for ${scoreName}. Click a note to jump or drag to scrub.`
+    );
   }
 
   /**
@@ -937,10 +1006,12 @@ class ChoirPracticeApp {
       const slider = partEl.querySelector('.volume-slider');
       slider.value = String(this.state.partVolumes[part.id]);
       slider.dataset.partId = part.id;
+      slider.setAttribute('aria-label', `${this.getDisplayPartName(part)} volume`);
       const valueDisplay = partEl.querySelector('.volume-value');
       valueDisplay.textContent = `${this.state.partVolumes[part.id]}%`;
       const muteBtn = partEl.querySelector('.mute-btn');
       muteBtn.dataset.partId = part.id;
+      muteBtn.title = `Mute ${this.getDisplayPartName(part)}`;
 
       this.partsList.appendChild(partEl);
 
@@ -1098,7 +1169,8 @@ class ChoirPracticeApp {
 
     presetsEl.innerHTML = `
       <div class="presets-header">
-        <h3>Volume Presets</h3>
+        <h3>Rehearsal mix</h3>
+        <p>Choose how loudly to hear each section.</p>
       </div>
       <div class="presets-list">
         <button class="preset-btn ${this.state.activePreset === 'custom' ? 'active' : ''}" data-preset="custom" aria-pressed="${this.state.activePreset === 'custom'}">
@@ -1313,7 +1385,9 @@ class ChoirPracticeApp {
           if (mode === this.state.synthMode) return;
           this.state.synthMode = mode;
           synthToggle.querySelectorAll('.synth-toggle-btn').forEach(b => {
-            b.classList.toggle('active', b.dataset.mode === mode);
+            const isActive = b.dataset.mode === mode;
+            b.classList.toggle('active', isActive);
+            b.setAttribute('aria-pressed', String(isActive));
           });
           if (this.audioEngine) {
             this.audioEngine.setSynthMode(mode);
@@ -2227,11 +2301,19 @@ class ChoirPracticeApp {
     const errorEl = document.createElement('div');
     errorEl.className = 'error-message';
     errorEl.setAttribute('role', 'alert');
-    errorEl.textContent = message;
-    errorEl.addEventListener('click', () => errorEl.remove());
+
+    const messageEl = document.createElement('span');
+    messageEl.textContent = message;
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'error-dismiss';
+    dismissBtn.setAttribute('aria-label', 'Dismiss message');
+    dismissBtn.textContent = '×';
+    dismissBtn.addEventListener('click', () => errorEl.remove());
+    errorEl.append(messageEl, dismissBtn);
 
     document.body.appendChild(errorEl);
-    setTimeout(() => errorEl.remove(), 5000);
+    setTimeout(() => errorEl.remove(), 6000);
   }
 }
 

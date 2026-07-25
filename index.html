@@ -52,19 +52,47 @@
     <aside class="sidebar" id="sidebar">
       <section class="sidebar-parts" aria-labelledby="parts-title">
         <div class="sidebar-header">
-          <h2 id="parts-title">Parts</h2>
+          <div>
+            <h2 id="parts-title">Parts</h2>
+            <p class="sidebar-hint">Choose your section, then press play.</p>
+          </div>
           <button id="focus-part-btn" class="focus-part-btn" type="button" aria-pressed="false" title="Emphasize your selected part">Focus my part</button>
         </div>
         <div id="parts-list" class="parts-list">
-          <p class="no-parts-message">Choose a sample or upload a MusicXML file to see parts</p>
+          <p class="no-parts-message">Your parts will appear here after you open a score.</p>
         </div>
       </section>
     </aside>
 
     <!-- Main content area -->
-    <section class="main-content">
+    <section class="main-content" id="main-content" aria-busy="false">
+      <div id="loading-status" class="loading-status" role="status" aria-live="polite" hidden>
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <span id="loading-status-text">Opening score…</span>
+      </div>
+
       <!-- Home screen with sample pieces and file upload -->
       <div id="upload-prompt" class="upload-prompt">
+        <section class="home-intro" aria-labelledby="home-title">
+          <p class="home-eyebrow">Choir rehearsal, in your browser</p>
+          <h2 id="home-title">Practice the part you hear</h2>
+          <p class="home-intro-copy">Open a sample or upload your own MusicXML score, then shape the mix around your voice.</p>
+          <ol class="quick-start" aria-label="How to get started">
+            <li>
+              <span class="quick-start-number" aria-hidden="true">1</span>
+              <span><strong>Open a score</strong><small>Choose a sample or upload MusicXML.</small></span>
+            </li>
+            <li>
+              <span class="quick-start-number" aria-hidden="true">2</span>
+              <span><strong>Choose your part</strong><small>Set your section and adjust the mix.</small></span>
+            </li>
+            <li>
+              <span class="quick-start-number" aria-hidden="true">3</span>
+              <span><strong>Play and sing</strong><small>Use the mic for optional pitch guidance.</small></span>
+            </li>
+          </ol>
+        </section>
+
         <section class="home-samples" aria-labelledby="sample-pieces-title">
           <div class="home-samples-heading">
             <h2 id="sample-pieces-title">Try a sample piece</h2>
@@ -94,16 +122,33 @@
 
         <div id="file-upload-zone" class="file-upload-zone" role="button" tabindex="0" aria-controls="file-input" aria-label="Upload a MusicXML file">
           <div class="upload-icon">&#9835;</div>
-          <h3>Upload MusicXML File</h3>
+          <h3>Upload your own score</h3>
           <p>Drag and drop a .musicxml file here</p>
-          <p class="upload-hint">or click to browse</p>
-          <input type="file" id="file-input" accept=".musicxml" style="display:none">
+          <p class="upload-hint">or click to browse · uncompressed MusicXML only</p>
+          <input type="file" id="file-input" accept=".musicxml,.xml" style="display:none">
         </div>
       </div>
 
       <!-- Notation display area with canvas -->
       <div id="notation-area" class="notation-area" style="display: none;">
-        <canvas id="notation-canvas" class="notation-canvas"></canvas>
+        <canvas
+          id="notation-canvas"
+          class="notation-canvas"
+          role="img"
+          tabindex="0"
+          aria-describedby="score-help"
+          aria-label="Interactive music score. Click to jump or drag to scrub."
+        ></canvas>
+        <div id="score-help" class="score-help" role="note">
+          <span class="score-help-label">Quick guide</span>
+          <span>Click the score to jump</span>
+          <span aria-hidden="true">·</span>
+          <span>drag to scrub</span>
+          <span aria-hidden="true">·</span>
+          <span><kbd>Space</kbd> play/pause</span>
+          <span aria-hidden="true">·</span>
+          <span><kbd>←</kbd><kbd>→</kbd> move by bar</span>
+        </div>
       </div>
 
       <!-- Calm, glanceable pitch guidance — no rapidly changing numbers -->
@@ -168,7 +213,7 @@
   <footer class="transport-toolbar">
     <!-- Seek / progress bar spanning full width -->
     <div class="transport-progress">
-      <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" class="seek-slider" title="Seek position">
+      <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" class="seek-slider" title="Seek position" aria-label="Score position" disabled>
     </div>
 
     <!-- Main controls row -->
@@ -234,8 +279,8 @@
             <div class="settings-popover-row">
               <label class="settings-popover-label" title="Synthesized tone or human singing voice">Voice</label>
               <div class="synth-toggle" id="synth-toggle">
-                <button class="synth-toggle-btn" data-mode="oscillator" title="Synthesized oscillator sound">Synth</button>
-                <button class="synth-toggle-btn active" data-mode="vocal" title="Human-like singing voice">Vocal</button>
+                <button class="synth-toggle-btn" type="button" data-mode="oscillator" aria-pressed="false" title="Synthesized oscillator sound">Synth</button>
+                <button class="synth-toggle-btn active" type="button" data-mode="vocal" aria-pressed="true" title="Human-like singing voice">Vocal</button>
               </div>
             </div>
             <div class="settings-popover-row">
