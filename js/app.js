@@ -409,10 +409,10 @@ class ChoirPracticeApp {
         // Update filled track immediately while dragging
         this.seekSlider.style.background =
           `linear-gradient(to right, var(--accent-primary) ${percent}%, var(--bg-tertiary) ${percent}%)`;
-        // When paused, move the sheet to the selected progress position so the
-        // cursor and visible notation stay in sync. Playback will continue to
-        // use its pinned-cursor auto-scroll behavior.
-        this.seekToPercent(percent, { moveSheet: !this.state.isPlaying });
+        // Keep the score moving beneath the cursor just like screen scrubbing.
+        // This is especially important while paused, when playback cannot
+        // provide the next auto-scroll update to pin the cursor in place.
+        this.seekToPercent(percent, { followScore: true });
       });
     }
 
@@ -1885,7 +1885,7 @@ class ChoirPracticeApp {
   /**
    * Seek to a percentage position in the score.
    * @param {number} percent - 0 to 100
-   * @param {{ moveSheet?: boolean }} options
+   * @param {{ moveSheet?: boolean, followScore?: boolean }} options
    */
   seekToPercent(percent, options = {}) {
     if (!this.audioEngine) return;
