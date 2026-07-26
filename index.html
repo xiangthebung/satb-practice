@@ -6,7 +6,7 @@
   <meta name="description" content="A browser-based rehearsal tool for practicing choir parts with MusicXML scores.">
   <meta name="theme-color" content="#1a1a2e">
   <title>Choir Practice Tool</title>
-  <link rel="stylesheet" href="css/styles.css?v=score-tiles-1">
+  <link rel="stylesheet" href="css/styles.css?v=guided-tour-7">
 </head>
 <body>
   <header class="app-header">
@@ -77,20 +77,17 @@
           <p class="home-eyebrow">Choir rehearsal, in your browser</p>
           <h2 id="home-title">Practice the part you hear</h2>
           <p class="home-intro-copy">Open a sample or upload your own MusicXML score, then shape the mix around your voice.</p>
-          <ol class="quick-start" aria-label="How to get started">
-            <li>
-              <span class="quick-start-number" aria-hidden="true">1</span>
-              <span><strong>Open a score</strong><small>Choose a sample or upload MusicXML.</small></span>
-            </li>
-            <li>
-              <span class="quick-start-number" aria-hidden="true">2</span>
-              <span><strong>Choose your part</strong><small>Set your section and adjust the mix.</small></span>
-            </li>
-            <li>
-              <span class="quick-start-number" aria-hidden="true">3</span>
-              <span><strong>Play and sing</strong><small>Use the mic for optional pitch guidance.</small></span>
-            </li>
-          </ol>
+          <div class="home-intro-actions">
+            <button id="start-tour-btn" class="home-tour-btn" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 10v6" />
+                <path d="M12 7h.01" />
+              </svg>
+              <span>Take the quick tour</span>
+            </button>
+            <span class="home-tour-meta">7 steps · follow the arrows</span>
+          </div>
         </section>
 
         <section class="home-samples" aria-labelledby="sample-pieces-title">
@@ -174,6 +171,44 @@
       ></span>
     </section>
   </main>
+
+  <!-- Interactive first-visit walkthrough -->
+  <div
+    id="onboarding-modal"
+    class="onboarding-modal guided-tour"
+    role="region"
+    aria-label="Interactive walkthrough"
+    aria-labelledby="onboarding-title"
+    aria-describedby="onboarding-description"
+    aria-hidden="true"
+    hidden
+  >
+    <div id="onboarding-card" class="onboarding-card" role="dialog">
+      <div class="onboarding-progress" aria-hidden="true">
+        <div class="onboarding-progress-dots">
+          <span class="onboarding-progress-dot"></span>
+          <span class="onboarding-progress-dot"></span>
+          <span class="onboarding-progress-dot"></span>
+          <span class="onboarding-progress-dot"></span>
+          <span class="onboarding-progress-dot"></span>
+          <span class="onboarding-progress-dot"></span>
+          <span class="onboarding-progress-dot"></span>
+        </div>
+      </div>
+      <h2 id="onboarding-title">Open a score</h2>
+      <p id="onboarding-description" aria-live="polite">Click a sample piece or upload your own MusicXML score to begin.</p>
+      <div class="onboarding-actions">
+        <button id="onboarding-skip" class="onboarding-btn secondary" type="button">Skip tour</button>
+        <button id="onboarding-next" class="onboarding-btn primary" type="button" hidden>Next</button>
+      </div>
+    </div>
+    <div id="onboarding-arrow" class="onboarding-arrow" aria-hidden="true" hidden>
+      <svg fill="none" preserveAspectRatio="none" aria-hidden="true">
+        <path id="onboarding-arrow-line" class="onboarding-arrow-line" />
+        <path id="onboarding-arrow-head" class="onboarding-arrow-head" />
+      </svg>
+    </div>
+  </div>
 
   <!-- Microphone setup guidance -->
   <div
@@ -301,6 +336,6 @@
     </div>
   </footer>
 
-  <script type="module" src="js/app.js?v=score-tiles-1"></script>
+  <script type="module" src="js/app.js?v=guided-tour-7"></script>
 </body>
 </html>

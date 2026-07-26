@@ -57,6 +57,7 @@ class ChoirPracticeApp {
     this.initEventListeners();
     this.initKeyboardShortcuts();
     this.renderSettings();
+    this.initOnboarding();
   }
 
   initUI() {
@@ -96,8 +97,510 @@ class ChoirPracticeApp {
     this.exportAudioBtn = document.getElementById('export-audio-btn');
     this.exportGroup = document.getElementById('export-group');
     this.focusPartBtn = document.getElementById('focus-part-btn');
+    this.startTourBtn = document.getElementById('start-tour-btn');
+    this.onboardingModal = document.getElementById('onboarding-modal');
+    this.onboardingCard = document.getElementById('onboarding-card');
+    this.onboardingArrow = document.getElementById('onboarding-arrow');
+    this.onboardingClose = document.getElementById('onboarding-close');
+    this.onboardingSkip = document.getElementById('onboarding-skip');
+    this.onboardingNext = document.getElementById('onboarding-next');
+    this.onboardingProgressDots = this.onboardingModal?.querySelectorAll('.onboarding-progress-dot');
+    this.onboardingTitle = document.getElementById('onboarding-title');
+    this.onboardingDescription = document.getElementById('onboarding-description');
     if (this.focusPartBtn) this.focusPartBtn.disabled = true;
     this.setScoreControlsEnabled(false);
+  }
+
+  /**
+   * Configure the optional first-visit walkthrough. It deliberately lives in
+   one compact dialog instead of adding permanent instructional cards to the
+   home screen.
+   */
+  initOnboarding() {
+    this.onboardingStage = 0;
+    this.onboardingActive = false;
+    this.onboardingLastFocusedElement = null;
+    this.onboardingTargetElements = [];
+    this.onboardingSteps = [
+      {
+        action: 'score-loaded',
+        title: 'Open a score',
+        description: 'Click a sample piece or upload your own MusicXML score to begin.'
+      },
+      {
+        action: 'section-selected',
+        title: 'Choose your section',
+        description: 'Pick the part you sing, then choose Set as my section.'
+      },
+      {
+        action: 'preset-selected',
+        requiredPreset: 'mostly-yours',
+        title: 'Choose Mostly Yours',
+        description: 'Select Mostly Yours to keep your part clear while the other sections stay audible.'
+      },
+      {
+        action: 'navigation-used',
+        title: 'Move through the score',
+        description: 'Drag the score left or right, or scrub the progress bar below to jump around.'
+      },
+      {
+        action: 'tempo-changed',
+        title: 'Change the BPM',
+        description: 'Drag the BPM control left or right, scroll, or use the arrow keys.'
+      },
+      {
+        manualAdvance: true,
+        showArrow: false,
+        nextLabel: 'Next',
+        title: 'Export a practice mix',
+        description: 'Export is optional. Open Export in the top-right corner whenever you want to find Export WAV.'
+      },
+      {
+        manualAdvance: true,
+        nextLabel: 'Finish',
+        title: 'Use microphone pitch guidance',
+        description: 'Tap the microphone button while you sing to see pitch guidance. It is optional, so you can turn it on later.'
+      }
+    ];
+
+    if (this.onboardingModal && !this.hasSeenOnboarding()) {
+      requestAnimationFrame(() => this.openOnboarding());
+    }
+  }
+
+  hasSeenOnboarding() {
+    try {
+      return localStorage.getItem('choir-practice-guided-tour-seen') === '1';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  rememberOnboarding() {
+    try {
+      localStorage.setItem('choir-practice-guided-tour-seen', '1');
+    } catch (error) {
+      // Private browsing modes can make localStorage unavailable. The tour
+      // still works for this visit, it just may appear again on reload.
+    }
+  }
+
+  openOnboarding() {
+    if (!this.onboardingModal) return;
+
+    this.onboardingActive = true;
+    this.onboardingStage = this.state.parts.length > 0 ? 1 : 0;
+    this.onboardingLastFocusedElement = document.activeElement;
+    this.onboardingModal.hidden = false;
+    this.onboardingModal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('onboarding-open');
+    this.renderOnboarding();
+    requestAnimationFrame(() => this.focusOnboardingTarget());
+  }
+
+  closeOnboarding(remember = true) {
+    if (!this.onboardingModal || this.onboardingModal.hidden) return;
+
+    if (remember) this.rememberOnboarding();
+    this.clearOnboardingTargets();
+    this.onboardingActive = false;
+    this.onboardingStage = 0;
+    this.onboardingModal.hidden = true;
+    this.onboardingModal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('onboarding-open', 'onboarding-score-loaded');
+    if (this.onboardingArrow) this.onboardingArrow.hidden = true;
+
+    const activeElement = document.activeElement;
+    const returnFocus = activeElement instanceof HTMLElement &&
+      document.contains(activeElement) &&
+      !this.onboardingModal.contains(activeElement)
+      ? activeElement
+      : this.onboardingLastFocusedElement;
+    this.onboardingLastFocusedElement = null;
+    if (
+      returnFocus instanceof HTMLElement &&
+      document.contains(returnFocus) &&
+      !this.onboardingModal.contains(returnFocus)
+    ) {
+      returnFocus.focus();
+    } else if (this.state.parts.length === 0) {
+      this.startTourBtn?.focus();
+    }
+  }
+
+  advanceOnboarding() {
+    if (!this.onboardingActive) return;
+
+    if (this.onboardingStage >= this.onboardingSteps.length - 1) {
+      this.closeOnboarding();
+      return;
+    }
+
+    this.onboardingStage += 1;
+    this.renderOnboarding();
+    requestAnimationFrame(() => this.focusOnboardingTarget());
+  }
+
+  handleOnboardingNext() {
+    if (!this.onboardingActive) return;
+    const step = this.onboardingSteps[this.onboardingStage];
+    if (!step?.manualAdvance) return;
+    this.advanceOnboarding();
+  }
+
+  handleOnboardingAction(action) {
+    if (!this.onboardingActive) return;
+
+    const step = this.onboardingSteps[this.onboardingStage];
+    if (!step?.action || step.action !== action) return;
+    if (step.requiredPreset && this.state.activePreset !== step.requiredPreset) return;
+
+    this.advanceOnboarding();
+  }
+
+  isVisibleOnboardingTarget(element) {
+    if (!element || element.hidden) return false;
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 &&
+      style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  getOnboardingTargets() {
+    let targets;
+    switch (this.onboardingStage) {
+      case 0:
+        targets = [
+          document.querySelector('#sample-pieces-list .sample-piece'),
+          this.fileUploadZone
+        ];
+        break;
+      case 1:
+        targets = [
+          this.partsList?.querySelector('.select-section-btn') || this.partsList
+        ];
+        break;
+      case 2:
+        targets = [document.querySelector('button.preset-scrubber[data-preset="mostly-yours"]')];
+        break;
+      case 3:
+        // Anchor this step to the thin, always-visible progress control. The
+        // score remains draggable, but its full-height canvas is not a useful
+        // dialog boundary on compact screens.
+        targets = [this.seekSlider];
+        break;
+      case 4:
+        targets = [this.tempoScrubber];
+        break;
+      case 5:
+        targets = [this.exportGroup];
+        break;
+      case 6:
+        targets = [this.micBtn];
+        break;
+      default:
+        targets = [];
+    }
+    return targets.filter(element => this.isVisibleOnboardingTarget(element));
+  }
+
+  clearOnboardingTargets() {
+    this.onboardingTargetElements.forEach(element => {
+      element.classList.remove('guided-tour-target');
+    });
+    this.onboardingTargetElements = [];
+  }
+
+  focusOnboardingTarget() {
+    if (!this.onboardingActive) return;
+
+    const step = this.onboardingSteps[this.onboardingStage];
+    if (step?.manualAdvance) {
+      this.onboardingNext?.focus({ preventScroll: true });
+      this.positionOnboarding();
+      return;
+    }
+
+    const targets = this.getOnboardingTargets();
+    const focusTarget = targets.reduce((focusable, target) => {
+      if (focusable) return focusable;
+      if (typeof target.focus === 'function' && target.tabIndex >= 0 && !target.disabled) {
+        return target;
+      }
+      return target.querySelector?.(
+        'button:not([disabled]), summary, input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || null;
+    }, null);
+    if (focusTarget) {
+      focusTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      focusTarget.focus({ preventScroll: true });
+      requestAnimationFrame(() => this.positionOnboarding());
+    } else {
+      this.positionOnboarding();
+    }
+  }
+
+  renderOnboarding() {
+    if (!this.onboardingModal) return;
+    const step = this.onboardingSteps[this.onboardingStage];
+    if (!step) return;
+
+    document.body.classList.toggle('onboarding-score-loaded', this.state.parts.length > 0);
+    this.onboardingProgressDots?.forEach((dot, index) => {
+      dot.classList.toggle('is-active', index === this.onboardingStage);
+      dot.classList.toggle('is-complete', index < this.onboardingStage);
+    });
+    if (this.onboardingTitle) {
+      this.onboardingTitle.textContent = step.title;
+    }
+    if (this.onboardingDescription) {
+      this.onboardingDescription.textContent = step.description;
+    }
+    if (this.onboardingNext) {
+      this.onboardingNext.hidden = !step.manualAdvance;
+      this.onboardingNext.textContent = step.nextLabel || 'Next';
+    }
+    this.positionOnboarding();
+  }
+
+  positionOnboarding() {
+    if (!this.onboardingActive || !this.onboardingModal || this.onboardingModal.hidden) return;
+    if (!this.onboardingCard) return;
+
+    this.clearOnboardingTargets();
+    const targets = this.getOnboardingTargets();
+    targets.forEach(element => element.classList.add('guided-tour-target'));
+    this.onboardingTargetElements = targets;
+
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+    const margin = 16;
+    const gap = 24;
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+    // Hide only while measuring so the card cannot flash at its previous
+    // step's coordinates. Position changes are intentionally not animated;
+    // the arrow must be calculated from the card's final rectangle.
+    this.onboardingCard.style.visibility = 'hidden';
+    this.onboardingCard.style.left = '0px';
+    this.onboardingCard.style.top = '0px';
+    const cardSize = this.onboardingCard.getBoundingClientRect();
+    const maxLeft = Math.max(margin, viewportWidth - cardSize.width - margin);
+    const maxTop = Math.max(margin, viewportHeight - cardSize.height - margin);
+
+    if (!targets.length) {
+      this.onboardingCard.style.left = `${clamp((viewportWidth - cardSize.width) / 2, margin, maxLeft)}px`;
+      this.onboardingCard.style.top = `${clamp((viewportHeight - cardSize.height) / 2, margin, maxTop)}px`;
+      this.onboardingCard.style.visibility = 'visible';
+      if (this.onboardingArrow) this.onboardingArrow.hidden = true;
+      return;
+    }
+
+    const candidates = [];
+    const overlapArea = (placement, rect) => {
+      const overlapWidth = Math.max(
+        0,
+        Math.min(placement.left + cardSize.width, rect.right + 6) -
+          Math.max(placement.left, rect.left - 6)
+      );
+      const overlapHeight = Math.max(
+        0,
+        Math.min(placement.top + cardSize.height, rect.bottom + 6) -
+          Math.max(placement.top, rect.top - 6)
+      );
+      return overlapWidth * overlapHeight;
+    };
+
+    targets.forEach((targetElement, targetIndex) => {
+      const target = targetElement.getBoundingClientRect();
+      const centeredLeft = target.left + (target.width - cardSize.width) / 2;
+      const centeredTop = target.top + (target.height - cardSize.height) / 2;
+      const isSidebarTarget = Boolean(targetElement.closest?.('.sidebar'));
+      const isTransportTarget = Boolean(targetElement.closest?.('.transport-toolbar'));
+      const isSeekTarget = targetElement === this.seekSlider;
+      const isExportTarget = Boolean(targetElement.closest?.('#export-group'));
+      const isHeaderTarget = Boolean(targetElement.closest?.('header'));
+      const progressAnchorX = isSeekTarget ? target.left + target.width * 0.35 : null;
+      const progressCenteredLeft = isSeekTarget
+        ? progressAnchorX - cardSize.width / 2
+        : centeredLeft;
+      const arrowTarget = isSeekTarget
+        ? {
+          left: progressAnchorX - 0.5,
+          right: progressAnchorX + 0.5,
+          top: target.top,
+          bottom: target.bottom,
+          width: 1,
+          height: target.height
+        }
+        : target;
+      const exportMenu = isExportTarget ? targetElement.querySelector('.export-menu') : null;
+      const exportPopover = exportMenu?.open
+        ? exportMenu.querySelector('.export-menu-popover')
+        : null;
+      const exportPopoverRect = exportPopover && this.isVisibleOnboardingTarget(exportPopover)
+        ? exportPopover.getBoundingClientRect()
+        : null;
+      const obstacles = exportPopoverRect ? [target, exportPopoverRect] : [target];
+      const targetCandidates = [];
+      const addTargetCandidate = (left, top) => targetCandidates.push({ left, top });
+
+      // Prefer open space based on the target's part of the interface.
+      if (isSidebarTarget) {
+        addTargetCandidate(target.right + gap, centeredTop);
+        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
+        addTargetCandidate(centeredLeft, target.bottom + gap);
+        addTargetCandidate(centeredLeft, target.top - cardSize.height - gap);
+      } else if (isTransportTarget) {
+        addTargetCandidate(progressCenteredLeft, target.top - cardSize.height - gap);
+        addTargetCandidate(progressCenteredLeft, target.bottom + gap);
+        addTargetCandidate(target.right + gap, centeredTop);
+        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
+      } else if (isExportTarget) {
+        if (exportPopoverRect) {
+          addTargetCandidate(exportPopoverRect.left - cardSize.width - gap, centeredTop);
+        }
+        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
+        addTargetCandidate(target.left - cardSize.width - gap, target.bottom + gap);
+        addTargetCandidate(target.right - cardSize.width, target.bottom + gap);
+        addTargetCandidate(centeredLeft, target.bottom + gap);
+      } else if (isHeaderTarget) {
+        addTargetCandidate(target.right - cardSize.width, target.bottom + gap);
+        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
+        addTargetCandidate(centeredLeft, target.bottom + gap);
+        addTargetCandidate(centeredLeft, target.top - cardSize.height - gap);
+      } else {
+        addTargetCandidate(centeredLeft, target.bottom + gap);
+        addTargetCandidate(centeredLeft, target.top - cardSize.height - gap);
+        addTargetCandidate(target.right + gap, centeredTop);
+        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
+      }
+
+      targetCandidates.forEach(({ left, top }, preferenceIndex) => {
+        const placement = {
+          left: clamp(left, margin, maxLeft),
+          top: clamp(top, margin, maxTop),
+          target,
+          arrowTarget,
+          targetElement,
+          targetIndex,
+          preferenceIndex
+        };
+        placement.overlap = obstacles.reduce(
+          (total, obstacle) => total + overlapArea(placement, obstacle),
+          0
+        );
+        placement.clampDistance = Math.abs(placement.left - left) + Math.abs(placement.top - top);
+        candidates.push(placement);
+      });
+    });
+
+    // Try every highlighted target before compromising. If a very small
+    // viewport has no clean side, keep the dialog visible at the least-overlap
+    // candidate instead of silently dropping the step.
+    const placement = candidates.find(candidate => candidate.overlap === 0) ||
+      candidates.reduce((best, candidate) => {
+        if (!best) return candidate;
+        const candidateScore = candidate.overlap * 1000 + candidate.clampDistance;
+        const bestScore = best.overlap * 1000 + best.clampDistance;
+        return candidateScore < bestScore ? candidate : best;
+      }, null);
+
+    this.onboardingCard.style.left = `${placement.left}px`;
+    this.onboardingCard.style.top = `${placement.top}px`;
+    this.onboardingCard.style.visibility = 'visible';
+
+    const showArrow = this.onboardingSteps[this.onboardingStage]?.showArrow !== false;
+    if (!showArrow) {
+      if (this.onboardingArrow) this.onboardingArrow.hidden = true;
+      return;
+    }
+    if (!this.onboardingArrow) return;
+    const arrowSvg = this.onboardingArrow.querySelector('svg');
+    const arrowLine = this.onboardingArrow.querySelector('#onboarding-arrow-line');
+    const arrowHead = this.onboardingArrow.querySelector('#onboarding-arrow-head');
+    if (!arrowSvg || !arrowLine || !arrowHead) {
+      this.onboardingArrow.hidden = true;
+      return;
+    }
+
+    const card = this.onboardingCard.getBoundingClientRect();
+    const target = placement.arrowTarget || placement.target;
+    const cardCenter = {
+      x: card.left + card.width / 2,
+      y: card.top + card.height / 2
+    };
+    const targetCenter = {
+      x: target.left + target.width / 2,
+      y: target.top + target.height / 2
+    };
+    const directionX = targetCenter.x - cardCenter.x;
+    const directionY = targetCenter.y - cardCenter.y;
+    const getRectEdgePoint = (rect, dx, dy) => {
+      if (dx === 0 && dy === 0) {
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      }
+      const scaleX = dx === 0 ? Infinity : rect.width / (2 * Math.abs(dx));
+      const scaleY = dy === 0 ? Infinity : rect.height / (2 * Math.abs(dy));
+      const scale = Math.min(scaleX, scaleY);
+      return {
+        x: rect.left + rect.width / 2 + dx * scale,
+        y: rect.top + rect.height / 2 + dy * scale
+      };
+    };
+
+    const cardEdge = getRectEdgePoint(card, directionX, directionY);
+    const targetEdge = getRectEdgePoint(target, -directionX, -directionY);
+    const connectorX = targetEdge.x - cardEdge.x;
+    const connectorY = targetEdge.y - cardEdge.y;
+    const connectorLength = Math.hypot(connectorX, connectorY);
+    if (connectorLength < 12) {
+      this.onboardingArrow.hidden = true;
+      return;
+    }
+
+    const unitX = connectorX / connectorLength;
+    const unitY = connectorY / connectorLength;
+    const perpendicularX = -unitY;
+    const perpendicularY = unitX;
+    const edgeInset = Math.min(4, connectorLength / 4);
+    const drawableLength = connectorLength - edgeInset * 2;
+    const arrowHeadLength = Math.min(10, Math.max(5, drawableLength * 0.5));
+    const arrowWingWidth = Math.min(6, arrowHeadLength * 0.7);
+    const start = {
+      x: cardEdge.x + unitX * edgeInset,
+      y: cardEdge.y + unitY * edgeInset
+    };
+    const end = {
+      x: targetEdge.x - unitX * edgeInset,
+      y: targetEdge.y - unitY * edgeInset
+    };
+    const arrowBase = {
+      x: end.x - unitX * arrowHeadLength,
+      y: end.y - unitY * arrowHeadLength
+    };
+    const wingOne = {
+      x: arrowBase.x + perpendicularX * arrowWingWidth,
+      y: arrowBase.y + perpendicularY * arrowWingWidth
+    };
+    const wingTwo = {
+      x: arrowBase.x - perpendicularX * arrowWingWidth,
+      y: arrowBase.y - perpendicularY * arrowWingWidth
+    };
+    const coordinate = value => Math.round(value * 10) / 10;
+
+    arrowSvg.setAttribute('viewBox', `0 0 ${viewportWidth} ${viewportHeight}`);
+    arrowLine.setAttribute(
+      'd',
+      `M ${coordinate(start.x)} ${coordinate(start.y)} L ${coordinate(end.x)} ${coordinate(end.y)}`
+    );
+    arrowHead.setAttribute(
+      'd',
+      `M ${coordinate(wingOne.x)} ${coordinate(wingOne.y)} ` +
+        `L ${coordinate(end.x)} ${coordinate(end.y)} ` +
+        `L ${coordinate(wingTwo.x)} ${coordinate(wingTwo.y)}`
+    );
+    this.onboardingArrow.hidden = false;
   }
 
   /**
@@ -286,6 +789,34 @@ class ChoirPracticeApp {
       });
     }
 
+    // Interactive first-visit walkthrough. The tour layer does not block the
+    // highlighted controls; it advances only after the user uses each one.
+    if (this.startTourBtn) {
+      this.startTourBtn.addEventListener('click', () => this.openOnboarding());
+    }
+    if (this.onboardingClose) {
+      this.onboardingClose.addEventListener('click', () => this.closeOnboarding());
+    }
+    if (this.onboardingSkip) {
+      this.onboardingSkip.addEventListener('click', () => this.closeOnboarding());
+    }
+    if (this.onboardingNext) {
+      this.onboardingNext.addEventListener('click', () => this.handleOnboardingNext());
+    }
+    if (this.onboardingModal) {
+      this.onboardingModal.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        this.closeOnboarding();
+      });
+    }
+    const exportMenu = this.exportGroup?.querySelector('.export-menu');
+    if (exportMenu) {
+      exportMenu.addEventListener('toggle', () => {
+        if (this.onboardingActive) this.positionOnboarding();
+      });
+    }
+
     // App title click to return to home
     if (this.appTitle) {
       this.appTitle.addEventListener('click', () => this.resetToHome());
@@ -296,7 +827,9 @@ class ChoirPracticeApp {
       this.exportBtn.addEventListener('click', () => this.exportMusicXML());
     }
     if (this.exportAudioBtn) {
-      this.exportAudioBtn.addEventListener('click', () => this.exportWAV());
+      this.exportAudioBtn.addEventListener('click', () => {
+        this.exportWAV();
+      });
     }
 
     // Tempo scrubber — velocity-sensitive horizontal drag. Preview changes in
@@ -462,6 +995,7 @@ class ChoirPracticeApp {
         // This is especially important while paused, when playback cannot
         // provide the next auto-scroll update to pin the cursor in place.
         this.seekToPercent(percent, { followScore: true });
+        this.handleOnboardingAction('navigation-used');
       });
     }
 
@@ -505,6 +1039,7 @@ class ChoirPracticeApp {
         this.notationCanvas.classList.remove('is-scrubbing');
         if (didScrub) {
           this.wasNotationDragged = true;
+          this.handleOnboardingAction('navigation-used');
         }
       };
       this.notationCanvas.addEventListener('pointerup', finishScrub);
@@ -537,12 +1072,23 @@ class ChoirPracticeApp {
           this.renderer.resize();
           this.renderer.render();
         }
+        if (this.onboardingActive) this.positionOnboarding();
       });
     });
+
+    window.addEventListener('scroll', () => {
+      if (this.onboardingActive) this.positionOnboarding();
+    }, true);
   }
 
   initKeyboardShortcuts() {
     document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.onboardingModal && !this.onboardingModal.hidden) {
+        e.preventDefault();
+        this.closeOnboarding();
+        return;
+      }
+
       if (e.key === 'Escape' && this.micPrompt && !this.micPrompt.hidden) {
         e.preventDefault();
         this.hideMicPrompt();
@@ -813,6 +1359,7 @@ class ChoirPracticeApp {
       this.updateSeekSlider();
       this.setScoreControlsEnabled(true);
       this.setLoadingState(false);
+      this.handleOnboardingAction('score-loaded');
     } catch (err) {
       if (loadGeneration === this.fileLoadGeneration) {
         this.setLoadingState(false);
@@ -1144,6 +1691,7 @@ class ChoirPracticeApp {
     if (this.state.activePreset) {
       this.applyPreset(this.state.activePreset);
     }
+    this.handleOnboardingAction('section-selected');
   }
 
   /** Toggle a rehearsal-focused score view that quiets the other parts. */
@@ -1595,6 +2143,7 @@ class ChoirPracticeApp {
         othersValueEl.textContent = this.state.othersVolume + '%';
       }
     }
+    this.handleOnboardingAction('preset-selected');
   }
 
   /** Build score-aware synchronization options for the metronome. */
@@ -1635,6 +2184,7 @@ class ChoirPracticeApp {
       if (restartMetronome) this.metronome.start(this.getMetronomeSyncOptions());
     }
     this.committedTempo = newTempo;
+    this.handleOnboardingAction('tempo-changed');
   }
 
   /**

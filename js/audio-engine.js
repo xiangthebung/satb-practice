@@ -319,7 +319,7 @@ export class AudioEngine {
       this.compressor.connect(this.limiter);
       this.limiter.connect(this.audioContext.destination);
     }
-    if (this.audioContext.state === 'suspended') {
+    if (resume && this.audioContext.state === 'suspended') {
       await this.audioContext.resume();
     }
     return this.audioContext;
