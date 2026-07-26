@@ -606,11 +606,11 @@ class ChoirPracticeApp {
   /**
    * Initialize the audio engine (requires user interaction first).
    */
-  async initAudioEngine() {
+  async initAudioEngine({ resume = true } = {}) {
     if (!this.audioEngine) {
       this.audioEngine = new AudioEngine();
     }
-    await this.audioEngine.init();
+    await this.audioEngine.init({ resume });
 
     // Set up beat update callback
     this.audioEngine.onBeatUpdate = (beat) => {
@@ -771,8 +771,11 @@ class ChoirPracticeApp {
       this.renderPresets();
       this.initNotationRenderer();
 
-      // Initialize audio engine with parts
-      await this.initAudioEngine();
+      // Build the audio graph while loading, but do not resume the context yet.
+      // Loading happens after an async fetch/parse, so the original click's
+      // user-activation window may have expired and resume() can stay pending.
+      // Playback and metronome actions resume it from an explicit user gesture.
+      await this.initAudioEngine({ resume: false });
       if (loadGeneration !== this.fileLoadGeneration) return;
       this.audioEngine.setTempo(this.state.tempo);
       this.audioEngine.setSynthMode(this.state.synthMode);

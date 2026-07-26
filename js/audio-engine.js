@@ -293,7 +293,7 @@ export class AudioEngine {
    * Initialize the AudioContext (must be called after user interaction).
    * Signal chain: partGains → masterGain → compressor → limiter → destination
    */
-  async init() {
+  async init({ resume = true } = {}) {
     if (!this.audioContext) {
       this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
