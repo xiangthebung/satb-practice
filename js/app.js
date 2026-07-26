@@ -134,9 +134,8 @@ class ChoirPracticeApp {
       },
       {
         action: 'preset-selected',
-        requiredPreset: 'mostly-yours',
-        title: 'Choose Mostly Yours',
-        description: 'Select Mostly Yours to keep your part clear while the other sections stay audible.'
+        title: 'Choose a preset',
+        description: 'Choose a preset to shape the balance between your part and the other voices.'
       },
       {
         action: 'navigation-used',
@@ -281,7 +280,7 @@ class ChoirPracticeApp {
         ];
         break;
       case 2:
-        targets = [document.querySelector('button.preset-scrubber[data-preset="mostly-yours"]')];
+        targets = Array.from(document.querySelectorAll('button.preset-btn'));
         break;
       case 3:
         // Anchor this step to the thin, always-visible progress control. The
