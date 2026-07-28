@@ -1,23 +1,46 @@
 /**
- * Main Application Controller
- * Wires together the parser, renderer, audio engine, pitch detector,
- * and metronome modules for the choir practice experience.
+ * Application controller.
+ *
+ * Owns the practice session state and wires the score parser, notation
+ * renderer, audio engine, metronome, and microphone together. Interface details
+ * live in the ui/ modules; this file keeps the rules of the session.
  */
 
+import { parseFile, detectVoiceType } from './musicxml-parser.js';
+import { NotationRenderer } from './notation-renderer.js';
+import { AudioEngine } from './audio-engine.js';
+import { PitchDetector } from './pitch-detector.js';
+import { Metronome, isClickPattern } from './metronome.js';
+import { readScoreTheme, watchColorScheme } from './theme.js';
 import {
-  parseMusicXML,
-  parseFile,
-  detectVoiceType,
-  buildPartNameUpdates
-} from './musicxml-parser.js';
-import { getPartColor } from './utils.js';
-import { NotationRenderer } from './notation-renderer.js?v=score-tiles-1';
-import { AudioEngine } from './audio-engine.js?v=mic-sync-3';
-import { PitchDetector } from './pitch-detector.js?v=mic-sync-3';
-import { Metronome } from './metronome.js';
+  readPref,
+  writePref,
+  readNumberPref,
+  readBoolPref,
+  writeBoolPref
+} from './prefs.js';
+import {
+  DEFAULT_OTHERS_LEVEL,
+  detectMixPreset,
+  getMixVolumes,
+  isMixPreset
+} from './mix.js';
+import { exportMusicXMLFile, exportWavFile } from './exporters.js';
+import { Overlays } from './ui/overlays.js';
+import { PartsPanel } from './ui/parts-panel.js';
+import { Transport } from './ui/transport.js';
+import { SETTINGS_DEFAULTS, Settings } from './ui/settings.js';
+
+const TEMPO_MIN = 40;
+const TEMPO_MAX = 240;
+const TRANSPORT_UI_INTERVAL_MS = 50;
+/** How long a manual pan holds the score still while playback continues. */
+const AUTO_SCROLL_PAUSE_MS = 3000;
 
 class ChoirPracticeApp {
   constructor() {
+    const storedPreset = readPref('mix-preset', 'mostly-mine');
+
     this.state = {
       parts: [],
       metadata: null,
@@ -26,2563 +49,1221 @@ class ChoirPracticeApp {
       isPlaying: false,
       currentBeat: 0,
       tempo: 120,
-      selectedParts: new Set(),
-      selectedSectionId: null,
-      partVolumes: {},
-      metronomeActive: false,
-      micActive: false,
-      activePreset: null,
-      customVolumes: {},
-      othersVolume: 30,
-      fermataMultiplier: 2.0,
-      synthMode: 'vocal',
-      repeatActive: false,
-      focusMyPart: false
+      myPartId: null,
+      volumes: {},
+      muted: new Set(),
+      mixPreset: isMixPreset(storedPreset) ? storedPreset : 'mostly-mine',
+      othersLevel: readNumberPref('others-level', DEFAULT_OTHERS_LEVEL, 0, 100),
+      dimOthers: readBoolPref('dim-others', false),
+      loop: false,
+      metronome: false,
+      playRepeats: readBoolPref('play-repeats', SETTINGS_DEFAULTS.playRepeats),
+      micState: 'off',
+      synthMode: readPref('synth-mode', 'vocal') === 'oscillator' ? 'oscillator' : 'vocal',
+      room: readNumberPref('room', SETTINGS_DEFAULTS.room, 0, 100),
+      fermata: readNumberPref('fermata', SETTINGS_DEFAULTS.fermata, 1, 4),
+      masterVolume: readNumberPref('master-volume', SETTINGS_DEFAULTS.masterVolume, 0, 100),
+      tuning: readNumberPref('tuning', SETTINGS_DEFAULTS.tuning, 415, 450),
+      transpose: readNumberPref('transpose', SETTINGS_DEFAULTS.transpose, -12, 12),
+      followDynamics: readBoolPref('follow-dynamics', SETTINGS_DEFAULTS.followDynamics),
+      clickPattern: readPref('click-pattern', SETTINGS_DEFAULTS.clickPattern),
+      clickVolume: readNumberPref('click-volume', SETTINGS_DEFAULTS.clickVolume, 0, 100),
+      countInBars: readNumberPref('count-in', SETTINGS_DEFAULTS.countInBars, 0, 4),
+      showLyrics: readBoolPref('show-lyrics', SETTINGS_DEFAULTS.showLyrics),
+      showTimeSignatures: readBoolPref(
+        'show-time-signatures',
+        SETTINGS_DEFAULTS.showTimeSignatures
+      ),
+      verse: readNumberPref('verse', SETTINGS_DEFAULTS.verse, 1, 20),
+      soloed: new Set(),
+      loopRange: null
     };
 
     this.renderer = null;
     this.audioEngine = null;
-    this.pitchDetector = null;
     this.metronome = null;
+    this.pitchDetector = null;
     this.committedTempo = this.state.tempo;
+    this.loadGeneration = 0;
+    this.micGeneration = 0;
+    this.isSeeking = false;
+    this.wasScoreDragged = false;
+    this.autoScrollResumesAt = 0;
+    this.isTransportBusy = false;
+    this.lastTransportUiAt = -Infinity;
     this.pitchGuidePosition = 0;
-    this.micStartGeneration = 0;
-    this.fileLoadGeneration = 0;
-    this.micStartPending = false;
-    this.pitchAnnouncementTimer = null;
-    this.resizeFrame = null;
-    this.lastTransportUiUpdateAt = -Infinity;
+    this.pitchAnnounceTimer = null;
 
-    this.initUI();
-    this.initEventListeners();
-    this.initKeyboardShortcuts();
-    this.renderSettings();
-    this.initOnboarding();
+    this.cacheElements();
+    // Exposed on the instance so the interface modules stay independently
+    // testable and inspectable from the console.
+    this.overlays = new Overlays();
+    this.partsPanel = new PartsPanel(this.createPartsHandlers());
+    this.transport = new Transport(this.createTransportHandlers());
+    this.settings = new Settings(this.createSettingsHandlers());
+
+    this.partsPanel.setOthersLevel(this.state.othersLevel);
+    this.partsPanel.setMixPreset(this.state.mixPreset);
+    this.partsPanel.setDimOthers(this.state.dimOthers);
+    this.transport.setTempo(this.state.tempo);
+    this.transport.setLoopRange(null);
+    this.settings.setAll(this.collectSettings());
+
+    this.bindHomeScreen();
+    this.bindScoreCanvas();
+    this.bindExports();
+    this.bindKeyboard();
+    this.watchAppearance();
   }
 
-  initUI() {
-    this.fileUploadZone = document.getElementById('file-upload-zone');
+  cacheElements() {
+    this.home = document.getElementById('home');
+    this.practice = document.getElementById('practice');
+    this.sampleList = document.getElementById('sample-list');
+    this.dropzone = document.getElementById('dropzone');
     this.fileInput = document.getElementById('file-input');
-    this.samplePiecesList = document.getElementById('sample-pieces-list');
-    this.mainContent = document.getElementById('main-content');
-    this.loadingStatus = document.getElementById('loading-status');
-    this.loadingStatusText = document.getElementById('loading-status-text');
-    this.partsList = document.getElementById('parts-list');
-    this.notationArea = document.getElementById('notation-area');
-    this.tempoDisplay = document.getElementById('tempo-value');
-    this.tempoScrubber = document.getElementById('tempo-scrubber');
-    this.playBtn = document.getElementById('play-btn');
-    this.playIcon = document.getElementById('play-icon');
-    this.pauseIcon = document.getElementById('pause-icon');
-    this.repeatBtn = document.getElementById('repeat-btn');
-    this.metronomeBtn = document.getElementById('metronome-btn');
-    this.uploadPrompt = document.getElementById('upload-prompt');
-    this.scoreTitle = document.getElementById('score-title');
-    this.appTitle = document.getElementById('app-title');
-    this.micBtn = document.getElementById('mic-btn');
-    this.micStatus = document.getElementById('mic-status');
-    this.micPrompt = document.getElementById('mic-prompt');
-    this.micPromptCancel = document.getElementById('mic-prompt-cancel');
-    this.micPromptContinue = document.getElementById('mic-prompt-continue');
-    this.micPromptDontShow = document.getElementById('mic-prompt-dont-show');
-    this.pitchIndicator = document.getElementById('pitch-indicator');
-    this.ensurePitchGuideUI();
-    this.pitchGuidance = document.getElementById('pitch-guidance');
-    this.pitchAnnouncement = document.getElementById('pitch-announcement');
-    this.notationCanvas = document.getElementById('notation-canvas');
-    this.beatIndicator = document.getElementById('beat-indicator');
-    this.seekSlider = document.getElementById('seek-slider');
-    this.seekTime = document.getElementById('seek-time');
-    this.exportBtn = document.getElementById('export-btn');
-    this.exportAudioBtn = document.getElementById('export-audio-btn');
-    this.exportGroup = document.getElementById('export-group');
-    this.focusPartBtn = document.getElementById('focus-part-btn');
-    this.startTourBtn = document.getElementById('start-tour-btn');
-    this.onboardingModal = document.getElementById('onboarding-modal');
-    this.onboardingCard = document.getElementById('onboarding-card');
-    this.onboardingArrow = document.getElementById('onboarding-arrow');
-    this.onboardingClose = document.getElementById('onboarding-close');
-    this.onboardingSkip = document.getElementById('onboarding-skip');
-    this.onboardingNext = document.getElementById('onboarding-next');
-    this.onboardingProgressDots = this.onboardingModal?.querySelectorAll('.onboarding-progress-dot');
-    this.onboardingTitle = document.getElementById('onboarding-title');
-    this.onboardingDescription = document.getElementById('onboarding-description');
-    if (this.focusPartBtn) this.focusPartBtn.disabled = true;
-    this.setScoreControlsEnabled(false);
+    this.scoreMeta = document.getElementById('score-meta');
+    this.scoreName = document.getElementById('score-name');
+    this.scoreComposer = document.getElementById('score-composer');
+    this.exportMenu = document.getElementById('export-menu');
+    this.exportWavButton = document.getElementById('export-wav-btn');
+    this.exportXmlButton = document.getElementById('export-xml-btn');
+    this.loading = document.getElementById('loading');
+    this.loadingText = document.getElementById('loading-text');
+    this.scoreFrame = document.getElementById('score-frame');
+    this.canvas = document.getElementById('score-canvas');
+    this.pitchPill = document.getElementById('pitch-pill');
+    this.pitchLabel = document.getElementById('pitch-label');
   }
 
-  /**
-   * Configure the optional first-visit walkthrough. It deliberately lives in
-   one compact dialog instead of adding permanent instructional cards to the
-   home screen.
-   */
-  initOnboarding() {
-    this.onboardingStage = 0;
-    this.onboardingActive = false;
-    this.onboardingLastFocusedElement = null;
-    this.onboardingTargetElements = [];
-    this.onboardingSteps = [
-      {
-        action: 'score-loaded',
-        title: 'Open a score',
-        description: 'Click a sample piece or upload your own MusicXML score to begin.'
-      },
-      {
-        action: 'section-selected',
-        title: 'Choose your section',
-        description: 'Pick the part you sing, then choose Set as my section.'
-      },
-      {
-        action: 'preset-selected',
-        title: 'Choose a preset',
-        description: 'Choose a preset to shape the balance between your part and the other voices.'
-      },
-      {
-        action: 'navigation-used',
-        title: 'Move through the score',
-        description: 'Drag the score left or right, or scrub the progress bar below to jump around.'
-      },
-      {
-        action: 'tempo-changed',
-        title: 'Change the BPM',
-        description: 'Drag the BPM control left or right, scroll, or use the arrow keys.'
-      },
-      {
-        manualAdvance: true,
-        showArrow: false,
-        nextLabel: 'Next',
-        title: 'Export a practice mix',
-        description: 'Export is optional. Open Export in the top-right corner whenever you want to find Export WAV.'
-      },
-      {
-        manualAdvance: true,
-        nextLabel: 'Finish',
-        title: 'Use microphone pitch guidance',
-        description: 'Tap the microphone button while you sing to see pitch guidance. It is optional, so you can turn it on later.'
-      }
-    ];
+  /* =====================================================================
+     Screens and score loading
+     ===================================================================== */
 
-    if (this.onboardingModal && !this.hasSeenOnboarding()) {
-      requestAnimationFrame(() => this.openOnboarding());
-    }
-  }
+  bindHomeScreen() {
+    document.getElementById('home-btn')?.addEventListener('click', () => this.returnHome());
 
-  hasSeenOnboarding() {
-    try {
-      return localStorage.getItem('choir-practice-guided-tour-seen') === '1';
-    } catch (error) {
-      return false;
-    }
-  }
-
-  rememberOnboarding() {
-    try {
-      localStorage.setItem('choir-practice-guided-tour-seen', '1');
-    } catch (error) {
-      // Private browsing modes can make localStorage unavailable. The tour
-      // still works for this visit, it just may appear again on reload.
-    }
-  }
-
-  openOnboarding() {
-    if (!this.onboardingModal) return;
-
-    this.onboardingActive = true;
-    this.onboardingStage = this.state.parts.length > 0 ? 1 : 0;
-    this.onboardingLastFocusedElement = document.activeElement;
-    this.onboardingModal.hidden = false;
-    this.onboardingModal.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('onboarding-open');
-    this.renderOnboarding();
-    requestAnimationFrame(() => this.focusOnboardingTarget());
-  }
-
-  closeOnboarding(remember = true) {
-    if (!this.onboardingModal || this.onboardingModal.hidden) return;
-
-    if (remember) this.rememberOnboarding();
-    this.clearOnboardingTargets();
-    this.onboardingActive = false;
-    this.onboardingStage = 0;
-    this.onboardingModal.hidden = true;
-    this.onboardingModal.setAttribute('aria-hidden', 'true');
-    document.body.classList.remove('onboarding-open', 'onboarding-score-loaded');
-    if (this.onboardingArrow) this.onboardingArrow.hidden = true;
-
-    const activeElement = document.activeElement;
-    const returnFocus = activeElement instanceof HTMLElement &&
-      document.contains(activeElement) &&
-      !this.onboardingModal.contains(activeElement)
-      ? activeElement
-      : this.onboardingLastFocusedElement;
-    this.onboardingLastFocusedElement = null;
-    if (
-      returnFocus instanceof HTMLElement &&
-      document.contains(returnFocus) &&
-      !this.onboardingModal.contains(returnFocus)
-    ) {
-      returnFocus.focus();
-    } else if (this.state.parts.length === 0) {
-      this.startTourBtn?.focus();
-    }
-  }
-
-  advanceOnboarding() {
-    if (!this.onboardingActive) return;
-
-    if (this.onboardingStage >= this.onboardingSteps.length - 1) {
-      this.closeOnboarding();
-      return;
-    }
-
-    this.onboardingStage += 1;
-    this.renderOnboarding();
-    requestAnimationFrame(() => this.focusOnboardingTarget());
-  }
-
-  handleOnboardingNext() {
-    if (!this.onboardingActive) return;
-    const step = this.onboardingSteps[this.onboardingStage];
-    if (!step?.manualAdvance) return;
-    this.advanceOnboarding();
-  }
-
-  handleOnboardingAction(action) {
-    if (!this.onboardingActive) return;
-
-    const step = this.onboardingSteps[this.onboardingStage];
-    if (!step?.action || step.action !== action) return;
-    if (step.requiredPreset && this.state.activePreset !== step.requiredPreset) return;
-
-    this.advanceOnboarding();
-  }
-
-  isVisibleOnboardingTarget(element) {
-    if (!element || element.hidden) return false;
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
-    return rect.width > 0 && rect.height > 0 &&
-      style.display !== 'none' && style.visibility !== 'hidden';
-  }
-
-  getOnboardingTargets() {
-    let targets;
-    switch (this.onboardingStage) {
-      case 0:
-        targets = [
-          document.querySelector('#sample-pieces-list .sample-piece'),
-          this.fileUploadZone
-        ];
-        break;
-      case 1:
-        targets = [
-          this.partsList?.querySelector('.select-section-btn') || this.partsList
-        ];
-        break;
-      case 2:
-        targets = Array.from(document.querySelectorAll('button.preset-btn'));
-        break;
-      case 3:
-        // Anchor this step to the thin, always-visible progress control. The
-        // score remains draggable, but its full-height canvas is not a useful
-        // dialog boundary on compact screens.
-        targets = [this.seekSlider];
-        break;
-      case 4:
-        targets = [this.tempoScrubber];
-        break;
-      case 5:
-        targets = [this.exportGroup];
-        break;
-      case 6:
-        targets = [this.micBtn];
-        break;
-      default:
-        targets = [];
-    }
-    return targets.filter(element => this.isVisibleOnboardingTarget(element));
-  }
-
-  clearOnboardingTargets() {
-    this.onboardingTargetElements.forEach(element => {
-      element.classList.remove('guided-tour-target');
+    this.sampleList?.addEventListener('click', event => {
+      const button = event.target.closest('.sample');
+      if (button) this.loadSample(button.dataset.samplePath, button);
     });
-    this.onboardingTargetElements = [];
-  }
 
-  focusOnboardingTarget() {
-    if (!this.onboardingActive) return;
-
-    const step = this.onboardingSteps[this.onboardingStage];
-    if (step?.manualAdvance) {
-      this.onboardingNext?.focus({ preventScroll: true });
-      this.positionOnboarding();
-      return;
-    }
-
-    const targets = this.getOnboardingTargets();
-    const focusTarget = targets.reduce((focusable, target) => {
-      if (focusable) return focusable;
-      if (typeof target.focus === 'function' && target.tabIndex >= 0 && !target.disabled) {
-        return target;
-      }
-      return target.querySelector?.(
-        'button:not([disabled]), summary, input:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      ) || null;
-    }, null);
-    if (focusTarget) {
-      focusTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-      focusTarget.focus({ preventScroll: true });
-      requestAnimationFrame(() => this.positionOnboarding());
-    } else {
-      this.positionOnboarding();
-    }
-  }
-
-  renderOnboarding() {
-    if (!this.onboardingModal) return;
-    const step = this.onboardingSteps[this.onboardingStage];
-    if (!step) return;
-
-    document.body.classList.toggle('onboarding-score-loaded', this.state.parts.length > 0);
-    this.onboardingProgressDots?.forEach((dot, index) => {
-      dot.classList.toggle('is-active', index === this.onboardingStage);
-      dot.classList.toggle('is-complete', index < this.onboardingStage);
+    this.dropzone?.addEventListener('click', () => this.fileInput?.click());
+    this.fileInput?.addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      // Reset so choosing the same file again still fires a change event.
+      event.target.value = '';
+      if (file) this.openFile(file);
     });
-    if (this.onboardingTitle) {
-      this.onboardingTitle.textContent = step.title;
-    }
-    if (this.onboardingDescription) {
-      this.onboardingDescription.textContent = step.description;
-    }
-    if (this.onboardingNext) {
-      this.onboardingNext.hidden = !step.manualAdvance;
-      this.onboardingNext.textContent = step.nextLabel || 'Next';
-    }
-    this.positionOnboarding();
-  }
 
-  positionOnboarding() {
-    if (!this.onboardingActive || !this.onboardingModal || this.onboardingModal.hidden) return;
-    if (!this.onboardingCard) return;
-
-    this.clearOnboardingTargets();
-    const targets = this.getOnboardingTargets();
-    targets.forEach(element => element.classList.add('guided-tour-target'));
-    this.onboardingTargetElements = targets;
-
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
-    const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
-    const margin = 16;
-    const gap = 24;
-    const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-
-    // Hide only while measuring so the card cannot flash at its previous
-    // step's coordinates. Position changes are intentionally not animated;
-    // the arrow must be calculated from the card's final rectangle.
-    this.onboardingCard.style.visibility = 'hidden';
-    this.onboardingCard.style.left = '0px';
-    this.onboardingCard.style.top = '0px';
-    const cardSize = this.onboardingCard.getBoundingClientRect();
-    const maxLeft = Math.max(margin, viewportWidth - cardSize.width - margin);
-    const maxTop = Math.max(margin, viewportHeight - cardSize.height - margin);
-
-    if (!targets.length) {
-      this.onboardingCard.style.left = `${clamp((viewportWidth - cardSize.width) / 2, margin, maxLeft)}px`;
-      this.onboardingCard.style.top = `${clamp((viewportHeight - cardSize.height) / 2, margin, maxTop)}px`;
-      this.onboardingCard.style.visibility = 'visible';
-      if (this.onboardingArrow) this.onboardingArrow.hidden = true;
-      return;
-    }
-
-    const candidates = [];
-    const overlapArea = (placement, rect) => {
-      const overlapWidth = Math.max(
-        0,
-        Math.min(placement.left + cardSize.width, rect.right + 6) -
-          Math.max(placement.left, rect.left - 6)
-      );
-      const overlapHeight = Math.max(
-        0,
-        Math.min(placement.top + cardSize.height, rect.bottom + 6) -
-          Math.max(placement.top, rect.top - 6)
-      );
-      return overlapWidth * overlapHeight;
-    };
-
-    targets.forEach((targetElement, targetIndex) => {
-      const target = targetElement.getBoundingClientRect();
-      const centeredLeft = target.left + (target.width - cardSize.width) / 2;
-      const centeredTop = target.top + (target.height - cardSize.height) / 2;
-      const isSidebarTarget = Boolean(targetElement.closest?.('.sidebar'));
-      const isTransportTarget = Boolean(targetElement.closest?.('.transport-toolbar'));
-      const isSeekTarget = targetElement === this.seekSlider;
-      const isExportTarget = Boolean(targetElement.closest?.('#export-group'));
-      const isHeaderTarget = Boolean(targetElement.closest?.('header'));
-      const progressAnchorX = isSeekTarget ? target.left + target.width * 0.35 : null;
-      const progressCenteredLeft = isSeekTarget
-        ? progressAnchorX - cardSize.width / 2
-        : centeredLeft;
-      const arrowTarget = isSeekTarget
-        ? {
-          left: progressAnchorX - 0.5,
-          right: progressAnchorX + 0.5,
-          top: target.top,
-          bottom: target.bottom,
-          width: 1,
-          height: target.height
-        }
-        : target;
-      const exportMenu = isExportTarget ? targetElement.querySelector('.export-menu') : null;
-      const exportPopover = exportMenu?.open
-        ? exportMenu.querySelector('.export-menu-popover')
-        : null;
-      const exportPopoverRect = exportPopover && this.isVisibleOnboardingTarget(exportPopover)
-        ? exportPopover.getBoundingClientRect()
-        : null;
-      const obstacles = exportPopoverRect ? [target, exportPopoverRect] : [target];
-      const targetCandidates = [];
-      const addTargetCandidate = (left, top) => targetCandidates.push({ left, top });
-
-      // Prefer open space based on the target's part of the interface.
-      if (isSidebarTarget) {
-        addTargetCandidate(target.right + gap, centeredTop);
-        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
-        addTargetCandidate(centeredLeft, target.bottom + gap);
-        addTargetCandidate(centeredLeft, target.top - cardSize.height - gap);
-      } else if (isTransportTarget) {
-        addTargetCandidate(progressCenteredLeft, target.top - cardSize.height - gap);
-        addTargetCandidate(progressCenteredLeft, target.bottom + gap);
-        addTargetCandidate(target.right + gap, centeredTop);
-        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
-      } else if (isExportTarget) {
-        if (exportPopoverRect) {
-          addTargetCandidate(exportPopoverRect.left - cardSize.width - gap, centeredTop);
-        }
-        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
-        addTargetCandidate(target.left - cardSize.width - gap, target.bottom + gap);
-        addTargetCandidate(target.right - cardSize.width, target.bottom + gap);
-        addTargetCandidate(centeredLeft, target.bottom + gap);
-      } else if (isHeaderTarget) {
-        addTargetCandidate(target.right - cardSize.width, target.bottom + gap);
-        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
-        addTargetCandidate(centeredLeft, target.bottom + gap);
-        addTargetCandidate(centeredLeft, target.top - cardSize.height - gap);
-      } else {
-        addTargetCandidate(centeredLeft, target.bottom + gap);
-        addTargetCandidate(centeredLeft, target.top - cardSize.height - gap);
-        addTargetCandidate(target.right + gap, centeredTop);
-        addTargetCandidate(target.left - cardSize.width - gap, centeredTop);
-      }
-
-      targetCandidates.forEach(({ left, top }, preferenceIndex) => {
-        const placement = {
-          left: clamp(left, margin, maxLeft),
-          top: clamp(top, margin, maxTop),
-          target,
-          arrowTarget,
-          targetElement,
-          targetIndex,
-          preferenceIndex
-        };
-        placement.overlap = obstacles.reduce(
-          (total, obstacle) => total + overlapArea(placement, obstacle),
-          0
-        );
-        placement.clampDistance = Math.abs(placement.left - left) + Math.abs(placement.top - top);
-        candidates.push(placement);
+    const setDragState = (isOver) => this.dropzone?.classList.toggle('is-drag-over', isOver);
+    for (const type of ['dragenter', 'dragover']) {
+      this.dropzone?.addEventListener(type, event => {
+        event.preventDefault();
+        setDragState(true);
       });
+    }
+    for (const type of ['dragleave', 'dragend']) {
+      this.dropzone?.addEventListener(type, () => setDragState(false));
+    }
+    this.dropzone?.addEventListener('drop', event => {
+      event.preventDefault();
+      setDragState(false);
+      const file = event.dataTransfer?.files?.[0];
+      if (file) this.openFile(file);
     });
-
-    // Try every highlighted target before compromising. If a very small
-    // viewport has no clean side, keep the dialog visible at the least-overlap
-    // candidate instead of silently dropping the step.
-    const placement = candidates.find(candidate => candidate.overlap === 0) ||
-      candidates.reduce((best, candidate) => {
-        if (!best) return candidate;
-        const candidateScore = candidate.overlap * 1000 + candidate.clampDistance;
-        const bestScore = best.overlap * 1000 + best.clampDistance;
-        return candidateScore < bestScore ? candidate : best;
-      }, null);
-
-    this.onboardingCard.style.left = `${placement.left}px`;
-    this.onboardingCard.style.top = `${placement.top}px`;
-    this.onboardingCard.style.visibility = 'visible';
-
-    const showArrow = this.onboardingSteps[this.onboardingStage]?.showArrow !== false;
-    if (!showArrow) {
-      if (this.onboardingArrow) this.onboardingArrow.hidden = true;
-      return;
-    }
-    if (!this.onboardingArrow) return;
-    const arrowSvg = this.onboardingArrow.querySelector('svg');
-    const arrowLine = this.onboardingArrow.querySelector('#onboarding-arrow-line');
-    const arrowHead = this.onboardingArrow.querySelector('#onboarding-arrow-head');
-    if (!arrowSvg || !arrowLine || !arrowHead) {
-      this.onboardingArrow.hidden = true;
-      return;
-    }
-
-    const card = this.onboardingCard.getBoundingClientRect();
-    const target = placement.arrowTarget || placement.target;
-    const cardCenter = {
-      x: card.left + card.width / 2,
-      y: card.top + card.height / 2
-    };
-    const targetCenter = {
-      x: target.left + target.width / 2,
-      y: target.top + target.height / 2
-    };
-    const directionX = targetCenter.x - cardCenter.x;
-    const directionY = targetCenter.y - cardCenter.y;
-    const getRectEdgePoint = (rect, dx, dy) => {
-      if (dx === 0 && dy === 0) {
-        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-      }
-      const scaleX = dx === 0 ? Infinity : rect.width / (2 * Math.abs(dx));
-      const scaleY = dy === 0 ? Infinity : rect.height / (2 * Math.abs(dy));
-      const scale = Math.min(scaleX, scaleY);
-      return {
-        x: rect.left + rect.width / 2 + dx * scale,
-        y: rect.top + rect.height / 2 + dy * scale
-      };
-    };
-
-    const cardEdge = getRectEdgePoint(card, directionX, directionY);
-    const targetEdge = getRectEdgePoint(target, -directionX, -directionY);
-    const connectorX = targetEdge.x - cardEdge.x;
-    const connectorY = targetEdge.y - cardEdge.y;
-    const connectorLength = Math.hypot(connectorX, connectorY);
-    if (connectorLength < 12) {
-      this.onboardingArrow.hidden = true;
-      return;
-    }
-
-    const unitX = connectorX / connectorLength;
-    const unitY = connectorY / connectorLength;
-    const perpendicularX = -unitY;
-    const perpendicularY = unitX;
-    const edgeInset = Math.min(4, connectorLength / 4);
-    const drawableLength = connectorLength - edgeInset * 2;
-    const arrowHeadLength = Math.min(10, Math.max(5, drawableLength * 0.5));
-    const arrowWingWidth = Math.min(6, arrowHeadLength * 0.7);
-    const start = {
-      x: cardEdge.x + unitX * edgeInset,
-      y: cardEdge.y + unitY * edgeInset
-    };
-    const end = {
-      x: targetEdge.x - unitX * edgeInset,
-      y: targetEdge.y - unitY * edgeInset
-    };
-    const arrowBase = {
-      x: end.x - unitX * arrowHeadLength,
-      y: end.y - unitY * arrowHeadLength
-    };
-    const wingOne = {
-      x: arrowBase.x + perpendicularX * arrowWingWidth,
-      y: arrowBase.y + perpendicularY * arrowWingWidth
-    };
-    const wingTwo = {
-      x: arrowBase.x - perpendicularX * arrowWingWidth,
-      y: arrowBase.y - perpendicularY * arrowWingWidth
-    };
-    const coordinate = value => Math.round(value * 10) / 10;
-
-    arrowSvg.setAttribute('viewBox', `0 0 ${viewportWidth} ${viewportHeight}`);
-    arrowLine.setAttribute(
-      'd',
-      `M ${coordinate(start.x)} ${coordinate(start.y)} L ${coordinate(end.x)} ${coordinate(end.y)}`
-    );
-    arrowHead.setAttribute(
-      'd',
-      `M ${coordinate(wingOne.x)} ${coordinate(wingOne.y)} ` +
-        `L ${coordinate(end.x)} ${coordinate(end.y)} ` +
-        `L ${coordinate(wingTwo.x)} ${coordinate(wingTwo.y)}`
-    );
-    this.onboardingArrow.hidden = false;
+    // Dropping anywhere else should not navigate away from the app.
+    window.addEventListener('dragover', event => event.preventDefault());
+    window.addEventListener('drop', event => event.preventDefault());
   }
 
-  /**
-   * Keep transport controls unavailable until a playable score is ready.
-   * This prevents a first-time user from triggering audio actions on the home
-   * screen and makes the next useful action visually obvious.
-   */
-  setScoreControlsEnabled(enabled) {
-    const controls = [
-      this.playBtn,
-      this.repeatBtn,
-      this.metronomeBtn,
-      this.micBtn,
-      this.seekSlider,
-      this.tempoScrubber
-    ];
-    controls.forEach(control => {
-      if (!control) return;
-      control.disabled = !enabled;
-      control.setAttribute('aria-disabled', String(!enabled));
-    });
-  }
-
-  /** Show progress while a score is being downloaded or parsed. */
-  setLoadingState(isLoading, message = 'Opening score…') {
-    if (this.loadingStatus) {
-      this.loadingStatus.hidden = !isLoading;
-      this.loadingStatus.setAttribute('aria-hidden', String(!isLoading));
+  setLoading(isLoading, message = 'Opening score…') {
+    if (this.loading) this.loading.hidden = !isLoading;
+    if (this.loadingText && isLoading) this.loadingText.textContent = message;
+    if (this.dropzone) {
+      this.dropzone.disabled = isLoading;
+      this.dropzone.setAttribute('aria-busy', String(isLoading));
     }
-    if (this.loadingStatusText && isLoading) {
-      this.loadingStatusText.textContent = message;
-    }
-    this.mainContent?.setAttribute('aria-busy', String(isLoading));
-    if (this.fileInput) this.fileInput.disabled = isLoading;
-    if (this.fileUploadZone) {
-      this.fileUploadZone.classList.toggle('is-loading', isLoading);
-      this.fileUploadZone.setAttribute('aria-busy', String(isLoading));
-      this.fileUploadZone.setAttribute('aria-disabled', String(isLoading));
-    }
-    this.samplePiecesList?.querySelectorAll('.sample-piece').forEach(button => {
+    for (const button of this.sampleList?.querySelectorAll('.sample') || []) {
       button.disabled = isLoading;
-      button.setAttribute('aria-busy', String(isLoading));
-    });
-    if (isLoading) this.setScoreControlsEnabled(false);
+    }
+    if (isLoading) this.overlays.announce(message);
   }
 
-  /**
-   * Normalize the pitch guide before binding it. This repairs mixed-cache page
-   * loads where an older HTML shell (the `--` tuner) is paired with newer CSS
-   * and JavaScript, instead of leaving a permanently empty pill.
-   */
-  ensurePitchGuideUI() {
-    const indicator = this.pitchIndicator;
-    if (!indicator) return;
-
-    const hasCurrentGuide =
-      indicator.querySelector('#pitch-guidance') &&
-      indicator.querySelector('.pitch-guide') &&
-      indicator.querySelector('.pitch-orb');
-
-    if (!hasCurrentGuide) {
-      const guidance = document.createElement('span');
-      guidance.id = 'pitch-guidance';
-      guidance.className = 'pitch-guidance';
-      guidance.textContent = 'Listening';
-
-      const guide = document.createElement('div');
-      guide.className = 'pitch-guide';
-      guide.setAttribute('aria-hidden', 'true');
-
-      const center = document.createElement('span');
-      center.className = 'pitch-guide-center';
-      const orb = document.createElement('span');
-      orb.className = 'pitch-orb';
-      guide.append(center, orb);
-      indicator.replaceChildren(guidance, guide);
-    }
-
-    indicator.dataset.state = 'listening';
-    indicator.setAttribute('role', 'img');
-    indicator.setAttribute('aria-label', 'Microphone listening');
-
-    if (!document.getElementById('pitch-announcement')) {
-      const announcement = document.createElement('span');
-      announcement.id = 'pitch-announcement';
-      announcement.className = 'visually-hidden';
-      announcement.setAttribute('aria-live', 'polite');
-      announcement.setAttribute('aria-atomic', 'true');
-      indicator.insertAdjacentElement('afterend', announcement);
-    }
-  }
-
-  initEventListeners() {
-    // File upload via click
-    if (this.fileInput) {
-      this.fileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) this.handleFile(file);
-        // Reset so the same file can be re-uploaded
-        e.target.value = '';
-      });
-
-      // Prevent click events on the input from bubbling to the upload zone
-      this.fileInput.addEventListener('click', (e) => {
-        e.stopPropagation();
-      });
-    }
-
-    // Bundled sample pieces
-    if (this.samplePiecesList) {
-      this.samplePiecesList.addEventListener('click', (e) => {
-        const sampleButton = e.target.closest('.sample-piece');
-        if (!sampleButton) return;
-        this.handleSamplePiece(sampleButton.dataset.samplePath, sampleButton);
-      });
-    }
-
-    // Drag and drop
-    if (this.fileUploadZone) {
-      this.fileUploadZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.fileUploadZone.classList.add('drag-over');
-      });
-
-      this.fileUploadZone.addEventListener('dragleave', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.fileUploadZone.classList.remove('drag-over');
-      });
-
-      this.fileUploadZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.fileUploadZone.classList.remove('drag-over');
-        const file = e.dataTransfer.files[0];
-        if (file) this.handleFile(file);
-      });
-
-      this.fileUploadZone.addEventListener('click', (e) => {
-        // Only trigger file picker if the click wasn't on the input itself
-        if (e.target !== this.fileInput) {
-          this.fileInput?.click();
-        }
-      });
-
-      this.fileUploadZone.addEventListener('keydown', (e) => {
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        e.preventDefault();
-        this.fileInput?.click();
-      });
-    }
-
-    // Transport controls
-    if (this.playBtn) {
-      this.playBtn.addEventListener('click', () => this.togglePlay());
-    }
-    if (this.repeatBtn) {
-      this.repeatBtn.addEventListener('click', () => this.toggleRepeat());
-    }
-    if (this.metronomeBtn) {
-      this.metronomeBtn.addEventListener('click', () => this.toggleMetronome());
-    }
-    if (this.micBtn) {
-      this.micBtn.addEventListener('click', () => this.toggleMic());
-    }
-    if (this.micStatus) this.micStatus.textContent = 'Mic off';
-    if (this.focusPartBtn) {
-      this.focusPartBtn.addEventListener('click', () => this.togglePartFocus());
-    }
-    if (this.micPromptCancel) {
-      this.micPromptCancel.addEventListener('click', () => this.hideMicPrompt());
-    }
-    if (this.micPromptContinue) {
-      this.micPromptContinue.addEventListener('click', () => {
-        if (this.micPromptDontShow?.checked) {
-          localStorage.setItem('mic-prompt-skip', '1');
-        }
-        this.hideMicPrompt();
-        this.startMicrophone();
-      });
-    }
-    if (this.micPrompt) {
-      this.micPrompt.addEventListener('click', (e) => {
-        if (e.target === this.micPrompt) this.hideMicPrompt();
-      });
-    }
-
-    // Interactive first-visit walkthrough. The tour layer does not block the
-    // highlighted controls; it advances only after the user uses each one.
-    if (this.startTourBtn) {
-      this.startTourBtn.addEventListener('click', () => this.openOnboarding());
-    }
-    if (this.onboardingClose) {
-      this.onboardingClose.addEventListener('click', () => this.closeOnboarding());
-    }
-    if (this.onboardingSkip) {
-      this.onboardingSkip.addEventListener('click', () => this.closeOnboarding());
-    }
-    if (this.onboardingNext) {
-      this.onboardingNext.addEventListener('click', () => this.handleOnboardingNext());
-    }
-    if (this.onboardingModal) {
-      this.onboardingModal.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
-        e.preventDefault();
-        this.closeOnboarding();
-      });
-    }
-    const exportMenu = this.exportGroup?.querySelector('.export-menu');
-    if (exportMenu) {
-      exportMenu.addEventListener('toggle', () => {
-        if (this.onboardingActive) this.positionOnboarding();
-      });
-    }
-
-    // App title click to return to home
-    if (this.appTitle) {
-      this.appTitle.addEventListener('click', () => this.resetToHome());
-    }
-
-    // Export buttons
-    if (this.exportBtn) {
-      this.exportBtn.addEventListener('click', () => this.exportMusicXML());
-    }
-    if (this.exportAudioBtn) {
-      this.exportAudioBtn.addEventListener('click', () => {
-        this.exportWAV();
-      });
-    }
-
-    // Tempo scrubber — velocity-sensitive horizontal drag. Preview changes in
-    // the UI while scrubbing, then update the audio timeline once per gesture.
-    // Rebuilding sustained notes for every crossed BPM creates repeated attacks.
-    if (this.tempoScrubber) {
-      let isDragging = false;
-      let dragTempoChanged = false;
-      let tempoCommitTimer = null;
-      let lastX = 0;
-      let lastTime = 0;
-      let accumulatedDelta = 0;
-
-      const previewTempo = (bpm) => {
-        this.state.tempo = bpm;
-        if (this.tempoDisplay) {
-          this.tempoDisplay.textContent = bpm;
-        }
-      };
-
-      const cancelTempoCommitTimer = () => {
-        if (tempoCommitTimer) {
-          clearTimeout(tempoCommitTimer);
-          tempoCommitTimer = null;
-        }
-      };
-
-      const commitPendingTempo = () => {
-        if (!tempoCommitTimer) return;
-        cancelTempoCommitTimer();
-        this.setTempo(this.state.tempo);
-      };
-
-      const startDrag = (x) => {
-        // Preserve a wheel preview if the user immediately switches gestures.
-        commitPendingTempo();
-        isDragging = true;
-        dragTempoChanged = false;
-        lastX = x;
-        lastTime = performance.now();
-        accumulatedDelta = 0;
-        this.tempoScrubber.classList.add('dragging');
-      };
-
-      const doDrag = (x) => {
-        if (!isDragging) return;
-        const now = performance.now();
-        const dx = x - lastX;
-        const dt = Math.max(1, now - lastTime); // ms elapsed
-
-        // Velocity: pixels per millisecond
-        const velocity = Math.abs(dx) / dt;
-
-        // Map velocity to a sensitivity multiplier:
-        // slow drag (velocity < 0.3): 1 BPM per ~8px (precise)
-        // medium drag (0.3-1.0): 1 BPM per ~3px
-        // fast drag (velocity > 1.0): 1 BPM per ~1px (coarse)
-        let sensitivity;
-        if (velocity < 0.3) {
-          sensitivity = 0.12; // very precise
-        } else if (velocity < 0.8) {
-          sensitivity = 0.35;
-        } else if (velocity < 1.5) {
-          sensitivity = 0.7;
-        } else {
-          sensitivity = 1.5; // fast scrubbing
-        }
-
-        accumulatedDelta += dx * sensitivity;
-        const bpmChange = Math.trunc(accumulatedDelta);
-
-        if (bpmChange !== 0) {
-          accumulatedDelta -= bpmChange;
-          const newTempo = Math.max(40, Math.min(240, this.state.tempo + bpmChange));
-          if (newTempo !== this.state.tempo) {
-            previewTempo(newTempo);
-            dragTempoChanged = true;
-          }
-        }
-
-        lastX = x;
-        lastTime = now;
-      };
-
-      const endDrag = () => {
-        if (!isDragging) return;
-        isDragging = false;
-        this.tempoScrubber.classList.remove('dragging');
-        if (dragTempoChanged) {
-          this.setTempo(this.state.tempo);
-          dragTempoChanged = false;
-        }
-      };
-
-      // Mouse events
-      this.tempoScrubber.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        startDrag(e.clientX);
-      });
-      document.addEventListener('mousemove', (e) => {
-        doDrag(e.clientX);
-      });
-      document.addEventListener('mouseup', () => {
-        endDrag();
-      });
-
-      // Touch events
-      this.tempoScrubber.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        startDrag(e.touches[0].clientX);
-      });
-      document.addEventListener('touchmove', (e) => {
-        if (isDragging) {
-          doDrag(e.touches[0].clientX);
-        }
-      });
-      document.addEventListener('touchend', () => {
-        endDrag();
-      });
-      document.addEventListener('touchcancel', () => {
-        endDrag();
-      });
-
-      // Scroll wheel updates the display immediately but coalesces a wheel
-      // burst into one audio reschedule after scrolling settles.
-      this.tempoScrubber.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        const direction = e.deltaY > 0 ? -1 : 1;
-        const step = e.shiftKey ? 5 : 1;
-        const newTempo = Math.max(40, Math.min(240, this.state.tempo + direction * step));
-        if (newTempo !== this.state.tempo) {
-          previewTempo(newTempo);
-          cancelTempoCommitTimer();
-          tempoCommitTimer = setTimeout(() => {
-            tempoCommitTimer = null;
-            this.setTempo(this.state.tempo);
-          }, 150);
-        }
-      });
-
-      this.tempoScrubber.addEventListener('keydown', (e) => {
-        if (this.tempoScrubber.getAttribute('aria-disabled') === 'true') return;
-        const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
-          ? 1
-          : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
-            ? -1
-            : 0;
-        if (!direction) return;
-        e.preventDefault();
-        const step = e.shiftKey ? 5 : 1;
-        this.setTempo(this.state.tempo + direction * step);
-      });
-    }
-
-    // Seek slider
-    if (this.seekSlider) {
-      this.seekSlider.addEventListener('input', (e) => {
-        const percent = parseFloat(e.target.value);
-        // Update filled track immediately while dragging
-        this.seekSlider.style.background =
-          `linear-gradient(to right, var(--accent-primary) ${percent}%, var(--bg-tertiary) ${percent}%)`;
-        // Keep the score moving beneath the cursor just like screen scrubbing.
-        // This is especially important while paused, when playback cannot
-        // provide the next auto-scroll update to pin the cursor in place.
-        this.seekToPercent(percent, { followScore: true });
-        this.handleOnboardingAction('navigation-used');
-      });
-    }
-
-    // The notation behaves like an editor timeline: drag the score beneath
-    // the fixed playhead to scrub through time, while a short click still
-    // selects the nearest note.
-    if (this.notationCanvas) {
-      let isScrubbing = false;
-      let didScrub = false;
-      let pointerId = null;
-      let startX = 0;
-      let startBeat = 0;
-
-      this.notationCanvas.addEventListener('pointerdown', (e) => {
-        if (!this.renderer || e.button !== 0) return;
-        isScrubbing = true;
-        didScrub = false;
-        pointerId = e.pointerId;
-        startX = e.clientX;
-        startBeat = this.state.currentBeat;
-        this.notationCanvas.setPointerCapture?.(pointerId);
-        this.notationCanvas.classList.add('is-scrubbing');
-      });
-
-      this.notationCanvas.addEventListener('pointermove', (e) => {
-        if (!isScrubbing || e.pointerId !== pointerId || !this.renderer) return;
-        const distance = e.clientX - startX;
-        if (Math.abs(distance) > 4) didScrub = true;
-        if (!didScrub) return;
-        e.preventDefault();
-        const startScoreX = this.renderer.getScoreX(startBeat);
-        const targetBeat = this.renderer.getBeatAtScoreX(startScoreX - distance);
-        this.renderer.isAutoScrollEnabled = true;
-        this.seekToBeat(targetBeat, { followScore: true });
-      });
-
-      const finishScrub = (e) => {
-        if (!isScrubbing || e.pointerId !== pointerId) return;
-        isScrubbing = false;
-        pointerId = null;
-        this.notationCanvas.classList.remove('is-scrubbing');
-        if (didScrub) {
-          this.wasNotationDragged = true;
-          this.handleOnboardingAction('navigation-used');
-        }
-      };
-      this.notationCanvas.addEventListener('pointerup', finishScrub);
-      this.notationCanvas.addEventListener('pointercancel', finishScrub);
-
-      this.notationCanvas.addEventListener('click', (e) => {
-        if (!this.renderer) return;
-        if (this.wasNotationDragged) {
-          this.wasNotationDragged = false;
-          return;
-        }
-        const rect = this.notationCanvas.getBoundingClientRect();
-        if (!rect.width) return;
-        const canvasX = (e.clientX - rect.left) * (this.notationCanvas.width / rect.width);
-        const beat = this.renderer.getBeatAtScreenX(canvasX);
-        if (beat !== null) {
-          this.seekToBeat(beat);
-        }
-      });
-    }
-
-    // Window resize
-    window.addEventListener('resize', () => {
-      // Resize events arrive in bursts while a window is dragged. Keep the
-      // expensive canvas resize/cache rebuild to one pass per paint frame.
-      if (this.resizeFrame !== null) return;
-      this.resizeFrame = requestAnimationFrame(() => {
-        this.resizeFrame = null;
-        if (this.renderer) {
-          this.renderer.resize();
-          this.renderer.render();
-        }
-        if (this.onboardingActive) this.positionOnboarding();
-      });
-    });
-
-    window.addEventListener('scroll', () => {
-      if (this.onboardingActive) this.positionOnboarding();
-    }, true);
-  }
-
-  initKeyboardShortcuts() {
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.onboardingModal && !this.onboardingModal.hidden) {
-        e.preventDefault();
-        this.closeOnboarding();
-        return;
-      }
-
-      if (e.key === 'Escape' && this.micPrompt && !this.micPrompt.hidden) {
-        e.preventDefault();
-        this.hideMicPrompt();
-        return;
-      }
-
-      if (e.key === 'Tab' && this.micPrompt && !this.micPrompt.hidden) {
-        const focusable = Array.from(this.micPrompt.querySelectorAll(
-          'button:not([disabled]), input:not([disabled])'
-        ));
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-        return;
-      }
-
-      // Component-level controls consume their own keys (for example the
-      // tempo and fermata spinbuttons). Do not also treat those as transport
-      // shortcuts when the event reaches the document.
-      if (e.defaultPrevented) return;
-
-      // Ignore if typing in a text input or textarea (but allow range sliders)
-      if (e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
-      if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
-
-      // Ignore if modifier keys are pressed (Cmd/Ctrl, Alt, etc.)
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-
-      switch (e.code) {
-        case 'Space':
-          e.preventDefault();
-          this.togglePlay();
-          break;
-        case 'KeyM':
-          e.preventDefault();
-          this.toggleMetronome();
-          break;
-        case 'KeyR':
-          e.preventDefault();
-          this.toggleRepeat();
-          break;
-        case 'ArrowLeft':
-          e.preventDefault();
-          this.seekToPreviousBar();
-          break;
-        case 'ArrowRight':
-          e.preventDefault();
-          this.seekToNextBar();
-          break;
-      }
-    });
-  }
-
-  /**
-   * Initialize the audio engine (requires user interaction first).
-   */
-  async initAudioEngine({ resume = true } = {}) {
-    if (!this.audioEngine) {
-      this.audioEngine = new AudioEngine();
-    }
-    await this.audioEngine.init({ resume });
-
-    // Set up beat update callback
-    this.audioEngine.onBeatUpdate = (beat) => {
-      // AudioEngine.stop() emits a reset callback synchronously. Ignore that
-      // transient update while a seek is replacing the transport position.
-      if (this.isSeeking) return;
-      this.state.currentBeat = beat;
-      if (this.renderer) {
-        // Keep the playback cursor pinned on the left side of center while the
-        // score scrolls beneath it.
-        this.renderer.setCurrentBeat(beat, {
-          autoScroll: this.state.isPlaying
-        });
-      }
-      // Cursor rendering is frame-coalesced by the renderer. The range
-      // control itself has a 0.1% step, so refreshing it at 20fps keeps it
-      // visually smooth while avoiding repeated style/layout work per frame.
-      this.updateSeekSlider({ throttle: true });
-    };
-
-    // Reset UI when playback reaches the end naturally
-    this.audioEngine.onPlaybackEnd = () => {
-      if (this.state.repeatActive) {
-        // Restart from beginning
-        this.seekToBeat(0);
-        if (this.state.isPlaying) {
-          this.audioEngine.play();
-        }
-      } else {
-        // Stop playback
-        this.state.isPlaying = false;
-        if (this.state.metronomeActive && this.metronome) {
-          this.metronome.stop();
-        }
-        if (this.playIcon) this.playIcon.style.display = '';
-        if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-        if (this.playBtn) this.playBtn.classList.remove('active');
-        this.updateSeekSlider();
-      }
-    };
-
-    // Initialize metronome
-    if (!this.metronome) {
-      this.metronome = new Metronome(
-        this.audioEngine.getAudioContext(),
-        this.audioEngine.getMasterGain()
-      );
-      this.metronome.setTempo(this.state.tempo);
-      this.metronome.onBeat = (beatNum, isDownbeat) => {
-        if (this.beatIndicator) {
-          this.beatIndicator.classList.add('flash');
-          if (isDownbeat) {
-            this.beatIndicator.classList.add('downbeat');
-          }
-          setTimeout(() => {
-            this.beatIndicator.classList.remove('flash', 'downbeat');
-          }, 100);
-        }
-      };
-    }
-  }
-
-  /**
-   * Load one of the MusicXML files bundled with the app.
-   * @param {string} samplePath
-   * @param {HTMLButtonElement} button
-   */
-  async handleSamplePiece(samplePath, button) {
-    if (!samplePath) return;
-    const loadGeneration = ++this.fileLoadGeneration;
-    this.setLoadingState(true, 'Opening sample piece…');
-
-    if (button) {
-      button.disabled = true;
-      button.setAttribute('aria-busy', 'true');
-    }
+  /** Load one of the bundled sample scores. */
+  async loadSample(path, button) {
+    if (!path) return;
+    const generation = ++this.loadGeneration;
+    this.setLoading(true, 'Opening sample…');
+    if (button) button.setAttribute('aria-busy', 'true');
 
     try {
-      // The HTML provides the complete path so sample files are loaded from
-      // the bundled directory without trying to discover them by filename.
-      const encodedPath = samplePath
-        .split('/')
-        .map(segment => encodeURIComponent(segment))
-        .join('/');
-      const response = await fetch(encodedPath);
+      const encoded = path.split('/').map(encodeURIComponent).join('/');
+      const response = await fetch(encoded);
       if (!response.ok) {
-        throw new Error(`Could not load sample piece (${response.status}).`);
+        throw new Error('That sample could not be loaded. Check your connection and try again.');
       }
-
       const blob = await response.blob();
-      const fileName = samplePath.split('/').pop();
-      const file = new File([blob], fileName, { type: 'application/xml' });
-      await this.handleFile(file, loadGeneration);
-    } catch (err) {
-      if (loadGeneration === this.fileLoadGeneration) {
-        this.showError(err.message);
-      }
+      const fileName = path.split('/').pop();
+      await this.readScore(new File([blob], fileName, { type: 'application/xml' }), generation);
+    } catch (error) {
+      if (generation === this.loadGeneration) this.failLoad(error);
     } finally {
-      if (button) {
-        button.disabled = false;
-        button.removeAttribute('aria-busy');
-      }
-      if (loadGeneration === this.fileLoadGeneration) {
-        this.setLoadingState(false);
-        this.setScoreControlsEnabled(this.state.parts.length > 0);
-      }
+      button?.removeAttribute('aria-busy');
     }
   }
 
-  async handleFile(file, loadGeneration = ++this.fileLoadGeneration) {
-    this.setLoadingState(true, `Reading ${file?.name || 'score'}…`);
+  /** Open a score the singer chose or dropped. */
+  async openFile(file) {
+    const generation = ++this.loadGeneration;
+    this.setLoading(true, `Opening ${file.name}…`);
     try {
-      const result = await parseFile(file);
-      if (loadGeneration !== this.fileLoadGeneration) return;
-      if (!result.parts?.length) {
-        throw new Error('No playable parts were found in this file. Choose a MusicXML score with at least one part.');
-      }
-      this.resetScoreTransition();
-
-      this.state.parts = result.parts;
-      this.state.metadata = result.metadata;
-      this.state.rawXml = result.rawXml || null;
-      this.state.fileName = file.name;
-      this.state.tempo = result.metadata.tempo || 120;
-
-      // Default to Tenor section if available, otherwise first part
-      const tenorPart = this.state.parts.find(p =>
-        p.voiceType?.toLowerCase() === 'tenor' || p.name?.toLowerCase().includes('tenor')
-      );
-      this.state.selectedSectionId = tenorPart?.id || this.state.parts[0]?.id || null;
-
-      // Update tempo UI
-      if (this.tempoDisplay) {
-        this.tempoDisplay.textContent = this.state.tempo;
-      }
-
-      // Update title
-      if (this.scoreTitle) {
-        const title = result.metadata.title && result.metadata.title !== 'Untitled'
-          ? result.metadata.title
-          : file.name.replace(/\.(xml|musicxml|mxl)$/i, '');
-        this.scoreTitle.textContent = title;
-      }
-
-      // Hide upload prompt, show notation area
-      if (this.uploadPrompt) {
-        this.uploadPrompt.style.display = 'none';
-      }
-      if (this.notationArea) {
-        this.notationArea.style.display = 'block';
-      }
-      if (this.exportGroup) {
-        this.exportGroup.style.display = '';
-      }
-      if (this.focusPartBtn) this.focusPartBtn.disabled = false;
-
-      this.renderParts();
-      this.renderPresets();
-      this.initNotationRenderer();
-
-      // Build the audio graph while loading, but do not resume the context yet.
-      // Loading happens after an async fetch/parse, so the original click's
-      // user-activation window may have expired and resume() can stay pending.
-      // Playback and metronome actions resume it from an explicit user gesture.
-      await this.initAudioEngine({ resume: false });
-      if (loadGeneration !== this.fileLoadGeneration) return;
-      this.audioEngine.setTempo(this.state.tempo);
-      this.audioEngine.setSynthMode(this.state.synthMode);
-      this.committedTempo = this.state.tempo;
-      this.audioEngine.setParts(this.state.parts);
-      for (const part of this.state.parts) {
-        this.audioEngine.setPartVolume(part.id, this.state.partVolumes[part.id] ?? 100);
-      }
-
-      // Preserve non-custom volume presets as session preferences, but apply
-      // them to the newly loaded score's parts. Keep a fresh custom baseline
-      // for this score rather than restoring values from the previous score.
-      if (this.state.activePreset && this.state.activePreset !== 'custom') {
-        this.state.customVolumes = { ...this.state.partVolumes };
-        this.applyPreset(this.state.activePreset);
-      }
-
-      // Set time signature from first measure if available
-      if (this.metronome) {
-        this.metronome.setTempo(this.state.tempo);
-      }
-      if (this.state.parts.length > 0 && this.state.parts[0].measures.length > 0) {
-        const ts = this.state.parts[0].measures[0].timeSignature;
-        if (ts && this.metronome) {
-          this.metronome.setTimeSignature(ts.numerator, ts.denominator);
-        }
-      }
-
-      // Pass actual measure start beats so the metronome accents on real
-      // measure boundaries (handles pickup measures and time sig changes).
-      if (this.metronome && this.state.parts.length > 0) {
-        const measureStarts = this.state.parts[0].measures.map(m => m.startBeat);
-        this.metronome.setMeasureStartBeats(measureStarts);
-      }
-      this.updateSeekSlider();
-      this.setScoreControlsEnabled(true);
-      this.setLoadingState(false);
-      this.handleOnboardingAction('score-loaded');
-    } catch (err) {
-      if (loadGeneration === this.fileLoadGeneration) {
-        this.setLoadingState(false);
-        this.setScoreControlsEnabled(this.state.parts.length > 0);
-        this.showError(err.message);
-      }
+      await this.readScore(file, generation);
+    } catch (error) {
+      if (generation === this.loadGeneration) this.failLoad(error);
     }
+  }
+
+  failLoad(error) {
+    this.setLoading(false);
+    this.overlays.toast(
+      error?.message || 'That score could not be opened.',
+      { type: 'error' }
+    );
+  }
+
+  async readScore(file, generation) {
+    const result = await parseFile(file);
+    if (generation !== this.loadGeneration) return;
+    if (!result.parts?.length) {
+      throw new Error('No playable parts were found in this file.');
+    }
+
+    this.resetSession();
+    this.state.parts = result.parts;
+    this.state.metadata = result.metadata;
+    this.state.rawXml = result.rawXml || null;
+    this.state.fileName = file.name;
+    this.state.tempo = this.clampTempo(result.metadata.tempo || 120);
+    this.committedTempo = this.state.tempo;
+    this.state.myPartId = this.chooseDefaultPart(result.parts);
+
+    for (const part of result.parts) {
+      this.state.volumes[part.id] = 100;
+    }
+
+    this.showPracticeScreen(result, file.name);
+    this.createRenderer();
+    await this.prepareAudio(generation);
+    if (generation !== this.loadGeneration) return;
+
+    this.applyMix(this.state.mixPreset, { persist: false });
+    this.partsPanel.renderParts(this.state.parts, this.state);
+    this.partsPanel.setVolumes(this.state.volumes);
+    this.partsPanel.setMixPreset(this.state.mixPreset);
+    this.transport.setTempo(this.state.tempo);
+    this.updateTransportPosition();
+    this.setLoading(false);
+
+    if (!readBoolPref('coach-seen', false)) this.partsPanel.showCoach();
+    this.overlays.announce(
+      `${this.getScoreTitle(result, file.name)} is open with ${result.parts.length} parts. Press space to play.`
+    );
+  }
+
+  getScoreTitle(result, fileName) {
+    const title = result.metadata?.title;
+    if (title && title !== 'Untitled') return title;
+    return fileName.replace(/\.(musicxml|xml|mxl)$/i, '');
   }
 
   /**
-   * Clear score-specific state before loading a new file or returning home.
-   * Session preferences such as synth mode, fermata timing, repeat, metronome,
-   * and non-custom volume presets intentionally remain in state.
+   * Pick a sensible starting part: the voice this singer chose last time when
+   * the score has it, otherwise the first singable part.
    */
-  resetScoreTransition() {
+  chooseDefaultPart(parts) {
+    const preferred = readPref('voice-type');
+    const singable = parts.filter(part => !part.isPiano);
+    const pool = singable.length ? singable : parts;
+    if (preferred) {
+      const match = pool.find(part => part.voiceType === preferred) ||
+        pool.find(part => String(part.voiceType || '').startsWith(preferred));
+      if (match) return match.id;
+    }
+    return pool[0]?.id || null;
+  }
+
+  showPracticeScreen(result, fileName) {
+    const title = this.getScoreTitle(result, fileName);
+    if (this.scoreName) this.scoreName.textContent = title;
+    if (this.scoreComposer) this.scoreComposer.textContent = result.metadata?.composer || '';
+    if (this.scoreMeta) this.scoreMeta.hidden = false;
+    if (this.exportMenu) this.exportMenu.hidden = false;
+    if (this.home) this.home.hidden = true;
+    if (this.practice) this.practice.hidden = false;
+    this.transport.setVisible(true);
+    this.partsPanel.show();
+    const voices = result.parts.map(part => part.name).join(', ');
+    this.canvas?.setAttribute('aria-label', `Score for ${title}. Parts: ${voices}.`);
+    document.title = `${title} · Choir Practice`;
+  }
+
+  /** Clear everything tied to the previous score, keeping session preferences. */
+  resetSession() {
+    this.stopMicrophone();
     this.state.isPlaying = false;
     this.state.currentBeat = 0;
     this.state.parts = [];
     this.state.metadata = null;
     this.state.rawXml = null;
     this.state.fileName = null;
-    this.state.selectedSectionId = null;
-    this.state.partVolumes = {};
-    this.state.selectedParts = new Set();
-    this.state.customVolumes = {};
-    this.state.focusMyPart = false;
-    if (this.state.activePreset === 'custom') {
-      this.state.activePreset = null;
-    }
-    this._activePartEdit = null;
+    this.state.myPartId = null;
+    this.state.volumes = {};
+    this.state.muted = new Set();
+    this.state.soloed = new Set();
+    this.state.loopRange = null;
+    this.state.loop = false;
+    this.state.metronome = false;
     this.isSeeking = false;
+    this.renderer?.destroy();
+    this.renderer = null;
 
-    if (this.audioEngine) {
-      this.audioEngine.resetForNewScore();
-    }
+    this.audioEngine?.resetForNewScore();
     if (this.metronome) {
       this.metronome.reset();
       this.metronome.setTimeSignature(4, 4);
       this.metronome.setMeasureStartBeats(null);
     }
 
-    if (this.seekSlider) {
-      this.seekSlider.value = 0;
-      this.seekSlider.style.background =
-        'linear-gradient(to right, var(--accent-primary) 0%, var(--bg-tertiary) 0%)';
-    }
-    if (this.seekTime) {
-      this.seekTime.textContent = '0:00';
-    }
-    if (this.tempoDisplay) {
-      this.tempoDisplay.textContent = '120';
-    }
-    this.state.tempo = 120;
-    this.committedTempo = 120;
-
-    if (this.scoreTitle) {
-      this.scoreTitle.textContent = '';
-    }
-    if (this.partsList) {
-      this.partsList.innerHTML = '<p class="no-parts-message">Your parts will appear here after you open a score.</p>';
-    }
-    if (this.renderer) {
-      this.renderer = null;
-    }
-    this.pitchGuidePosition = 0;
-    this.updatePitchGuide(null);
-
-    if (this.playIcon) this.playIcon.style.display = '';
-    if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-    if (this.playBtn) {
-      this.playBtn.classList.remove('active');
-      this.playBtn.setAttribute('aria-label', 'Play');
-    }
-    if (this.focusPartBtn) {
-      this.focusPartBtn.textContent = 'Focus my part';
-      this.focusPartBtn.setAttribute('aria-pressed', 'false');
-      this.focusPartBtn.classList.remove('active');
-    }
-    this.setScoreControlsEnabled(false);
+    this.transport.setPlaying(false);
+    this.transport.setLoop(false);
+    this.transport.setMetronome(false);
+    this.transport.setLoopRange(null);
+    this.transport.setLoopFields(null);
+    this.transport.setPosition({ percent: 0, currentSeconds: 0, totalSeconds: 0 });
+    this.audioEngine?.clearLoopRange();
+    this.audioEngine?.clearSolo();
   }
 
-  /**
-   * Reset the app back to the home/upload screen.
-   */
-  resetToHome() {
-    // Invalidate any file that is still parsing or downloading.
-    this.fileLoadGeneration++;
-    this.setLoadingState(false);
-    // No score should remain active on the home screen. Stop microphone
-    // capture separately because it is otherwise preserved across files.
-    this.stopMicrophone();
-    this.resetScoreTransition();
-    document.getElementById('presets-section')?.remove();
-
-    if (this.uploadPrompt) {
-      this.uploadPrompt.style.display = '';
-    }
-    if (this.notationArea) {
-      this.notationArea.style.display = 'none';
-    }
-    if (this.pitchIndicator) {
-      this.pitchIndicator.style.display = 'none';
-    }
-    if (this.exportGroup) {
-      this.exportGroup.style.display = 'none';
-    }
-    if (this.focusPartBtn) {
-      this.focusPartBtn.disabled = true;
-      this.focusPartBtn.setAttribute('aria-pressed', 'false');
-      this.focusPartBtn.classList.remove('active');
-    }
+  /** Return to the score picker. */
+  returnHome() {
+    this.loadGeneration++;
+    this.setLoading(false);
+    this.overlays.closeMenus();
+    this.resetSession();
+    this.partsPanel.hide();
+    this.transport.setVisible(false);
+    if (this.practice) this.practice.hidden = true;
+    if (this.home) this.home.hidden = false;
+    if (this.scoreMeta) this.scoreMeta.hidden = true;
+    if (this.exportMenu) this.exportMenu.hidden = true;
+    if (this.pitchPill) this.pitchPill.hidden = true;
+    document.title = 'Choir Practice';
+    this.sampleList?.querySelector('.sample')?.focus();
   }
 
-  /**
-   * Initialize the canvas-based notation renderer.
-   */
-  initNotationRenderer() {
-    if (!this.notationCanvas) return;
+  /* =====================================================================
+     Score rendering and pointer interaction
+     ===================================================================== */
 
-    this.renderer = new NotationRenderer(this.notationCanvas);
+  createRenderer() {
+    if (!this.canvas) return;
+    this.renderer?.destroy();
+    this.renderer = new NotationRenderer(this.canvas);
+    this.renderer.setTheme(readScoreTheme());
+    // Score-view choices are set before the data so the first layout already
+    // reserves room for the words instead of reflowing once they appear.
+    this.renderer.showLyrics = this.state.showLyrics;
+    this.renderer.showTimeSignatures = this.state.showTimeSignatures;
+    this.renderer.verse = this.state.verse;
     this.renderer.setData(this.state.parts, this.state.metadata);
-    this.renderer.setSelectedPart(this.state.selectedSectionId);
-    this.renderer.setFocusSelectedPart(this.state.focusMyPart);
-    const scoreName = this.scoreTitle?.textContent || 'score';
-    this.notationCanvas.setAttribute(
-      'aria-label',
-      `Interactive score for ${scoreName}. Click a note to jump or drag to scrub.`
-    );
+    this.renderer.setSelectedPart(this.state.myPartId);
+    this.renderer.setFocusSelectedPart(this.state.dimOthers);
+    this.observeScoreFrame();
+
+    // A verse picker is only worth offering when the score has more than one.
+    const verseCount = this.renderer.getVerseCount();
+    if (this.state.verse > Math.max(1, verseCount)) this.state.verse = 1;
+    this.renderer.verse = this.state.verse;
+    this.settings.setVerses(verseCount, this.state.verse);
   }
 
-  /**
-   * Make split voices distinguishable in the sidebar without showing the
-   * parser's long parenthetical suffix on every row.
-   */
-  getDisplayPartName(part) {
-    const name = String(part?.name || '').trim();
-    const voiceSuffix = name.match(/\s*\(voice\s+(\d+)\)\s*$/i);
-    const baseName = voiceSuffix ? name.slice(0, voiceSuffix.index).trim() : name;
-    if (voiceSuffix && baseName) return `${baseName} ${voiceSuffix[1]}`;
-    return baseName || part?.voiceType || 'Part';
-  }
-
-  renderParts() {
-    if (!this.partsList) return;
-    this.partsList.innerHTML = '';
-
-    for (const part of this.state.parts) {
-      const color = getPartColor(part.voiceType);
-      const partEl = document.createElement('div');
-      partEl.className = 'part-control';
-      partEl.classList.toggle('selected-section', part.id === this.state.selectedSectionId);
-      partEl.dataset.partId = part.id;
-
-      // Initialize volume
-      if (!(part.id in this.state.partVolumes)) {
-        this.state.partVolumes[part.id] = 100;
-      }
-      this.state.selectedParts.add(part.id);
-
-      partEl.innerHTML = `
-        <div class="part-header">
-          <span class="part-color-dot"></span>
-          <span class="part-name" title="Double-click to rename"></span>
-          <button class="select-section-btn" type="button"></button>
-        </div>
-        <div class="part-volume">
-          <button class="mute-btn" type="button" title="Mute" aria-label="Mute part">
-            <svg class="mute-icon unmuted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-              <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-              <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-            </svg>
-            <svg class="mute-icon muted" style="display:none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-              <line x1="23" y1="9" x2="17" y2="15"/>
-              <line x1="17" y1="9" x2="23" y2="15"/>
-            </svg>
-          </button>
-          <input type="range" min="0" max="100" class="volume-slider" aria-label="Part volume">
-          <span class="volume-value"></span>
-        </div>
-      `;
-
-      partEl.setAttribute('role', 'group');
-      partEl.setAttribute('aria-label', `${this.getDisplayPartName(part)} controls`);
-      const colorDot = partEl.querySelector('.part-color-dot');
-      colorDot.style.background = color;
-      const partNameEl = partEl.querySelector('.part-name');
-      partNameEl.textContent = this.getDisplayPartName(part);
-      const selectSectionBtn = partEl.querySelector('.select-section-btn');
-      const isSelected = part.id === this.state.selectedSectionId;
-      selectSectionBtn.textContent = isSelected ? 'My Section' : 'Set as my section';
-      selectSectionBtn.setAttribute('aria-pressed', String(isSelected));
-      const slider = partEl.querySelector('.volume-slider');
-      slider.value = String(this.state.partVolumes[part.id]);
-      slider.dataset.partId = part.id;
-      slider.setAttribute('aria-label', `${this.getDisplayPartName(part)} volume`);
-      const valueDisplay = partEl.querySelector('.volume-value');
-      valueDisplay.textContent = `${this.state.partVolumes[part.id]}%`;
-      const muteBtn = partEl.querySelector('.mute-btn');
-      muteBtn.dataset.partId = part.id;
-      muteBtn.title = `Mute ${this.getDisplayPartName(part)}`;
-
-      this.partsList.appendChild(partEl);
-
-      // Double-click part name to edit inline
-      partNameEl.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        if (partNameEl.contentEditable === 'true') return;
-
-        // Commit any other active edit first
-        this.commitActivePartEdit();
-
-        partNameEl.contentEditable = 'true';
-        partNameEl.classList.add('editing');
-        partNameEl.focus();
-        // Select all text
-        const range = document.createRange();
-        range.selectNodeContents(partNameEl);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-
-        const commitEdit = () => {
-          if (this._activePartEdit?.element !== partNameEl) return;
-          this._activePartEdit = null;
-          partNameEl.contentEditable = 'false';
-          partNameEl.classList.remove('editing');
-          partNameEl.removeEventListener('blur', commitEdit);
-          partNameEl.removeEventListener('keydown', onKeydown);
-          const newName = partNameEl.textContent.trim();
-          if (newName && newName !== part.name) {
-            part.name = newName;
-            // Re-detect voice type from the new name
-            part.voiceType = detectVoiceType(newName);
-            const badge = partEl.querySelector('.part-type-badge');
-            if (badge) badge.textContent = part.voiceType;
-            // Part colour is baked into the static notation layer. Refresh it
-            // only after a committed rename, never while the user is typing.
-            this.renderer?.invalidateStaticScore();
-            this.renderer?.requestRender();
-          } else {
-            partNameEl.textContent = this.getDisplayPartName(part);
-          }
-        };
-
-        const onKeydown = (ke) => {
-          if (ke.key === 'Enter') {
-            ke.preventDefault();
-            partNameEl.blur();
-          } else if (ke.key === 'Escape') {
-            partNameEl.textContent = this.getDisplayPartName(part);
-            partNameEl.blur();
-          }
-        };
-
-        partNameEl.addEventListener('blur', commitEdit);
-        partNameEl.addEventListener('keydown', onKeydown);
-        this._activePartEdit = { element: partNameEl, commit: commitEdit };
-      });
-
-      // Click the box to select as your section
-      partEl.addEventListener('click', (e) => {
-        // Don't select section when interacting with controls or editing name
-        if (e.target.closest('input') || e.target.closest('button')) return;
-        if (e.target.contentEditable === 'true') return;
-        this.selectSection(part.id);
-      });
-
-      selectSectionBtn.addEventListener('click', () => this.selectSection(part.id));
-
-      // Volume slider event
-      slider.addEventListener('input', (e) => {
-        const volume = parseInt(e.target.value, 10);
-        this.state.partVolumes[part.id] = volume;
-        valueDisplay.textContent = `${volume}%`;
-        if (this.audioEngine) {
-          this.audioEngine.setPartVolume(part.id, volume);
-        }
-      });
-
-      // Mute button event
-      muteBtn.addEventListener('click', () => {
-        const isMuted = this.state.selectedParts.has(part.id);
-        if (isMuted) {
-          this.state.selectedParts.delete(part.id);
-          muteBtn.classList.add('active');
-          muteBtn.querySelector('.unmuted').style.display = 'none';
-          muteBtn.querySelector('.muted').style.display = '';
-          muteBtn.setAttribute('aria-label', 'Unmute part');
-          if (this.audioEngine) {
-            this.audioEngine.setPartMuted(part.id, true);
-          }
-        } else {
-          this.state.selectedParts.add(part.id);
-          muteBtn.classList.remove('active');
-          muteBtn.querySelector('.unmuted').style.display = '';
-          muteBtn.querySelector('.muted').style.display = 'none';
-          muteBtn.setAttribute('aria-label', 'Mute part');
-          if (this.audioEngine) {
-            this.audioEngine.setPartMuted(part.id, false);
-          }
-        }
-      });
-    }
-  }
-
-  /**
-   * Select a section as "my section" — clicking a part box sets this.
-   * @param {string} partId
-   */
-  selectSection(partId) {
-    this.commitActivePartEdit();
-    this.state.selectedSectionId = partId;
-    // Update visual state
-    this.partsList.querySelectorAll('.part-control').forEach(control => {
-      const isSelected = control.dataset.partId === partId;
-      control.classList.toggle('selected-section', isSelected);
-      const selectButton = control.querySelector('.select-section-btn');
-      if (selectButton) {
-        selectButton.textContent = isSelected ? 'My Section' : 'Set as my section';
-        selectButton.setAttribute('aria-pressed', String(isSelected));
-      }
+  observeScoreFrame() {
+    if (this.frameObserver || !this.scoreFrame || typeof ResizeObserver !== 'function') return;
+    this.frameObserver = new ResizeObserver(() => {
+      if (!this.renderer) return;
+      this.renderer.resize();
+      this.renderer.render();
     });
-    if (this.renderer) {
-      this.renderer.setSelectedPart(partId);
-    }
-    // Re-apply active preset if one is set
-    if (this.state.activePreset) {
-      this.applyPreset(this.state.activePreset);
-    }
-    this.handleOnboardingAction('section-selected');
+    this.frameObserver.observe(this.scoreFrame);
   }
 
-  /** Toggle a rehearsal-focused score view that quiets the other parts. */
-  togglePartFocus() {
-    this.state.focusMyPart = !this.state.focusMyPart;
-    if (this.focusPartBtn) {
-      this.focusPartBtn.classList.toggle('active', this.state.focusMyPart);
-      this.focusPartBtn.setAttribute('aria-pressed', String(this.state.focusMyPart));
-      this.focusPartBtn.textContent = this.state.focusMyPart ? 'Show all parts' : 'Focus my part';
-    }
-    this.renderer?.setFocusSelectedPart(this.state.focusMyPart);
+  watchAppearance() {
+    watchColorScheme(theme => {
+      this.renderer?.setTheme(theme);
+      this.partsPanel.refreshVoiceColors(this.state.parts);
+    });
   }
 
-  /**
-   * Render the volume presets panel at the bottom of the sidebar.
-   */
-  renderPresets() {
-    let presetsEl = document.getElementById('presets-section');
-    if (!presetsEl) {
-      presetsEl = document.createElement('div');
-      presetsEl.id = 'presets-section';
-      presetsEl.className = 'presets-section';
-      const sidebar = document.getElementById('sidebar');
-      if (sidebar) sidebar.appendChild(presetsEl);
-    }
+  bindScoreCanvas() {
+    const canvas = this.canvas;
+    if (!canvas) return;
 
-    presetsEl.innerHTML = `
-      <div class="presets-header">
-        <h3>Rehearsal mix</h3>
-        <p>Choose how loudly to hear each section.</p>
-      </div>
-      <div class="presets-list">
-        <button class="preset-btn ${this.state.activePreset === 'custom' ? 'active' : ''}" data-preset="custom" aria-pressed="${this.state.activePreset === 'custom'}">
-          Custom
-        </button>
-        <button class="preset-btn ${this.state.activePreset === 'just-yours' ? 'active' : ''}" data-preset="just-yours" aria-pressed="${this.state.activePreset === 'just-yours'}">
-          Just Yours
-        </button>
-        <button class="preset-btn preset-scrubber ${this.state.activePreset === 'mostly-yours' ? 'active' : ''}" data-preset="mostly-yours" aria-pressed="${this.state.activePreset === 'mostly-yours'}">
-          <span class="preset-scrubber-label">Mostly Yours</span>
-          <span class="preset-scrubber-control">
-            <svg class="scrubber-drag-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 8H12"/>
-              <path d="M6 6L4 8L6 10"/>
-              <path d="M10 6L12 8L10 10"/>
-            </svg>
-            <span class="scrubber-context">others</span>
-            <span id="others-volume-value">${this.state.othersVolume}%</span>
-          </span>
-        </button>
-        <button class="preset-btn ${this.state.activePreset === 'all' ? 'active' : ''}" data-preset="all" aria-pressed="${this.state.activePreset === 'all'}">
-          All
-        </button>
-        <button class="preset-btn ${this.state.activePreset === 'everything-but-yours' ? 'active' : ''}" data-preset="everything-but-yours" aria-pressed="${this.state.activePreset === 'everything-but-yours'}">
-          Everything But Yours
-        </button>
-      </div>
-    `;
+    let pointerId = null;
+    let startX = 0;
+    let startBeat = 0;
+    let didDrag = false;
 
-    // Bind preset buttons
-    presetsEl.querySelectorAll('.preset-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        // Don't activate via click if it was a drag gesture on the scrubber
-        if (btn.dataset.wasDragged === 'true') {
-          btn.dataset.wasDragged = 'false';
-          return;
-        }
-        const preset = btn.dataset.preset;
-        this.applyPreset(preset);
-      });
+    canvas.addEventListener('pointerdown', event => {
+      if (!this.renderer || event.button !== 0) return;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startBeat = this.state.currentBeat;
+      didDrag = false;
+      canvas.setPointerCapture?.(pointerId);
+      canvas.classList.add('is-scrubbing');
     });
 
-    // "Mostly Yours" scrubber — horizontal drag to adjust others volume
-    const scrubberBtn = presetsEl.querySelector('.preset-scrubber');
-    if (scrubberBtn) {
-      let isDragging = false;
-      let lastX = 0;
-      let accumulatedDelta = 0;
-
-      const updateOthersVolume = (volume) => {
-        const nextVolume = Math.max(0, Math.min(100, volume));
-        if (nextVolume === this.state.othersVolume) return false;
-        this.state.othersVolume = nextVolume;
-        const valueEl = presetsEl.querySelector('#others-volume-value');
-        if (valueEl) valueEl.textContent = nextVolume + '%';
-        scrubberBtn.setAttribute(
-          'aria-label',
-          `Mostly Yours; other parts volume ${nextVolume}%`
-        );
-        if (this.state.activePreset === 'mostly-yours') {
-          this.applyPreset('mostly-yours');
-        }
-        return true;
-      };
-
-      scrubberBtn.setAttribute(
-        'aria-label',
-        `Mostly Yours; other parts volume ${this.state.othersVolume}%`
-      );
-
-      const startDrag = (x) => {
-        isDragging = true;
-        lastX = x;
-        accumulatedDelta = 0;
-        scrubberBtn.classList.add('dragging');
-        // Activate this preset on drag start
-        if (this.state.activePreset !== 'mostly-yours') {
-          this.applyPreset('mostly-yours');
-        }
-      };
-
-      const doDrag = (x) => {
-        if (!isDragging) return;
-        const dx = x - lastX;
-        accumulatedDelta += dx * 0.4;
-        const volumeChange = Math.trunc(accumulatedDelta);
-        if (volumeChange !== 0) {
-          accumulatedDelta -= volumeChange;
-          updateOthersVolume(this.state.othersVolume + volumeChange);
-        }
-        lastX = x;
-      };
-
-      const endDrag = () => {
-        if (!isDragging) return;
-        // If there was meaningful movement, suppress the click
-        if (Math.abs(lastX - lastX) !== 0 || accumulatedDelta !== 0) {
-          scrubberBtn.dataset.wasDragged = 'true';
-        }
-        isDragging = false;
-        scrubberBtn.classList.remove('dragging');
-      };
-
-      scrubberBtn.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        startDrag(e.clientX);
-        scrubberBtn.dataset.wasDragged = 'false';
-        const startX = e.clientX;
-
-        const onMove = (ev) => {
-          doDrag(ev.clientX);
-          // Mark as dragged if moved more than 3px
-          if (Math.abs(ev.clientX - startX) > 3) {
-            scrubberBtn.dataset.wasDragged = 'true';
-          }
-        };
-        const onUp = () => {
-          endDrag();
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-
-      scrubberBtn.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        startDrag(e.touches[0].clientX);
-        scrubberBtn.dataset.wasDragged = 'false';
-        const startX = e.touches[0].clientX;
-
-        const onMove = (ev) => {
-          doDrag(ev.touches[0].clientX);
-          if (Math.abs(ev.touches[0].clientX - startX) > 3) {
-            scrubberBtn.dataset.wasDragged = 'true';
-          }
-        };
-        const onEnd = () => {
-          endDrag();
-          document.removeEventListener('touchmove', onMove);
-          document.removeEventListener('touchend', onEnd);
-          document.removeEventListener('touchcancel', onEnd);
-        };
-        document.addEventListener('touchmove', onMove);
-        document.addEventListener('touchend', onEnd);
-        document.addEventListener('touchcancel', onEnd);
-      });
-
-      // Scroll wheel on the scrubber button
-      scrubberBtn.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        if (this.state.activePreset !== 'mostly-yours') {
-          this.applyPreset('mostly-yours');
-        }
-        const direction = e.deltaY > 0 ? -1 : 1;
-        const step = e.shiftKey ? 10 : 5;
-        updateOthersVolume(this.state.othersVolume + direction * step);
-      });
-
-      scrubberBtn.addEventListener('keydown', (e) => {
-        const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
-          ? 1
-          : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
-            ? -1
-            : 0;
-        if (!direction) return;
-        e.preventDefault();
-        if (this.state.activePreset !== 'mostly-yours') {
-          this.applyPreset('mostly-yours');
-        }
-        updateOthersVolume(this.state.othersVolume + direction * (e.shiftKey ? 10 : 5));
-      });
-    }
-  }
-
-  /**
-   * Wire up the settings popover and fermata scrubber in the transport toolbar.
-   */
-  renderSettings() {
-    const settingsBtn = document.getElementById('settings-btn');
-    const popover = document.getElementById('settings-popover');
-    const scrubber = document.getElementById('fermata-scrubber');
-    const fermataValue = document.getElementById('fermata-value');
-    const synthToggle = document.getElementById('synth-toggle');
-
-    if (!settingsBtn || !popover) return;
-
-    // Toggle popover
-    settingsBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const isOpen = popover.style.display !== 'none';
-      popover.style.display = isOpen ? 'none' : '';
-      settingsBtn.classList.toggle('active', !isOpen);
-      settingsBtn.setAttribute('aria-expanded', String(!isOpen));
+    canvas.addEventListener('pointermove', event => {
+      if (pointerId === null || event.pointerId !== pointerId || !this.renderer) return;
+      const distance = event.clientX - startX;
+      if (!didDrag && Math.abs(distance) <= 4) return;
+      didDrag = true;
+      event.preventDefault();
+      const startScoreX = this.renderer.getScoreX(startBeat);
+      const targetBeat = this.renderer.getBeatAtScoreX(startScoreX - distance);
+      this.renderer.isAutoScrollEnabled = true;
+      this.seekToBeat(targetBeat, { followScore: true });
     });
 
-    // Close popover when clicking outside
-    document.addEventListener('click', (e) => {
-      if (!popover.contains(e.target) && e.target !== settingsBtn) {
-        popover.style.display = 'none';
-        settingsBtn.classList.remove('active');
-        settingsBtn.setAttribute('aria-expanded', 'false');
-      }
-    });
-
-    // Synth mode toggle (Synth / Vocal)
-    if (synthToggle) {
-      synthToggle.querySelectorAll('.synth-toggle-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const mode = btn.dataset.mode;
-          if (mode === this.state.synthMode) return;
-          this.state.synthMode = mode;
-          synthToggle.querySelectorAll('.synth-toggle-btn').forEach(b => {
-            const isActive = b.dataset.mode === mode;
-            b.classList.toggle('active', isActive);
-            b.setAttribute('aria-pressed', String(isActive));
-          });
-          if (this.audioEngine) {
-            this.audioEngine.setSynthMode(mode);
-          }
-        });
-      });
-    }
-
-    // Update displayed value
-    if (fermataValue) {
-      fermataValue.textContent = this.state.fermataMultiplier.toFixed(1) + 'x';
-    }
-
-    const updateFermataAccessibility = () => {
-      scrubber?.setAttribute('aria-valuenow', String(this.state.fermataMultiplier));
-      scrubber?.setAttribute('aria-valuetext', `${this.state.fermataMultiplier.toFixed(1)} times`);
+    const endDrag = event => {
+      if (pointerId === null || event.pointerId !== pointerId) return;
+      pointerId = null;
+      canvas.classList.remove('is-scrubbing');
+      this.wasScoreDragged = didDrag;
     };
-    updateFermataAccessibility();
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
 
-    // Fermata scrubber — horizontal drag
-    if (scrubber) {
-      let isDragging = false;
-      let lastX = 0;
-      let accumulatedDelta = 0;
-
-      const startDrag = (x) => {
-        isDragging = true;
-        lastX = x;
-        accumulatedDelta = 0;
-        scrubber.classList.add('dragging');
-      };
-
-      const doDrag = (x) => {
-        if (!isDragging) return;
-        const dx = x - lastX;
-        accumulatedDelta += dx * 0.01; // 100px = 1.0x change
-        const newVal = Math.max(1.0, Math.min(4.0,
-          Math.round((this.state.fermataMultiplier + accumulatedDelta) * 10) / 10
-        ));
-        if (newVal !== this.state.fermataMultiplier) {
-          accumulatedDelta = 0;
-          this.state.fermataMultiplier = newVal;
-          if (fermataValue) fermataValue.textContent = newVal.toFixed(1) + 'x';
-          updateFermataAccessibility();
-          if (this.audioEngine) {
-            this.audioEngine.setFermataMultiplier(newVal);
-          }
-        }
-        lastX = x;
-      };
-
-      const endDrag = () => {
-        if (!isDragging) return;
-        isDragging = false;
-        scrubber.classList.remove('dragging');
-      };
-
-      scrubber.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        startDrag(e.clientX);
-        const onMove = (ev) => doDrag(ev.clientX);
-        const onUp = () => {
-          endDrag();
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-
-      scrubber.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        startDrag(e.touches[0].clientX);
-        const onMove = (ev) => doDrag(ev.touches[0].clientX);
-        const onEnd = () => {
-          endDrag();
-          document.removeEventListener('touchmove', onMove);
-          document.removeEventListener('touchend', onEnd);
-          document.removeEventListener('touchcancel', onEnd);
-        };
-        document.addEventListener('touchmove', onMove);
-        document.addEventListener('touchend', onEnd);
-        document.addEventListener('touchcancel', onEnd);
-      });
-
-      // Scroll wheel
-      scrubber.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        const direction = e.deltaY > 0 ? -0.1 : 0.1;
-        const step = e.shiftKey ? direction * 5 : direction;
-        const newVal = Math.max(1.0, Math.min(4.0,
-          Math.round((this.state.fermataMultiplier + step) * 10) / 10
-        ));
-        if (newVal !== this.state.fermataMultiplier) {
-          this.state.fermataMultiplier = newVal;
-          if (fermataValue) fermataValue.textContent = newVal.toFixed(1) + 'x';
-          updateFermataAccessibility();
-          if (this.audioEngine) {
-            this.audioEngine.setFermataMultiplier(newVal);
-          }
-        }
-      });
-
-      scrubber.addEventListener('keydown', (e) => {
-        const direction = e.key === 'ArrowUp' || e.key === 'ArrowRight'
-          ? 1
-          : e.key === 'ArrowDown' || e.key === 'ArrowLeft'
-            ? -1
-            : 0;
-        if (!direction) return;
-        e.preventDefault();
-        const step = e.shiftKey ? 0.5 : 0.1;
-        const newVal = Math.max(1.0, Math.min(4.0,
-          Math.round((this.state.fermataMultiplier + direction * step) * 10) / 10
-        ));
-        if (newVal === this.state.fermataMultiplier) return;
-        this.state.fermataMultiplier = newVal;
-        if (fermataValue) fermataValue.textContent = newVal.toFixed(1) + 'x';
-        updateFermataAccessibility();
-        this.audioEngine?.setFermataMultiplier(newVal);
-      });
-    }
-  }
-
-  /**
-   * Apply a volume preset.
-   * @param {string} preset - one of 'custom', 'just-yours', 'mostly-yours', 'all', 'everything-but-yours'
-   */
-  applyPreset(preset) {
-    // Save current volumes as custom if switching away from custom/no preset
-    if (preset !== 'custom' && (this.state.activePreset === 'custom' || this.state.activePreset === null)) {
-      this.state.customVolumes = { ...this.state.partVolumes };
-    }
-
-    this.state.activePreset = preset;
-    const myId = this.state.selectedSectionId;
-
-    if (preset === 'custom') {
-      // Restore saved custom volumes
-      if (Object.keys(this.state.customVolumes).length > 0) {
-        for (const part of this.state.parts) {
-          const volume = this.state.customVolumes[part.id] ?? 80;
-          this.state.partVolumes[part.id] = volume;
-          if (this.audioEngine) {
-            this.audioEngine.setPartVolume(part.id, volume);
-          }
-        }
+    canvas.addEventListener('click', event => {
+      if (!this.renderer) return;
+      if (this.wasScoreDragged) {
+        this.wasScoreDragged = false;
+        return;
       }
-    } else {
-      for (const part of this.state.parts) {
-        let volume;
-        const isMine = part.id === myId;
-
-        switch (preset) {
-          case 'just-yours':
-            volume = isMine ? 100 : 0;
-            break;
-          case 'mostly-yours':
-            volume = isMine ? 100 : this.state.othersVolume;
-            break;
-          case 'all':
-            volume = 100;
-            break;
-          case 'everything-but-yours':
-            volume = isMine ? 0 : 100;
-            break;
-          default:
-            volume = 100;
-        }
-
-        this.state.partVolumes[part.id] = volume;
-        if (this.audioEngine) {
-          this.audioEngine.setPartVolume(part.id, volume);
-        }
-      }
-    }
-
-    // Update the volume sliders in the parts list UI
-    this.partsList.querySelectorAll('.part-control').forEach(control => {
-      const partId = control.dataset.partId;
-      const slider = control.querySelector('.volume-slider');
-      const display = control.querySelector('.volume-value');
-      if (slider && display) {
-        slider.value = this.state.partVolumes[partId];
-        display.textContent = `${this.state.partVolumes[partId]}%`;
-      }
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width) return;
+      const beat = this.renderer.getBeatAtScreenX(event.clientX - rect.left);
+      if (beat !== null) this.seekToBeat(beat);
     });
 
-    // Update preset button active states and slider visibility
-    const presetsEl = document.getElementById('presets-section');
-    if (presetsEl) {
-      presetsEl.querySelectorAll('.preset-btn').forEach(btn => {
-        const isActive = btn.dataset.preset === preset;
-        btn.classList.toggle('active', isActive);
-        btn.setAttribute('aria-pressed', String(isActive));
-      });
-      // Update the displayed volume value on the scrubber button
-      const othersValueEl = presetsEl.querySelector('#others-volume-value');
-      if (othersValueEl) {
-        othersValueEl.textContent = this.state.othersVolume + '%';
-      }
-    }
-    this.handleOnboardingAction('preset-selected');
+    // Trackpad and shift-wheel gestures browse ahead without moving playback.
+    // While playing, auto-scroll pauses briefly so the view does not snap back
+    // under the reader's hand, then resumes on its own.
+    canvas.addEventListener('wheel', event => {
+      if (!this.renderer) return;
+      const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+      if (!horizontal && !event.shiftKey) return;
+      event.preventDefault();
+      const delta = horizontal ? event.deltaX : event.deltaY;
+      this.autoScrollResumesAt = performance.now() + AUTO_SCROLL_PAUSE_MS;
+      this.renderer.setScrollX(this.renderer.scrollX + delta);
+    }, { passive: false });
   }
 
-  /** Build score-aware synchronization options for the metronome. */
-  getMetronomeSyncOptions() {
-    if (!this.audioEngine) return null;
+  /* =====================================================================
+     Parts and mix
+     ===================================================================== */
+
+  createPartsHandlers() {
     return {
-      startTime: this.audioEngine.getStartTime(),
-      currentScoreBeat: this.audioEngine.getCurrentBeat(),
-      scoreToPlaybackBeat: beat => this.audioEngine.getPlaybackBeat(beat)
+      onSelectPart: partId => this.selectPart(partId),
+      onVolumeChange: (partId, volume) => this.setPartVolume(partId, volume),
+      onMuteChange: (partId, muted) => this.setPartMuted(partId, muted),
+      onSoloChange: (partId, soloed) => this.setPartSoloed(partId, soloed),
+      onRename: (partId, name) => this.renamePart(partId, name),
+      onMixChange: presetId => this.applyMix(presetId),
+      onOthersLevelChange: level => this.setOthersLevel(level),
+      onDimChange: dim => this.setDimOthers(dim),
+      onCoachDismiss: () => writeBoolPref('coach-seen', true)
     };
   }
 
-  /**
-   * Set the tempo across all modules.
-   * @param {number} bpm
-   */
-  setTempo(bpm) {
-    const newTempo = Math.max(40, Math.min(240, bpm));
-    this.state.tempo = newTempo;
-    if (this.tempoDisplay) {
-      this.tempoDisplay.textContent = newTempo;
-    }
-    if (this.tempoScrubber) {
-      this.tempoScrubber.setAttribute('aria-valuenow', String(newTempo));
-      this.tempoScrubber.setAttribute('aria-valuetext', `${newTempo} BPM`);
-    }
-    if (newTempo === this.committedTempo) return;
+  selectPart(partId) {
+    const part = this.state.parts.find(item => item.id === partId);
+    if (!part) return;
 
-    const restartMetronome = !!(
-      this.metronome?.isRunning && this.state.isPlaying && this.audioEngine
+    this.state.myPartId = partId;
+    writePref('voice-type', part.voiceType || '');
+    this.partsPanel.setSelectedPart(partId);
+    this.renderer?.setSelectedPart(partId);
+    if (this.state.mixPreset) this.applyMix(this.state.mixPreset, { persist: false });
+    this.overlays.announce(`${part.name} is now your part.`);
+  }
+
+  setPartVolume(partId, volume) {
+    this.state.volumes[partId] = volume;
+    this.audioEngine?.setPartVolume(partId, volume);
+    // A manual change may or may not still match a preset.
+    const detected = detectMixPreset(
+      this.state.volumes,
+      this.state.parts,
+      this.state.myPartId,
+      this.state.othersLevel
     );
-    if (restartMetronome) this.metronome.stop();
-    if (this.audioEngine) {
-      this.audioEngine.setTempo(newTempo);
-    }
-    if (this.metronome) {
-      this.metronome.setTempo(newTempo);
-      if (restartMetronome) this.metronome.start(this.getMetronomeSyncOptions());
-    }
-    this.committedTempo = newTempo;
-    this.handleOnboardingAction('tempo-changed');
+    this.state.mixPreset = detected;
+    this.partsPanel.setMixPreset(detected);
+    if (detected) writePref('mix-preset', detected);
   }
 
   /**
-   * Toggle play/pause state.
+   * Solo or unsolo a part.
+   *
+   * Soloing is a temporary "just this line" rather than a change to the mix, so
+   * it never touches the mute choices underneath it.
+   *
+   * @param {string} partId
+   * @param {boolean} soloed
    */
+  setPartSoloed(partId, soloed) {
+    if (soloed) this.state.soloed.add(partId);
+    else this.state.soloed.delete(partId);
+
+    this.audioEngine?.setPartSoloed(partId, soloed);
+    this.partsPanel.setSoloed(this.state.soloed);
+
+    const part = this.state.parts.find(item => item.id === partId);
+    const name = part ? part.name : 'That part';
+    this.overlays.announce(
+      this.state.soloed.size === 0
+        ? 'Back to the full mix'
+        : soloed ? `${name} on its own` : `${name} no longer on its own`
+    );
+  }
+
+  setPartMuted(partId, muted) {
+    if (muted) this.state.muted.add(partId);
+    else this.state.muted.delete(partId);
+    this.audioEngine?.setPartMuted(partId, muted);
+  }
+
+  renamePart(partId, name) {
+    const part = this.state.parts.find(item => item.id === partId);
+    if (!part) return;
+
+    part.name = name;
+    part.voiceType = detectVoiceType(name);
+    this.partsPanel.setPartLabel(partId, part);
+    if (partId === this.state.myPartId) writePref('voice-type', part.voiceType || '');
+    // Voice colour and clef inference are baked into the cached score layer.
+    this.renderer?.invalidateStaticScore();
+    this.renderer?.requestRender();
+    this.overlays.announce(`Part renamed to ${name}.`);
+  }
+
+  /**
+   * Apply a mix preset to every part.
+   * @param {string|null} presetId
+   * @param {{ persist?: boolean }} options
+   */
+  applyMix(presetId, { persist = true } = {}) {
+    if (!presetId || !isMixPreset(presetId)) return;
+
+    this.state.mixPreset = presetId;
+    this.state.volumes = getMixVolumes(
+      presetId,
+      this.state.parts,
+      this.state.myPartId,
+      this.state.othersLevel
+    );
+    for (const [partId, volume] of Object.entries(this.state.volumes)) {
+      this.audioEngine?.setPartVolume(partId, volume);
+    }
+    this.partsPanel.setVolumes(this.state.volumes);
+    this.partsPanel.setMixPreset(presetId);
+    if (persist) writePref('mix-preset', presetId);
+  }
+
+  setOthersLevel(level) {
+    this.state.othersLevel = Math.max(0, Math.min(100, Math.round(level)));
+    writePref('others-level', this.state.othersLevel);
+    if (this.state.mixPreset === 'mostly-mine') {
+      this.applyMix('mostly-mine', { persist: false });
+    }
+  }
+
+  setDimOthers(dim) {
+    this.state.dimOthers = Boolean(dim);
+    writeBoolPref('dim-others', this.state.dimOthers);
+    this.renderer?.setFocusSelectedPart(this.state.dimOthers);
+  }
+
+  /* =====================================================================
+     Audio, transport and playback
+     ===================================================================== */
+
+  createTransportHandlers() {
+    return {
+      onTogglePlay: () => this.togglePlay(),
+      onSeek: percent => this.seekToPercent(percent, { followScore: true }),
+      onPrevBar: () => this.seekToPreviousBar(),
+      onNextBar: () => this.seekToNextBar(),
+      onToggleLoop: () => this.toggleLoop(),
+      onToggleMetronome: () => this.toggleMetronome(),
+      onToggleMic: () => this.toggleMicrophone(),
+      onOpenParts: () => this.partsPanel.openSheet(),
+      onTempoPreview: bpm => this.previewTempo(bpm),
+      onTempoCommit: bpm => this.setTempo(bpm),
+      // The fields are the source of truth for this path, so nothing is written
+      // back into them.
+      onLoopRange: range => this.setLoopBars(range.from, range.to, { syncFields: false }),
+      onLoopMark: edge => this.markLoopEdge(edge),
+      onLoopClear: () => this.clearLoopRange()
+    };
+  }
+
+  createSettingsHandlers() {
+    return {
+      onSynthMode: mode => this.setSynthMode(mode),
+      onMasterVolume: value => this.setMasterVolume(value),
+      onRoom: value => this.setRoom(value),
+      onTuning: value => this.setTuning(value),
+      onTranspose: value => this.setTranspose(value),
+      onFermata: value => this.setFermata(value),
+      onFollowDynamics: enabled => this.setFollowDynamics(enabled),
+      onPlayRepeats: enabled => this.setPlayRepeats(enabled),
+      onClickPattern: pattern => this.setClickPattern(pattern),
+      onClickVolume: value => this.setClickVolume(value),
+      onCountInBars: value => this.setCountInBars(value),
+      onShowLyrics: visible => this.setShowLyrics(visible),
+      onShowTimeSignatures: visible => this.setShowTimeSignatures(visible),
+      onVerse: verse => this.setVerse(verse),
+      onReset: () => this.restoreDefaultSettings()
+    };
+  }
+
+  clampTempo(bpm) {
+    return Math.max(TEMPO_MIN, Math.min(TEMPO_MAX, Math.round(Number(bpm) || 120)));
+  }
+
+  async initAudioEngine({ resume = true } = {}) {
+    if (!this.audioEngine) this.audioEngine = new AudioEngine();
+    await this.audioEngine.init({ resume });
+
+    if (!this.audioEngine.onBeatUpdate) {
+      this.audioEngine.onBeatUpdate = beat => this.handleBeatUpdate(beat);
+      this.audioEngine.onPlaybackEnd = () => this.handlePlaybackEnd();
+      this.audioEngine.onLoopEnd = () => this.handleLoopEnd();
+    }
+
+    if (!this.metronome) {
+      this.metronome = new Metronome(
+        this.audioEngine.getAudioContext(),
+        this.audioEngine.getClickBus()
+      );
+      this.metronome.onBeat = (_beat, isDownbeat) => this.transport.flashBeat(isDownbeat);
+    }
+    return this.audioEngine;
+  }
+
+  /** Build the audio graph for a freshly loaded score without resuming it. */
+  async prepareAudio(generation) {
+    // The load happens after async parsing, so the original click's activation
+    // window may be gone. Playback resumes the context from its own gesture.
+    await this.initAudioEngine({ resume: false });
+    if (generation !== this.loadGeneration) return;
+
+    this.audioEngine.setSynthMode(this.state.synthMode);
+    this.audioEngine.setRoomAmount(this.state.room);
+    this.audioEngine.setMasterVolume(this.state.masterVolume);
+    this.audioEngine.setTuning(this.state.tuning);
+    this.audioEngine.setTranspose(this.state.transpose);
+    this.audioEngine.setFollowDynamics(this.state.followDynamics);
+    this.audioEngine.setCountInBars(this.state.countInBars);
+    this.audioEngine.setFermataMultiplier(this.state.fermata);
+    this.audioEngine.setParts(this.state.parts);
+    // The structure has to land before the tempo: the rehearsal tempo is a scale
+    // on the score's own tempo map, so the map must be known first.
+    this.audioEngine.setPlayRepeats(this.state.playRepeats);
+    this.audioEngine.setScoreStructure(this.state.metadata);
+    this.audioEngine.setTempo(this.state.tempo);
+    for (const part of this.state.parts) {
+      this.audioEngine.setPartVolume(part.id, this.state.volumes[part.id] ?? 100);
+    }
+
+    // Bar numbers bound the loop fields, so they follow the score that is open.
+    const bars = this.getBarList();
+    if (bars.length) {
+      this.transport.setBarRange(bars[0].number, bars[bars.length - 1].number);
+    }
+    this.applyLoopRange();
+
+    this.metronome.setTempo(this.state.tempo);
+    this.metronome.setPattern(this.state.clickPattern);
+    this.metronome.setVolume(this.state.clickVolume);
+    const firstMeasure = this.state.parts[0]?.measures?.[0];
+    if (firstMeasure?.timeSignature) {
+      this.metronome.setTimeSignature(
+        firstMeasure.timeSignature.numerator,
+        firstMeasure.timeSignature.denominator
+      );
+    }
+    // Real measure starts keep accents correct through pickup bars and
+    // time-signature changes.
+    this.metronome.setMeasureStartBeats(
+      (this.state.parts[0]?.measures || []).map(measure => measure.startBeat)
+    );
+  }
+
+  handleBeatUpdate(beat) {
+    // AudioEngine.stop() emits a reset callback synchronously; ignore it while
+    // a seek is replacing the transport position.
+    if (this.isSeeking) return;
+    this.state.currentBeat = beat;
+    const followPlayhead = this.state.isPlaying &&
+      performance.now() >= this.autoScrollResumesAt;
+    this.renderer?.setCurrentBeat(beat, { autoScroll: followPlayhead });
+    this.updateTransportPosition({ throttle: true });
+  }
+
+  /**
+   * A loop pass reached its end marker.
+   *
+   * With looping on this goes round again from the start of the range. With
+   * looping off the range is a stopping point instead, which makes marking a
+   * passage useful even when you only want to hear it once.
+   */
+  handleLoopEnd() {
+    if (this.state.loop) {
+      this.restartLoopPass();
+      return;
+    }
+    this.audioEngine?.stop();
+    this.state.isPlaying = false;
+    if (this.state.metronome) this.metronome?.stop();
+    this.transport.setPlaying(false);
+    this.restartLoopPass();
+    this.overlays.announce('Reached the end of the loop');
+  }
+
+  handlePlaybackEnd() {
+    // Seeking while the session is still marked as playing restarts the
+    // transport by itself, so the score must not also be started here.
+    if (this.state.loop) {
+      const loopStart = this.audioEngine?.getLoopRange();
+      if (loopStart) this.restartLoopPass();
+      else this.seekToBeat(0, { followScore: true });
+      return;
+    }
+
+    this.state.isPlaying = false;
+    if (this.state.metronome) this.metronome?.stop();
+    this.transport.setPlaying(false);
+    this.updateTransportPosition();
+  }
+
   async togglePlay() {
+    if (!this.state.parts.length || this.isTransportBusy) return;
+
+    // Starting the audio context is asynchronous, so a second press before it
+    // resolves must not start a second playback pass.
+    this.isTransportBusy = true;
+    try {
+      await this.startOrPausePlayback();
+    } finally {
+      this.isTransportBusy = false;
+    }
+  }
+
+  async startOrPausePlayback() {
     await this.initAudioEngine();
+    this.autoScrollResumesAt = 0;
 
     if (this.state.isPlaying) {
-      // Pause
       this.state.isPlaying = false;
       this.audioEngine.pause();
-      if (this.state.metronomeActive && this.metronome) {
-        this.metronome.stop();
-      }
-      if (this.playIcon) this.playIcon.style.display = '';
-      if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-      if (this.playBtn) {
-        this.playBtn.classList.remove('active');
-        this.playBtn.setAttribute('aria-label', 'Play');
-      }
+      if (this.state.metronome) this.metronome.stop();
+      this.transport.setPlaying(false);
+      this.overlays.announce('Paused');
     } else {
-      // Play
       this.state.isPlaying = true;
       if (this.renderer) this.renderer.isAutoScrollEnabled = true;
       this.audioEngine.setTempo(this.state.tempo);
       this.committedTempo = this.state.tempo;
       this.audioEngine.setParts(this.state.parts);
-      // A sheet click can happen before the audio engine is initialized. Set
-      // the transport to that selected score position on the first play, while
-      // preserving the expanded pause position when resuming.
-      if (!this.audioEngine.isPaused) {
-        this.audioEngine.seek(this.state.currentBeat);
-      }
+      // A score click can happen before the engine exists, so align the
+      // transport with the visible cursor before the first play.
+      if (!this.audioEngine.isPaused) this.audioEngine.seek(this.state.currentBeat);
       this.audioEngine.play();
-      // Auto-start metronome in sync if enabled
-      if (this.state.metronomeActive && this.metronome) {
-        this.metronome.stop(); // reset before re-syncing
-        this.metronome.setTempo(this.state.tempo);
-        this.metronome.start(this.getMetronomeSyncOptions());
-      }
-      if (this.playIcon) this.playIcon.style.display = 'none';
-      if (this.pauseIcon) this.pauseIcon.style.display = '';
-      if (this.playBtn) {
-        this.playBtn.classList.add('active');
-        this.playBtn.setAttribute('aria-label', 'Pause');
-      }
+      this.playCountIn();
+      if (this.state.metronome) this.startMetronome();
+      this.transport.setPlaying(true);
+      this.overlays.announce('Playing');
     }
-    this.updateSeekSlider();
+    this.updateTransportPosition();
   }
 
   /**
-   * Stop playback and reset position.
+   * Click the count-in leading up to the first note.
+   *
+   * Wanted whether or not the metronome is on: its job is to say when to come
+   * in, not to keep time through the piece.
    */
-  stop() {
-    this.state.isPlaying = false;
-    this.state.currentBeat = 0;
-    if (this.audioEngine) {
-      this.audioEngine.stop();
-    }
-    if (this.state.metronomeActive && this.metronome) {
-      this.metronome.stop();
-    }
-    if (this.renderer) {
-      this.renderer.reset();
-    }
-    if (this.playIcon) this.playIcon.style.display = '';
-    if (this.pauseIcon) this.pauseIcon.style.display = 'none';
-    if (this.playBtn) {
-      this.playBtn.classList.remove('active');
-      this.playBtn.setAttribute('aria-label', 'Play');
-    }
-    this.updateSeekSlider();
+  playCountIn() {
+    if (!this.metronome || !this.audioEngine) return;
+    const beats = this.audioEngine.getCountInBeats();
+    if (beats <= 0) return;
+
+    const startPlaybackBeat = this.audioEngine.getPlaybackBeat(this.state.currentBeat);
+    const secondsPerBeat = this.audioEngine.timeline.secondsPerBeatAt(startPlaybackBeat);
+    const firstMeasure = this.state.parts[0]?.measures?.[0];
+    const denominator = Number(firstMeasure?.timeSignature?.denominator) || 4;
+    const clickInterval = secondsPerBeat * (4 / denominator);
+    const clicks = clickInterval > 0 ? Math.round(beats / (4 / denominator)) : 0;
+
+    this.metronome.playCountIn({
+      startTime: this.audioEngine.getStartTime(),
+      clicks,
+      interval: clickInterval,
+      beatsPerBar: Number(firstMeasure?.timeSignature?.numerator) || 4
+    });
   }
 
-  /**
-   * Toggle metronome on/off.
-   */
+  startMetronome() {
+    if (!this.metronome || !this.audioEngine) return;
+    this.metronome.stop();
+    this.metronome.setTempo(this.state.tempo);
+    this.metronome.start({
+      startTime: this.audioEngine.getStartTime(),
+      currentPlaybackBeat: this.audioEngine.getCurrentPlaybackBeat(),
+      nextGridPosition: (after, step, options) =>
+        this.audioEngine.timeline.nextGridPosition(after, step, options),
+      playbackBeatToSeconds: beat => this.audioEngine.playbackBeatToSeconds(beat)
+    });
+  }
+
   async toggleMetronome() {
+    if (!this.state.parts.length) return;
     await this.initAudioEngine();
 
-    this.state.metronomeActive = !this.state.metronomeActive;
-    if (this.metronomeBtn) {
-      this.metronomeBtn.classList.toggle('active', this.state.metronomeActive);
-      this.metronomeBtn.setAttribute('aria-pressed', String(this.state.metronomeActive));
-    }
+    this.state.metronome = !this.state.metronome;
+    this.transport.setMetronome(this.state.metronome);
+    if (this.state.metronome && this.state.isPlaying) this.startMetronome();
+    else if (!this.state.metronome) this.metronome.stop();
+    this.overlays.announce(this.state.metronome ? 'Metronome on' : 'Metronome off');
+  }
 
-    if (this.state.metronomeActive) {
-      this.metronome.setTempo(this.state.tempo);
-      // Sync metronome to audio engine if currently playing
-      if (this.state.isPlaying && this.audioEngine) {
-        this.metronome.start(this.getMetronomeSyncOptions());
-      }
-      // If not playing, metronome will start when play is pressed
-    } else {
-      this.metronome.stop();
-    }
+  toggleLoop() {
+    this.state.loop = !this.state.loop;
+    this.transport.setLoop(this.state.loop);
+    this.overlays.announce(this.state.loop ? 'Loop on' : 'Loop off');
+  }
+
+  /** Show a tempo change immediately, before the audio timeline is rebuilt. */
+  previewTempo(bpm) {
+    this.state.tempo = this.clampTempo(bpm);
+  }
+
+  setTempo(bpm) {
+    const tempo = this.clampTempo(bpm);
+    this.state.tempo = tempo;
+    this.transport.setTempo(tempo);
+    if (tempo === this.committedTempo) return;
+
+    const restartMetronome = Boolean(
+      this.metronome?.isRunning && this.state.isPlaying && this.audioEngine
+    );
+    if (restartMetronome) this.metronome.stop();
+    this.audioEngine?.setTempo(tempo);
+    this.metronome?.setTempo(tempo);
+    if (restartMetronome) this.startMetronome();
+    this.committedTempo = tempo;
+    this.updateTransportPosition();
+  }
+
+  setSynthMode(mode) {
+    this.state.synthMode = mode === 'oscillator' ? 'oscillator' : 'vocal';
+    writePref('synth-mode', this.state.synthMode);
+    this.audioEngine?.setSynthMode(this.state.synthMode);
+  }
+
+  setRoom(value) {
+    this.state.room = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+    writePref('room', this.state.room);
+    this.audioEngine?.setRoomAmount(this.state.room);
+  }
+
+  setFermata(value) {
+    this.state.fermata = Math.max(1, Math.min(4, Math.round(Number(value) * 10) / 10));
+    writePref('fermata', this.state.fermata);
+    this.audioEngine?.setFermataMultiplier(this.state.fermata);
+    // Holds change the length of the performance, so the loop range and the
+    // transport readout both need re-resolving.
+    this.applyLoopRange();
+    this.updateTransportPosition();
+  }
+
+  setMasterVolume(value) {
+    this.state.masterVolume = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+    writePref('master-volume', this.state.masterVolume);
+    this.audioEngine?.setMasterVolume(this.state.masterVolume);
+  }
+
+  setTuning(value) {
+    this.state.tuning = Math.max(415, Math.min(450, Math.round(Number(value) || 440)));
+    writePref('tuning', this.state.tuning);
+    this.audioEngine?.setTuning(this.state.tuning);
+    // The guidance has to judge against the same reference the playback uses.
+    this.pitchDetector?.setTuning(this.state.tuning);
+    this.rebuildPlaybackForPitchChange();
+  }
+
+  setTranspose(value) {
+    this.state.transpose = Math.max(-12, Math.min(12, Math.round(Number(value) || 0)));
+    writePref('transpose', this.state.transpose);
+    this.audioEngine?.setTranspose(this.state.transpose);
+    this.rebuildPlaybackForPitchChange();
   }
 
   /**
-   * Toggle repeat on/off.
+   * Rebuild the sounding schedule after a change to pitch rather than timing.
+   *
+   * Note frequencies are resolved when the schedule is built, so a change of
+   * tuning or transposition needs the schedule again. Restarting from the
+   * current position keeps the change audible immediately.
    */
-  toggleRepeat() {
-    this.state.repeatActive = !this.state.repeatActive;
-    if (this.repeatBtn) {
-      this.repeatBtn.classList.toggle('active', this.state.repeatActive);
-      this.repeatBtn.setAttribute('aria-pressed', String(this.state.repeatActive));
-    }
+  rebuildPlaybackForPitchChange() {
+    if (!this.audioEngine || !this.state.isPlaying) return;
+    const wasPlaying = true;
+    this.suspendTransport(wasPlaying);
+    this.audioEngine.seek(this.state.currentBeat);
+    this.resumeTransport(wasPlaying);
   }
 
-  /**
-   * Stop active capture and invalidate any microphone permission request that
-   * is still pending. A late permission response must not reactivate the mic.
-   */
-  stopMicrophone() {
-    this.micStartGeneration++;
-    this.micStartPending = false;
-    this.state.micActive = false;
-
-    if (this.pitchDetector) {
-      this.pitchDetector.stop();
-      this.pitchDetector = null;
-    }
-    if (this.micBtn) {
-      this.micBtn.disabled = false;
-      this.micBtn.classList.remove('active');
-      this.micBtn.setAttribute('aria-pressed', 'false');
-      this.micBtn.setAttribute('aria-label', 'Enable microphone');
-      this.micBtn.title = 'Enable Microphone';
-    }
-    if (this.micStatus) this.micStatus.textContent = 'Mic off';
-    if (this.pitchIndicator) this.pitchIndicator.style.display = 'none';
-    if (this.pitchAnnouncementTimer) {
-      clearTimeout(this.pitchAnnouncementTimer);
-      this.pitchAnnouncementTimer = null;
-    }
-    if (this.pitchAnnouncement) this.pitchAnnouncement.textContent = '';
-    this.updatePitchGuide(null);
-    if (this.renderer) this.renderer.setUserPitch(null);
+  setFollowDynamics(enabled) {
+    this.state.followDynamics = Boolean(enabled);
+    writeBoolPref('follow-dynamics', this.state.followDynamics);
+    this.audioEngine?.setFollowDynamics(this.state.followDynamics);
+    this.rebuildPlaybackForPitchChange();
+    this.overlays.announce(
+      this.state.followDynamics ? 'Following the written dynamics' : 'Playing at one steady level'
+    );
   }
 
-  /**
-   * Open microphone setup guidance before requesting browser permission.
-   */
-  toggleMic() {
-    if (this.state.micActive || this.micStartPending) {
-      this.stopMicrophone();
-      return;
-    }
+  setPlayRepeats(enabled) {
+    this.state.playRepeats = Boolean(enabled);
+    writeBoolPref('play-repeats', this.state.playRepeats);
+    if (!this.audioEngine) return;
 
-    this.showMicPrompt();
+    const wasPlaying = this.state.isPlaying;
+    this.suspendTransport(wasPlaying);
+    this.audioEngine.setPlayRepeats(this.state.playRepeats);
+    // The performance just changed length, so anything measured against it has
+    // to be resolved again.
+    this.applyLoopRange();
+    this.audioEngine.seek(this.state.currentBeat);
+    this.resumeTransport(wasPlaying);
+    this.updateTransportPosition();
+    this.overlays.announce(
+      this.state.playRepeats ? 'Playing the repeats' : 'Reading straight through'
+    );
   }
 
-  /**
-   * Show the microphone setup guidance dialog.
-   */
-  showMicPrompt() {
-    if (!this.micPrompt) {
-      this.startMicrophone();
-      return;
-    }
-
-    // Skip dialog if the user previously chose "don't show again"
-    if (localStorage.getItem('mic-prompt-skip') === '1') {
-      this.startMicrophone();
-      return;
-    }
-
-    // Sync checkbox to stored preference (always unchecked when prompt is shown)
-    if (this.micPromptDontShow) {
-      this.micPromptDontShow.checked = false;
-    }
-
-    this.lastFocusedElement = document.activeElement;
-    this.micPrompt.hidden = false;
-    this.micPrompt.setAttribute('aria-hidden', 'false');
-    this.micPromptContinue?.focus();
+  setClickPattern(pattern) {
+    this.state.clickPattern = isClickPattern(pattern)
+      ? pattern
+      : SETTINGS_DEFAULTS.clickPattern;
+    writePref('click-pattern', this.state.clickPattern);
+    this.metronome?.setPattern(this.state.clickPattern);
+    if (this.state.metronome && this.state.isPlaying) this.startMetronome();
   }
 
-  /**
-   * Close the microphone setup guidance dialog.
-   */
-  hideMicPrompt() {
-    if (!this.micPrompt || this.micPrompt.hidden) return;
-
-    this.micPrompt.hidden = true;
-    this.micPrompt.setAttribute('aria-hidden', 'true');
-    const returnFocus = this.lastFocusedElement;
-    this.lastFocusedElement = null;
-    if (returnFocus instanceof HTMLElement && document.contains(returnFocus)) {
-      returnFocus.focus();
-    } else {
-      this.micBtn?.focus();
-    }
+  setClickVolume(value) {
+    this.state.clickVolume = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+    writePref('click-volume', this.state.clickVolume);
+    this.metronome?.setVolume(this.state.clickVolume);
   }
 
-  /**
-   * Request microphone access and start pitch detection after the user has
-   * confirmed the headphone guidance.
-   */
-  async startMicrophone() {
-    // PitchDetector owns a dedicated input context. Disable the control while
-    // permission is pending so repeated clicks cannot create parallel streams.
-    const requestGeneration = ++this.micStartGeneration;
-    const detector = new PitchDetector();
-    this.pitchDetector = detector;
-    this.micStartPending = true;
-    if (this.micBtn) this.micBtn.disabled = true;
-    if (this.micStatus) this.micStatus.textContent = 'Connecting…';
+  setCountInBars(value) {
+    this.state.countInBars = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
+    writePref('count-in', this.state.countInBars);
+    this.audioEngine?.setCountInBars(this.state.countInBars);
+  }
 
-    detector.onPitchDetected = pitchData => {
-      if (requestGeneration === this.micStartGeneration) {
-        this.handlePitchDetected(pitchData);
-      }
+  setShowLyrics(visible) {
+    this.state.showLyrics = Boolean(visible);
+    writeBoolPref('show-lyrics', this.state.showLyrics);
+    this.renderer?.setLyricsVisible(this.state.showLyrics);
+    this.overlays.announce(this.state.showLyrics ? 'Words shown' : 'Words hidden');
+  }
+
+  setShowTimeSignatures(visible) {
+    this.state.showTimeSignatures = Boolean(visible);
+    writeBoolPref('show-time-signatures', this.state.showTimeSignatures);
+    this.renderer?.setTimeSignaturesVisible(this.state.showTimeSignatures);
+  }
+
+  setVerse(verse) {
+    this.state.verse = Math.max(1, Math.round(Number(verse) || 1));
+    writePref('verse', this.state.verse);
+    this.renderer?.setVerse(this.state.verse);
+    this.overlays.announce(`Showing verse ${this.state.verse}`);
+  }
+
+  /** The current value of every setting, for showing in the dialog. */
+  collectSettings() {
+    return {
+      synthMode: this.state.synthMode,
+      masterVolume: this.state.masterVolume,
+      room: this.state.room,
+      tuning: this.state.tuning,
+      transpose: this.state.transpose,
+      fermata: this.state.fermata,
+      followDynamics: this.state.followDynamics,
+      playRepeats: this.state.playRepeats,
+      clickPattern: this.state.clickPattern,
+      clickVolume: this.state.clickVolume,
+      countInBars: this.state.countInBars,
+      showLyrics: this.state.showLyrics,
+      showTimeSignatures: this.state.showTimeSignatures,
+      verse: this.state.verse
+    };
+  }
+
+  /** Put every setting back to its shipped value. */
+  restoreDefaultSettings() {
+    this.setSynthMode(SETTINGS_DEFAULTS.synthMode);
+    this.setMasterVolume(SETTINGS_DEFAULTS.masterVolume);
+    this.setRoom(SETTINGS_DEFAULTS.room);
+    this.setTuning(SETTINGS_DEFAULTS.tuning);
+    this.setTranspose(SETTINGS_DEFAULTS.transpose);
+    this.setFermata(SETTINGS_DEFAULTS.fermata);
+    this.setFollowDynamics(SETTINGS_DEFAULTS.followDynamics);
+    this.setPlayRepeats(SETTINGS_DEFAULTS.playRepeats);
+    this.setClickPattern(SETTINGS_DEFAULTS.clickPattern);
+    this.setClickVolume(SETTINGS_DEFAULTS.clickVolume);
+    this.setCountInBars(SETTINGS_DEFAULTS.countInBars);
+    this.setShowLyrics(SETTINGS_DEFAULTS.showLyrics);
+    this.setShowTimeSignatures(SETTINGS_DEFAULTS.showTimeSignatures);
+    this.setVerse(SETTINGS_DEFAULTS.verse);
+    this.settings.setAll(this.collectSettings());
+    this.overlays.announce('Settings restored to their defaults');
+  }
+
+  /* =====================================================================
+     Rehearsal loop
+     ===================================================================== */
+
+  /**
+   * Set the loop range from bar numbers.
+   *
+   * Bars are what a singer asks for, so they are the unit here even though the
+   * engine works in performance positions. Either end may be left blank, which
+   * means "leave that end where it is".
+   *
+   * @param {number|null} fromBar
+   * @param {number|null} toBar
+   */
+  setLoopBars(fromBar, toBar, { syncFields = true } = {}) {
+    const bars = this.getBarList();
+    if (!bars.length) return;
+
+    const resolve = (requested, fallback) => {
+      if (requested === null || requested === undefined) return fallback;
+      const match = bars.find(bar => bar.number === requested);
+      return match ? match : fallback;
     };
 
-    const success = await detector.start();
-    const requestIsCurrent =
-      requestGeneration === this.micStartGeneration &&
-      this.pitchDetector === detector;
+    const existing = this.state.loopRange;
+    const start = resolve(fromBar, existing ? existing.fromBarEntry : bars[0]);
+    const end = resolve(toBar, existing ? existing.toBarEntry : bars[bars.length - 1]);
+    if (!start || !end) return;
 
-    if (!requestIsCurrent) {
-      detector.stop();
+    const ordered = start.startBeat <= end.startBeat ? [start, end] : [end, start];
+    this.state.loopRange = {
+      fromBar: ordered[0].number,
+      toBar: ordered[1].number,
+      fromBarEntry: ordered[0],
+      toBarEntry: ordered[1]
+    };
+    this.applyLoopRange({ syncFields });
+    this.overlays.announce(
+      `Looping bars ${this.state.loopRange.fromBar} to ${this.state.loopRange.toBar}`
+    );
+  }
+
+  /**
+   * Set one end of the loop from where the cursor is.
+   * @param {'start'|'end'} edge
+   */
+  markLoopEdge(edge) {
+    const context = this.renderer?.getMeasureContext(this.state.currentBeat);
+    if (!context) return;
+    if (edge === 'start') this.setLoopBars(context.number, null);
+    else this.setLoopBars(null, context.number);
+  }
+
+  clearLoopRange() {
+    this.state.loopRange = null;
+    this.applyLoopRange();
+    this.overlays.announce('Looping the whole score');
+  }
+
+  /**
+   * Push the loop range down to the engine, converting bars to performance
+   * positions. Re-run whenever the shape of the performance changes.
+   */
+  applyLoopRange({ syncFields = true } = {}) {
+    if (!this.audioEngine) return;
+    const range = this.state.loopRange;
+
+    if (!range) {
+      this.audioEngine.clearLoopRange();
+      this.transport.setLoopRange(null);
+      if (syncFields) this.transport.setLoopFields(null);
       return;
     }
-    this.micStartPending = false;
-    if (this.micBtn) this.micBtn.disabled = false;
 
-    if (success) {
-      this.state.micActive = true;
-      if (this.micBtn) {
-        this.micBtn.classList.add('active');
-        this.micBtn.setAttribute('aria-pressed', 'true');
-        this.micBtn.setAttribute('aria-label', 'Disable microphone');
-        this.micBtn.title = 'Disable Microphone';
-      }
-      if (this.micStatus) this.micStatus.textContent = 'Listening';
-      this.updatePitchGuide(null);
-      if (this.pitchIndicator) this.pitchIndicator.style.display = 'flex';
-    } else {
-      this.pitchDetector = null;
-      if (this.micStatus) this.micStatus.textContent = 'Mic unavailable';
-      this.showError('Could not access microphone. Please allow microphone permissions.');
-    }
-  }
+    const startBeat = range.fromBarEntry.startBeat;
+    const endBeat = range.toBarEntry.startBeat + range.toBarEntry.beats;
+    const startPlayback = this.audioEngine.getPlaybackBeat(startBeat);
+    const endPlayback = this.audioEngine.getPlaybackBeat(endBeat, { after: startPlayback });
 
-  /**
-   * Handle pitch detection results.
-   * @param {object|null} pitchData
-   */
-  handlePitchDetected(pitchData) {
-    let samplePosition = this.state.currentBeat;
-    if (pitchData && this.audioEngine) {
-      samplePosition = this.audioEngine.getScorePositionSecondsAgo(
-        pitchData.latencySeconds
-      );
-    }
-
-    // Canvas history and guidance share the same target-relative result and the
-    // same latency-compensated score position.
-    const pitchSample = this.renderer
-      ? this.renderer.setUserPitch(pitchData, samplePosition)
+    this.audioEngine.setLoopRange(startPlayback, endPlayback);
+    const shown = this.audioEngine.getLoopRange()
+      ? { fromBar: range.fromBar, toBar: range.toBar }
       : null;
-    this.updatePitchGuide(pitchData ? pitchSample : null);
+    this.transport.setLoopRange(shown);
+    if (syncFields) this.transport.setLoopFields(shown);
   }
 
-  /**
-   * Present pitch as a single centered gesture rather than rapidly changing
-   * measurements. Left means the voice is low, right means it is high; the
-   * instruction tells the singer which direction to correct.
-   * @param {object|null} pitchSample
-   */
-  updatePitchGuide(pitchSample) {
-    let state = 'listening';
-    let label = 'Listening';
-    let targetPosition = 0;
-
-    if (pitchSample?.hasTarget && Number.isFinite(pitchSample.centsFromTarget)) {
-      const cents = pitchSample.centsFromTarget;
-      state = pitchSample.accuracy;
-      targetPosition = Math.max(-1, Math.min(1, cents / 100));
-
-      if (state === 'correct') {
-        label = 'On pitch';
-      } else {
-        label = cents < 0 ? 'Higher' : 'Lower';
-      }
+  /** Every bar in the score, with its position and length. */
+  getBarList() {
+    const measures = this.state.metadata?.measureStructure;
+    if (Array.isArray(measures) && measures.length) {
+      return measures.map(measure => ({
+        number: Number(measure.number),
+        startBeat: Number(measure.startBeat) || 0,
+        beats: Number(measure.beats) || 0
+      }));
     }
-
-    // Complement the CSS easing with a small low-pass filter so vibrato feels
-    // alive without making the control look nervous.
-    this.pitchGuidePosition = state === 'listening'
-      ? 0
-      : this.pitchGuidePosition + (targetPosition - this.pitchGuidePosition) * 0.34;
-
-    const labelChanged = this.pitchGuidance?.textContent !== label;
-    if (this.pitchIndicator) {
-      this.pitchIndicator.dataset.state = state;
-      this.pitchIndicator.style.setProperty(
-        '--pitch-shift',
-        `${(this.pitchGuidePosition * 38).toFixed(1)}px`
-      );
-      this.pitchIndicator.setAttribute('aria-label', label);
-    }
-    if (this.pitchGuidance && labelChanged) {
-      this.pitchGuidance.textContent = label;
-    }
-
-    // Announce only a guidance transition that remains stable briefly. This
-    // makes the visual experience accessible without speaking on every frame.
-    if (labelChanged && this.pitchAnnouncement) {
-      if (this.pitchAnnouncementTimer) clearTimeout(this.pitchAnnouncementTimer);
-      this.pitchAnnouncement.textContent = '';
-      if (this.state.micActive) {
-        this.pitchAnnouncementTimer = setTimeout(() => {
-          if (this.state.micActive && this.pitchGuidance?.textContent === label) {
-            this.pitchAnnouncement.textContent = label;
-          }
-          this.pitchAnnouncementTimer = null;
-        }, 420);
-      }
-    }
+    // A score loaded without structure metadata still has measures on its parts.
+    const fallback = this.state.parts[0]?.measures || [];
+    return fallback.map((measure, index) => ({
+      number: Number(measure.number ?? index + 1),
+      startBeat: Number(measure.startBeat) || 0,
+      beats: Number(measure.beats) || 0
+    }));
   }
 
+  /** Restart the current loop pass from its beginning. */
+  restartLoopPass() {
+    if (!this.audioEngine) return;
+    this.seekToPlaybackBeat(this.audioEngine.getLoopStartPlaybackBeat(), { followScore: true });
+  }
+
+  /* =====================================================================
+     Position
+     ===================================================================== */
+
   /**
-   * Seek to a percentage position in the score.
-   * @param {number} percent - 0 to 100
-   * @param {{ moveSheet?: boolean, followScore?: boolean }} options
+   * Move the transport to a fraction of the performance.
+   *
+   * The seek bar measures the performance rather than the page, because with
+   * repeats the page position moves backwards partway through and a bar that
+   * scrubbed backwards would be unusable.
+   *
+   * @param {number} percent
+   * @param {object} [options]
    */
   seekToPercent(percent, options = {}) {
-    if (!this.audioEngine) return;
-    const totalBeats = this.audioEngine.getTotalBeats();
-    if (totalBeats <= 0) return;
-    const targetBeat = (percent / 100) * totalBeats;
-    this.seekToBeat(targetBeat, options);
+    const totalPlaybackBeats = this.audioEngine?.getTotalPlaybackBeats() ?? 0;
+    if (totalPlaybackBeats <= 0) return;
+    this.seekToPlaybackBeat((percent / 100) * totalPlaybackBeats, options);
   }
 
   /**
-   * Seek to a specific beat position.
+   * Move the transport to a position in the performance.
+   * @param {number} playbackBeat
+   * @param {object} [options]
+   */
+  seekToPlaybackBeat(playbackBeat, options = {}) {
+    if (!this.audioEngine) return;
+    const wasPlaying = this.state.isPlaying;
+    this.suspendTransport(wasPlaying);
+
+    const targetBeat = this.audioEngine.seekToPlaybackBeat(playbackBeat);
+    this.state.currentBeat = targetBeat;
+    this.applySeekToView(targetBeat, options);
+    this.resumeTransport(wasPlaying);
+    this.updateTransportPosition();
+  }
+
+  /**
+   * Move playback to a score beat.
    * @param {number} beat
-   * @param {{ moveSheet?: boolean, direction?: number }} options
+   * @param {{ followScore?: boolean, moveSheet?: boolean }} options
    */
   seekToBeat(beat, options = {}) {
-    const rendererTotalBeats = this.renderer?.horizontalLayout?.totalBeats ?? 0;
-    const engineTotalBeats = this.audioEngine?.getTotalBeats() ?? 0;
-    const maxBeat = engineTotalBeats > 0 ? engineTotalBeats : rendererTotalBeats;
-    const requestedBeat = Number(beat);
-    const clampedBeat = Number.isFinite(requestedBeat)
-      ? Math.max(0, Math.min(maxBeat, requestedBeat))
+    const engineTotal = this.audioEngine?.getTotalBeats() ?? 0;
+    const layoutTotal = this.renderer?.horizontalLayout?.totalBeats ?? 0;
+    const maxBeat = engineTotal > 0 ? engineTotal : layoutTotal;
+    const requested = Number(beat);
+    const clamped = Number.isFinite(requested)
+      ? Math.max(0, Math.min(maxBeat, requested))
       : 0;
     const wasPlaying = this.state.isPlaying;
+    // With repeats one score position occurs several times. Prefer the pass at
+    // or after where the transport already is, so seeking a bar ahead does not
+    // jump back to the first time through.
+    const after = this.audioEngine?.pausePlaybackBeat ?? -Infinity;
 
-    // Stop playback before changing its transport position. The stop callback
-    // is suppressed so it cannot briefly reset the visible cursor to beat 0.
-    if (wasPlaying && this.audioEngine) {
-      this.isSeeking = true;
-      this.audioEngine.stop();
-      this.isSeeking = false;
-      if (this.state.metronomeActive && this.metronome) {
-        this.metronome.stop();
-      }
-    }
+    this.suspendTransport(wasPlaying);
 
-    const targetBeat = engineTotalBeats > 0
-      ? this.audioEngine.seek(clampedBeat)
-      : clampedBeat;
+    const targetBeat = engineTotal > 0
+      ? this.audioEngine.seek(clamped, { after })
+      : clamped;
     this.state.currentBeat = targetBeat;
 
-    // Manual seeks preserve the user's current sheet position. Navigation can
-    // opt into a minimal scroll only when its target is outside the viewport.
-    if (this.renderer) {
-      this.renderer.clearUserPitchTrail();
-      this.renderer.setCurrentBeat(targetBeat, { autoScroll: options.followScore === true });
-      if (options.moveSheet) {
-        this.renderer.ensureBeatVisible(targetBeat);
-      }
-    }
-
-    // Resume playback from the exact selected position if it was playing.
-    if (wasPlaying && this.audioEngine) {
-      this.audioEngine.setTempo(this.state.tempo);
-      this.audioEngine.setParts(this.state.parts);
-      this.audioEngine.play();
-      if (this.state.metronomeActive && this.metronome) {
-        this.metronome.setTempo(this.state.tempo);
-        this.metronome.start(this.getMetronomeSyncOptions());
-      }
-    }
-
-    this.updateSeekSlider();
+    this.applySeekToView(targetBeat, options);
+    this.resumeTransport(wasPlaying);
+    this.updateTransportPosition();
   }
 
   /**
-   * Return the shared measure starts in score order.
-   * @returns {number[]}
+   * Stop the transport before moving it.
+   *
+   * The reset callback is suppressed so the visible cursor never flashes back
+   * to the start of the score on the way to its new position.
+   * @param {boolean} wasPlaying
    */
+  suspendTransport(wasPlaying) {
+    if (!wasPlaying || !this.audioEngine) return;
+    this.isSeeking = true;
+    this.audioEngine.stop();
+    this.isSeeking = false;
+    if (this.state.metronome) this.metronome.stop();
+  }
+
+  /** Restart the transport at the position it was just moved to. */
+  resumeTransport(wasPlaying) {
+    if (!wasPlaying || !this.audioEngine) return;
+    this.audioEngine.play();
+    if (this.state.metronome) this.startMetronome();
+  }
+
+  /** Move the score view to follow a new transport position. */
+  applySeekToView(targetBeat, options = {}) {
+    if (!this.renderer) return;
+    this.renderer.clearUserPitchTrail();
+    this.renderer.setCurrentBeat(targetBeat, { autoScroll: options.followScore === true });
+    if (options.moveSheet) this.renderer.ensureBeatVisible(targetBeat);
+  }
+
+  /** Shared measure starts in score order. */
   getMeasureStartBeats() {
     const starts = new Set();
-    for (const part of this.state.parts || []) {
+    for (const part of this.state.parts) {
       for (const measure of part.measures || []) {
         const start = Number(measure.startBeat);
         if (Number.isFinite(start)) starts.add(Math.max(0, start));
@@ -2591,285 +1272,353 @@ class ChoirPracticeApp {
     return [...starts].sort((left, right) => left - right);
   }
 
-  /**
-   * Seek to the start of the previous bar. The sheet moves only when the
-   * destination is off-screen, and never while returning to piece start.
-   */
   seekToPreviousBar() {
     const starts = this.getMeasureStartBeats();
-    if (starts.length === 0) return;
+    if (!starts.length) return;
 
-    const currentBeat = Math.max(0, Number(this.state.currentBeat) || 0);
+    const current = Math.max(0, Number(this.state.currentBeat) || 0);
     const epsilon = 1e-6;
-    let currentIndex = -1;
-    for (let index = 0; index < starts.length; index++) {
-      if (starts[index] <= currentBeat + epsilon) currentIndex = index;
+    let index = -1;
+    for (let i = 0; i < starts.length; i++) {
+      if (starts[i] <= current + epsilon) index = i;
       else break;
     }
 
-    const targetIndex = Math.max(0, currentIndex - 1);
-    const targetBeat = starts[targetIndex];
-    if (Math.abs(targetBeat - currentBeat) <= epsilon) return;
-
-    this.seekToBeat(targetBeat, {
-      moveSheet: targetBeat > epsilon,
-      direction: -1
-    });
+    const target = starts[Math.max(0, index - 1)];
+    if (Math.abs(target - current) <= epsilon) return;
+    this.seekToBeat(target, { moveSheet: true });
+    this.announceBar();
   }
 
-  /**
-   * Seek to the start of the next bar. The sheet moves only when the next bar
-   * is outside the visible score area, rather than centering every selection.
-   */
   seekToNextBar() {
     const starts = this.getMeasureStartBeats();
-    if (starts.length === 0) return;
+    if (!starts.length) return;
+    const next = starts.find(start => start > (Number(this.state.currentBeat) || 0) + 1e-6);
+    if (next === undefined) return;
+    this.seekToBeat(next, { moveSheet: true });
+    this.announceBar();
+  }
 
-    const currentBeat = Math.max(0, Number(this.state.currentBeat) || 0);
-    const nextBeat = starts.find(start => start > currentBeat + 1e-6);
-    if (nextBeat === undefined) return;
+  getBarLabel() {
+    const context = this.renderer?.getMeasureContext(this.state.currentBeat);
+    return context ? `bar ${context.number}` : '';
+  }
 
-    this.seekToBeat(nextBeat, {
-      moveSheet: true,
-      direction: 1
+  announceBar() {
+    const label = this.getBarLabel();
+    if (label) this.overlays.announce(label.charAt(0).toUpperCase() + label.slice(1));
+  }
+
+  updateTransportPosition({ throttle = false } = {}) {
+    if (!this.audioEngine) return;
+    const now = performance.now();
+    if (throttle && now - this.lastTransportUiAt < TRANSPORT_UI_INTERVAL_MS) return;
+    this.lastTransportUiAt = now;
+
+    const totalPlaybackBeats = this.audioEngine.getTotalPlaybackBeats();
+    if (totalPlaybackBeats <= 0) return;
+
+    // Everything here measures the performance, not the page: with repeats a
+    // page position occurs more than once, so only the performance position
+    // moves forward monotonically the way a progress bar has to.
+    const playbackBeat = this.state.isPlaying
+      ? this.audioEngine.getCurrentPlaybackBeat()
+      : this.audioEngine.pausePlaybackBeat;
+
+    this.transport.setPosition({
+      percent: (playbackBeat / totalPlaybackBeats) * 100,
+      currentSeconds: this.audioEngine.playbackBeatToSeconds(playbackBeat),
+      totalSeconds: this.audioEngine.getTotalSeconds(),
+      barLabel: this.getBarLabel()
     });
   }
 
-  /**
-   * Seek relative to current position by a number of seconds.
-   * @param {number} seconds - positive to forward, negative to back
-   */
-  seekRelative(seconds) {
-    if (!this.audioEngine) return;
+  /* =====================================================================
+     Microphone pitch guidance
+     ===================================================================== */
 
-    const currentSeconds = this.audioEngine.getScorePositionSeconds();
-    const newSeconds = Math.max(0, currentSeconds + seconds);
-    this.seekToTime(newSeconds);
+  async toggleMicrophone() {
+    if (this.state.micState === 'on' || this.state.micState === 'connecting') {
+      this.stopMicrophone();
+      this.overlays.announce('Microphone off');
+      return;
+    }
+
+    const proceed = await this.overlays.confirmMicrophone();
+    if (proceed) this.startMicrophone();
   }
 
-  /**
-   * Seek to a specific time position in seconds.
-   * @param {number} seconds
-   */
-  seekToTime(seconds) {
-    if (!this.audioEngine) return;
+  async startMicrophone() {
+    const generation = ++this.micGeneration;
+    const detector = new PitchDetector();
+    this.pitchDetector = detector;
+    this.setMicState('connecting');
 
-    const totalPlaybackBeats = this.audioEngine.getTotalPlaybackBeats();
-    const totalTimeSec = (totalPlaybackBeats / this.state.tempo) * 60;
-    if (seconds > totalTimeSec) seconds = totalTimeSec;
+    detector.onPitchDetected = pitchData => {
+      if (generation === this.micGeneration) this.handlePitchDetected(pitchData);
+    };
 
-    const percent = (seconds / totalTimeSec) * 100;
-    this.seekToPercent(percent);
-  }
+    const started = await detector.start();
+    if (generation !== this.micGeneration || this.pitchDetector !== detector) {
+      detector.stop();
+      return;
+    }
 
-  /**
-   * Update the seek slider and time display to reflect the current position.
-   */
-  updateSeekSlider(options = {}) {
-    if (!this.seekSlider || !this.audioEngine) return;
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    if (options.throttle && now - this.lastTransportUiUpdateAt < 50) return;
-    this.lastTransportUiUpdateAt = now;
-
-    const totalBeats = this.audioEngine.getTotalBeats();
-    if (totalBeats <= 0) return;
-    const percent = (this.state.currentBeat / totalBeats) * 100;
-    this.seekSlider.value = percent;
-
-    // YouTube-style filled track: accent color up to current position
-    this.seekSlider.style.background =
-      `linear-gradient(to right, var(--accent-primary) ${percent}%, var(--bg-tertiary) ${percent}%)`;
-
-    // Update time display from the expanded playback timeline so fermata holds
-    // are included and elapsed time continues while the score cursor waits.
-    if (this.seekTime) {
-      const currentPlaybackBeat = this.audioEngine.getCurrentPlaybackBeat();
-      const totalPlaybackBeats = this.audioEngine.getTotalPlaybackBeats();
-      const currentTimeSec = (currentPlaybackBeat / this.state.tempo) * 60;
-      const totalTimeSec = (totalPlaybackBeats / this.state.tempo) * 60;
-      this.seekTime.textContent = `${this.formatTime(currentTimeSec)} / ${this.formatTime(totalTimeSec)}`;
+    if (started) {
+      this.setMicState('on');
+      this.updatePitchGuide(null);
+      if (this.pitchPill) this.pitchPill.hidden = false;
+      this.overlays.announce('Microphone on. Pitch guidance is listening.');
+    } else {
+      this.pitchDetector = null;
+      this.setMicState('error');
+      this.overlays.toast(
+        'Microphone access was blocked. Allow it in your browser settings to use pitch guidance.',
+        { type: 'error' }
+      );
     }
   }
 
-  /**
-   * Format seconds to m:ss.
-   * @param {number} seconds
-   * @returns {string}
-   */
-  formatTime(seconds) {
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+  stopMicrophone() {
+    this.micGeneration++;
+    if (this.pitchDetector) {
+      this.pitchDetector.stop();
+      this.pitchDetector = null;
+    }
+    this.setMicState('off');
+    if (this.pitchPill) this.pitchPill.hidden = true;
+    clearTimeout(this.pitchAnnounceTimer);
+    this.pitchAnnounceTimer = null;
+    this.pitchGuidePosition = 0;
+    this.renderer?.setUserPitch(null);
+  }
+
+  setMicState(state) {
+    this.state.micState = state;
+    this.transport.setMic(state);
+  }
+
+  handlePitchDetected(pitchData) {
+    let samplePosition = this.state.currentBeat;
+    if (pitchData && this.audioEngine) {
+      samplePosition = this.audioEngine.getScorePositionSecondsAgo(pitchData.latencySeconds);
+    }
+    const sample = this.renderer
+      ? this.renderer.setUserPitch(pitchData, samplePosition)
+      : null;
+    this.updatePitchGuide(pitchData ? sample : null);
   }
 
   /**
-   * Commit any in-progress part name edit so the value is saved to state.
+   * Present pitch as one calm gesture instead of rapidly changing numbers.
+   * The orb sits left when the voice is flat and right when it is sharp; the
+   * label says which way to correct.
+   * @param {object|null} sample
    */
-  commitActivePartEdit() {
-    if (this._activePartEdit) {
-      this._activePartEdit.commit();
+  updatePitchGuide(sample) {
+    let state = 'listening';
+    let label = 'Listening';
+    let target = 0;
+
+    if (sample?.hasTarget && Number.isFinite(sample.centsFromTarget)) {
+      state = sample.accuracy;
+      target = Math.max(-1, Math.min(1, sample.centsFromTarget / 100));
+      label = state === 'correct'
+        ? 'On pitch'
+        : sample.centsFromTarget < 0 ? 'Sing higher' : 'Sing lower';
+    }
+
+    // A light low-pass keeps vibrato alive without making the orb look nervous.
+    this.pitchGuidePosition = state === 'listening'
+      ? 0
+      : this.pitchGuidePosition + (target - this.pitchGuidePosition) * 0.34;
+
+    const labelChanged = this.pitchLabel?.textContent !== label;
+    if (this.pitchPill) {
+      this.pitchPill.dataset.state = state;
+      this.pitchPill.style.setProperty(
+        '--pitch-shift',
+        `${(this.pitchGuidePosition * 34).toFixed(1)}px`
+      );
+    }
+    if (this.pitchLabel && labelChanged) this.pitchLabel.textContent = label;
+
+    // Announce a guidance change only once it has settled, so screen reader
+    // users are not read every analysis frame.
+    if (labelChanged && this.state.micState === 'on') {
+      clearTimeout(this.pitchAnnounceTimer);
+      this.pitchAnnounceTimer = setTimeout(() => {
+        if (this.pitchLabel?.textContent === label) this.overlays.announce(label);
+      }, 450);
     }
   }
 
-  /**
-   * Render the score with the current volume preset and download as a WAV file.
-   * Shows a progress indicator in the export button while rendering.
-   */
-  async exportWAV() {
-    if (!this.audioEngine || !this.state.parts.length) return;
+  /* =====================================================================
+     Exports
+     ===================================================================== */
 
-    // Make sure the engine is initialised (needs an AudioContext for the
-    // soft-clip curve builder even in offline mode).
-    await this.initAudioEngine();
+  bindExports() {
+    this.exportXmlButton?.addEventListener('click', () => {
+      this.overlays.closeMenus();
+      try {
+        exportMusicXMLFile({
+          rawXml: this.state.rawXml,
+          parts: this.state.parts,
+          tempo: this.state.tempo,
+          fileName: this.state.fileName
+        });
+        this.overlays.toast('MusicXML exported with your tempo and part names.');
+      } catch (error) {
+        this.overlays.toast(error.message || 'The score could not be exported.', { type: 'error' });
+      }
+    });
 
-    const exportAudioBtn = document.getElementById('export-audio-btn');
-    if (exportAudioBtn) {
-      exportAudioBtn.disabled = true;
-      exportAudioBtn.querySelector('.export-audio-label').textContent = 'Rendering…';
-    }
+    this.exportWavButton?.addEventListener('click', () => this.exportAudio());
+  }
+
+  async exportAudio() {
+    if (!this.state.parts.length) return;
+    const button = this.exportWavButton;
+    const label = button?.querySelector('.menu-item-label');
+    const originalLabel = label?.textContent;
+
+    this.overlays.closeMenus();
+    if (button) button.disabled = true;
+    this.overlays.announce('Rendering audio export');
 
     try {
-      // Sync engine state so the offline render uses the latest tempo / parts.
+      await this.initAudioEngine({ resume: false });
       this.audioEngine.setTempo(this.state.tempo);
+      this.audioEngine.setSynthMode(this.state.synthMode);
+      this.audioEngine.setRoomAmount(this.state.room);
+      this.audioEngine.setMasterVolume(this.state.masterVolume);
+      this.audioEngine.setTuning(this.state.tuning);
+      this.audioEngine.setTranspose(this.state.transpose);
+      this.audioEngine.setFollowDynamics(this.state.followDynamics);
+      this.audioEngine.setFermataMultiplier(this.state.fermata);
       this.audioEngine.setParts(this.state.parts);
+      this.audioEngine.setPlayRepeats(this.state.playRepeats);
+      this.audioEngine.setScoreStructure(this.state.metadata);
+      this.audioEngine.setTempo(this.state.tempo);
+      for (const part of this.state.parts) {
+        this.audioEngine.setPartVolume(part.id, this.state.volumes[part.id] ?? 100);
+        this.audioEngine.setPartMuted(part.id, this.state.muted.has(part.id));
+        this.audioEngine.setPartSoloed(part.id, this.state.soloed.has(part.id));
+      }
 
-      const audioBuffer = await this.audioEngine.exportAudio({
-        onProgress: (ratio) => {
-          if (exportAudioBtn) {
-            const pct = Math.round(ratio * 100);
-            exportAudioBtn.querySelector('.export-audio-label').textContent =
-              pct < 100 ? `Rendering ${pct}%` : 'Encoding…';
-          }
+      await exportWavFile(this.audioEngine, {
+        fileName: this.state.fileName,
+        onProgress: ratio => {
+          if (!label) return;
+          const percent = Math.round(ratio * 100);
+          label.textContent = percent < 100 ? `Rendering ${percent}%` : 'Encoding…';
         }
       });
-
-      const wav = AudioEngine.audioBufferToWav(audioBuffer);
-      const url = URL.createObjectURL(wav);
-      const a = document.createElement('a');
-      a.href = url;
-      const baseName = (this.state.fileName || 'score').replace(/\.(xml|musicxml|mxl)$/i, '');
-      a.download = `${baseName}.wav`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      this.showError('Audio export failed: ' + err.message);
+      this.overlays.toast('Audio exported as a WAV file.');
+    } catch (error) {
+      this.overlays.toast(
+        `Audio export failed: ${error.message || 'unknown error'}`,
+        { type: 'error' }
+      );
     } finally {
-      if (exportAudioBtn) {
-        exportAudioBtn.disabled = false;
-        exportAudioBtn.querySelector('.export-audio-label').textContent = 'Export WAV';
-      }
+      if (button) button.disabled = false;
+      if (label && originalLabel) label.textContent = originalLabel;
     }
   }
 
-  /**
-   * Export the current score as a modified MusicXML file.
-   * Patches the original XML with the current tempo and any renamed parts,
-   * then triggers a browser download.
-   */
-  exportMusicXML() {
-    this.commitActivePartEdit();
-    if (!this.state.rawXml) return;
+  /* =====================================================================
+     Keyboard
+     ===================================================================== */
 
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(this.state.rawXml, 'application/xml');
-
-    // --- Patch part names ---
-    // MusicXML has one <part-name> per source part, while this app may split
-    // that source into several editable logical voices. Preserve every edited
-    // name by writing a compound label (for example "Soprano / Alto") in
-    // voice-number order. The parser restores those names individually later.
-    const partNameUpdates = buildPartNameUpdates(this.state.parts);
-
-    const partList = doc.querySelector('part-list');
-    if (partList) {
-      for (const scorePart of partList.querySelectorAll('score-part')) {
-        const id = scorePart.getAttribute('id');
-        if (partNameUpdates.has(id)) {
-          const nameEl = scorePart.querySelector('part-name');
-          if (nameEl) {
-            nameEl.textContent = partNameUpdates.get(id);
-          }
-        }
-      }
-    }
-
-    // --- Patch tempo ---
-    // Strategy: find the first <sound tempo="..."> in the score and update it.
-    // If none exists, insert one in the first measure's first direction or as a
-    // new <direction> element.
-    const currentTempo = this.state.tempo;
-    let tempoPatched = false;
-
-    // Look for existing <sound tempo="..."> anywhere in the score
-    const allSounds = doc.querySelectorAll('sound[tempo]');
-    if (allSounds.length > 0) {
-      // Update all tempo markings proportionally? No — just set the first one
-      // to the user's chosen tempo. Additional tempo changes (accelerando etc.)
-      // are left intact relative to their original values.
-      allSounds[0].setAttribute('tempo', String(currentTempo));
-      tempoPatched = true;
-    }
-
-    if (!tempoPatched) {
-      // Insert a <direction> with <sound tempo="..."> at the start of the first measure
-      const firstPart = doc.querySelector('part');
-      const firstMeasure = firstPart?.querySelector('measure');
-      if (firstMeasure) {
-        const direction = doc.createElement('direction');
-        direction.setAttribute('placement', 'above');
-        const sound = doc.createElement('sound');
-        sound.setAttribute('tempo', String(currentTempo));
-        direction.appendChild(sound);
-        // Insert before the first child (attributes/note)
-        firstMeasure.insertBefore(direction, firstMeasure.firstChild);
-      }
-    }
-
-    // --- Serialize and download ---
-    const serializer = new XMLSerializer();
-    let xmlString = serializer.serializeToString(doc);
-
-    // Ensure XML declaration is present
-    if (!xmlString.startsWith('<?xml')) {
-      xmlString = '<?xml version="1.0" encoding="UTF-8"?>\n' + xmlString;
-    }
-
-    const blob = new Blob([xmlString], { type: 'application/xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    // Generate filename from the original, appending "-edited" before the extension
-    const baseName = (this.state.fileName || 'score.xml').replace(/\.(xml|musicxml)$/i, '');
-    a.download = `${baseName}-edited.musicxml`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  bindKeyboard() {
+    document.addEventListener('keydown', event => this.handleKeydown(event));
   }
 
-  showError(message) {
-    const errorEl = document.createElement('div');
-    errorEl.className = 'error-message';
-    errorEl.setAttribute('role', 'alert');
+  /** True while any modal surface owns the keyboard. */
+  isModalOpen() {
+    try {
+      if (document.querySelector('dialog:modal')) return true;
+    } catch (error) {
+      // :modal is unsupported; fall back to what the modules know.
+    }
+    return this.overlays.isDialogOpen() ||
+      this.partsPanel.isSheetOpen() ||
+      this.settings.isOpen();
+  }
 
-    const messageEl = document.createElement('span');
-    messageEl.textContent = message;
-    const dismissBtn = document.createElement('button');
-    dismissBtn.type = 'button';
-    dismissBtn.className = 'error-dismiss';
-    dismissBtn.setAttribute('aria-label', 'Dismiss message');
-    dismissBtn.textContent = '×';
-    dismissBtn.addEventListener('click', () => errorEl.remove());
-    errorEl.append(messageEl, dismissBtn);
+  handleKeydown(event) {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
 
-    document.body.appendChild(errorEl);
-    setTimeout(() => errorEl.remove(), 6000);
+    const target = event.target;
+    const tag = target?.tagName;
+    const isSlider = tag === 'INPUT' && target.type === 'range';
+    // Form controls keep their own keys, including slider arrows. A slider does
+    // nothing with space, so play/pause still works from there.
+    if (tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+    if (tag === 'INPUT' && !(isSlider && event.code === 'Space')) return;
+
+    if (event.key === '?') {
+      if (this.isModalOpen() && !this.overlays.isHelpOpen()) return;
+      event.preventDefault();
+      this.overlays.toggleHelp();
+      return;
+    }
+
+    if (this.isModalOpen() || !this.state.parts.length) return;
+
+    switch (event.code) {
+      case 'Space':
+        // Let a focused button handle its own activation.
+        if (tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY') return;
+        event.preventDefault();
+        this.togglePlay();
+        break;
+      case 'ArrowLeft':
+        event.preventDefault();
+        this.seekToPreviousBar();
+        break;
+      case 'ArrowRight':
+        event.preventDefault();
+        this.seekToNextBar();
+        break;
+      case 'Home':
+        event.preventDefault();
+        this.seekToBeat(0, { followScore: true });
+        this.overlays.announce('Back to the start');
+        break;
+      case 'KeyM':
+        event.preventDefault();
+        this.toggleMetronome();
+        break;
+      case 'KeyR':
+        event.preventDefault();
+        this.toggleLoop();
+        break;
+      case 'BracketLeft':
+        event.preventDefault();
+        this.markLoopEdge('start');
+        break;
+      case 'BracketRight':
+        event.preventDefault();
+        this.markLoopEdge('end');
+        break;
+      case 'Backslash':
+        event.preventDefault();
+        this.clearLoopRange();
+        break;
+      case 'Comma':
+        event.preventDefault();
+        if (!this.settings.isOpen()) this.settings.setAll(this.collectSettings());
+        this.settings.toggle();
+        break;
+      default:
+        break;
+    }
   }
 }
 
-// Initialize app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-  window.app = new ChoirPracticeApp();
+  window.choirPracticeApp = new ChoirPracticeApp();
 });
+
+export { ChoirPracticeApp };

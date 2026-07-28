@@ -4,6 +4,10 @@
  * Dynamically detects part types using string matching heuristics.
  */
 
+import { interpretDynamicNames, velocityFromSoundDynamics } from './dynamics.js';
+import { buildRepeatPlan, isStraightThrough } from './repeats.js';
+import { buildTempoMap } from './tempo-map.js';
+
 // MXL (compressed MusicXML) ZIP signature bytes
 const ZIP_SIGNATURE = [0x50, 0x4B, 0x03, 0x04];
 
@@ -202,12 +206,140 @@ export function buildPartNameUpdates(parts = []) {
 
 /**
  * Check if file data is a compressed MXL file (ZIP format).
- * @param {ArrayBuffer} data
+ * @param {ArrayBuffer|Uint8Array} data
  * @returns {boolean}
  */
 export function isMxlFile(data) {
-  const bytes = new Uint8Array(data, 0, 4);
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  if (bytes.length < 4) return false;
   return ZIP_SIGNATURE.every((b, i) => bytes[i] === b);
+}
+
+/**
+ * List the files inside a ZIP archive.
+ *
+ * Compressed MusicXML (.mxl) is what most notation software exports, so the app
+ * reads the container itself instead of asking singers to unzip it. Only the
+ * central directory is parsed, which is the authoritative index of a ZIP file.
+ *
+ * @param {ArrayBuffer|Uint8Array} data
+ * @returns {Array<{ name: string, method: number, compressedSize: number, uncompressedSize: number, dataStart: number }>}
+ */
+export function listZipEntries(data) {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder('utf-8');
+
+  // Locate the end-of-central-directory record by scanning backwards over the
+  // maximum comment length.
+  let endOffset = -1;
+  const scanFloor = Math.max(0, bytes.length - 22 - 0xffff);
+  for (let offset = bytes.length - 22; offset >= scanFloor; offset--) {
+    if (view.getUint32(offset, true) === 0x06054b50) {
+      endOffset = offset;
+      break;
+    }
+  }
+  if (endOffset < 0) throw new Error('This file is not a readable compressed archive.');
+
+  const entryCount = view.getUint16(endOffset + 10, true);
+  let cursor = view.getUint32(endOffset + 16, true);
+  const entries = [];
+  const ZIP64_MARKER = 0xffffffff;
+
+  for (let index = 0; index < entryCount; index++) {
+    if (cursor + 46 > bytes.length || view.getUint32(cursor, true) !== 0x02014b50) break;
+    const method = view.getUint16(cursor + 10, true);
+    const compressedSize = view.getUint32(cursor + 20, true);
+    const uncompressedSize = view.getUint32(cursor + 24, true);
+    const nameLength = view.getUint16(cursor + 28, true);
+    const extraLength = view.getUint16(cursor + 30, true);
+    const commentLength = view.getUint16(cursor + 32, true);
+    const localOffset = view.getUint32(cursor + 42, true);
+    const name = decoder.decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
+
+    if (compressedSize === ZIP64_MARKER || uncompressedSize === ZIP64_MARKER ||
+        localOffset === ZIP64_MARKER) {
+      throw new Error('This archive uses the ZIP64 format, which is not supported.');
+    }
+    if (localOffset + 30 > bytes.length) {
+      throw new Error('The compressed archive is damaged.');
+    }
+
+    // The local header repeats the name and extra fields before the payload.
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    if (dataStart + compressedSize > bytes.length) {
+      throw new Error('The compressed archive is damaged.');
+    }
+
+    entries.push({ name, method, compressedSize, uncompressedSize, dataStart });
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+
+  if (entries.length === 0) throw new Error('The compressed archive is empty.');
+  return entries;
+}
+
+/**
+ * Choose which archive member holds the score.
+ * META-INF/container.xml is authoritative when present; otherwise the first
+ * XML member outside META-INF is used.
+ *
+ * @param {Array<{ name: string }>} entries
+ * @param {string|null} containerXml
+ * @returns {string|null} entry name
+ */
+export function selectScoreEntryName(entries, containerXml = null) {
+  const names = entries.map(entry => entry.name);
+  const rootPath = containerXml?.match(/full-path\s*=\s*"([^"]+)"/i)?.[1];
+  if (rootPath && names.includes(rootPath)) return rootPath;
+
+  const candidates = names.filter(name =>
+    !name.startsWith('META-INF/') &&
+    !name.endsWith('/') &&
+    /\.(musicxml|xml)$/i.test(name)
+  );
+  return candidates[0] || null;
+}
+
+/**
+ * Read one archive member as UTF-8 text.
+ * @param {Uint8Array} bytes whole archive
+ * @param {{ method: number, compressedSize: number, dataStart: number }} entry
+ * @returns {Promise<string>}
+ */
+export async function readZipEntryText(bytes, entry) {
+  const payload = bytes.subarray(entry.dataStart, entry.dataStart + entry.compressedSize);
+  if (entry.method === 0) return new TextDecoder('utf-8').decode(payload);
+  if (entry.method !== 8) {
+    throw new Error('This archive uses an unsupported compression method.');
+  }
+  if (typeof DecompressionStream !== 'function') {
+    throw new Error('This browser cannot open compressed MusicXML files.');
+  }
+
+  const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Response(stream).text();
+}
+
+/**
+ * Extract the MusicXML text from a compressed .mxl archive.
+ * @param {ArrayBuffer|Uint8Array} data
+ * @returns {Promise<string>}
+ */
+export async function readMxl(data) {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const entries = listZipEntries(bytes);
+  const containerEntry = entries.find(entry => entry.name === 'META-INF/container.xml');
+  const containerXml = containerEntry ? await readZipEntryText(bytes, containerEntry) : null;
+  const scoreName = selectScoreEntryName(entries, containerXml);
+  const scoreEntry = entries.find(entry => entry.name === scoreName);
+  if (!scoreEntry) {
+    throw new Error('No MusicXML score was found inside this archive.');
+  }
+  return readZipEntryText(bytes, scoreEntry);
 }
 
 /**
@@ -255,6 +387,215 @@ function parseClef(clefEl) {
   const line = parseInt(clefEl.querySelector('line')?.textContent || String(defaultLine), 10) || defaultLine;
   const octaveChange = parseInt(clefEl.querySelector('clef-octave-change')?.textContent || '0', 10) || 0;
   return { sign, line, octaveChange, staff };
+}
+
+/**
+ * How many quarter notes one written note value lasts. Used to convert a
+ * metronome mark such as "dotted half = 60" into quarter-note beats per minute,
+ * which is the unit the whole app measures tempo in.
+ */
+const NOTE_TYPE_QUARTERS = {
+  maxima: 32,
+  long: 16,
+  breve: 8,
+  whole: 4,
+  half: 2,
+  quarter: 1,
+  eighth: 0.5,
+  '16th': 0.25,
+  '32nd': 0.125,
+  '64th': 0.0625,
+  '128th': 0.03125,
+  '256th': 0.015625
+};
+
+/**
+ * Parse a MusicXML <transpose> into a semitone offset.
+ *
+ * A transposing part writes one pitch and sounds another. The renderer wants the
+ * written pitch and playback wants the sounding one, so the difference is kept
+ * beside the part rather than baked into either.
+ *
+ * @param {Element} transposeEl
+ * @returns {{ diatonic: number, chromatic: number, octaveChange: number, semitones: number }}
+ */
+function parseTranspose(transposeEl) {
+  const readInt = (selector) =>
+    parseInt(transposeEl.querySelector(selector)?.textContent || '0', 10) || 0;
+  const diatonic = readInt('diatonic');
+  const chromatic = readInt('chromatic');
+  const octaveChange = readInt('octave-change');
+  return {
+    diatonic,
+    chromatic,
+    octaveChange,
+    semitones: chromatic + octaveChange * 12
+  };
+}
+
+/**
+ * Convert a <metronome> element to quarter-note beats per minute.
+ * @param {Element} metronomeEl
+ * @returns {{ bpm: number|null, beatUnit: string|null, perMinute: number|null, dots: number }}
+ */
+function parseMetronome(metronomeEl) {
+  const beatUnit = metronomeEl.querySelector('beat-unit')?.textContent?.trim().toLowerCase() || null;
+  const perMinute = parseFloat(metronomeEl.querySelector('per-minute')?.textContent || '');
+  const dots = metronomeEl.querySelectorAll('beat-unit-dot').length;
+
+  if (!beatUnit || !Number.isFinite(perMinute) || perMinute <= 0) {
+    return { bpm: null, beatUnit, perMinute: Number.isFinite(perMinute) ? perMinute : null, dots };
+  }
+
+  const base = NOTE_TYPE_QUARTERS[beatUnit];
+  if (!base) return { bpm: null, beatUnit, perMinute, dots };
+
+  // Each dot adds half of the remaining value: one dot is 1.5x, two is 1.75x.
+  const dotFactor = 2 - Math.pow(0.5, dots);
+  return { bpm: perMinute * base * dotFactor, beatUnit, perMinute, dots };
+}
+
+/**
+ * Parse one <direction> element into a positioned direction event.
+ *
+ * Directions carry almost everything a singer reads that is not a note: the
+ * dynamic markings, the hairpins, the tempo words, and the rehearsal letters.
+ * They are returned as events so `layoutMeasure` can give each one the beat it
+ * actually falls on, including any `<offset>`.
+ *
+ * @param {Element} directionEl
+ * @returns {object} a single event with kind 'direction'
+ */
+function parseDirection(directionEl) {
+  const event = {
+    kind: 'direction',
+    offset: parseInt(directionEl.querySelector('offset')?.textContent || '0', 10) || 0,
+    placement: directionEl.getAttribute('placement') || null,
+    staff: parseInt(directionEl.querySelector('staff')?.textContent || '1', 10) || 1,
+    dynamics: null,
+    wedge: null,
+    words: null,
+    rehearsal: null,
+    metronome: null,
+    tempo: null,
+    soundDynamics: null,
+    navigation: []
+  };
+
+  for (const typeEl of directionEl.querySelectorAll('direction-type')) {
+    for (const child of Array.from(typeEl.children)) {
+      const tag = child.tagName.toLowerCase();
+
+      if (tag === 'dynamics') {
+        const names = Array.from(child.children).map(element => element.tagName.toLowerCase());
+        const other = child.querySelector('other-dynamics')?.textContent || '';
+        const interpreted = interpretDynamicNames(names, other);
+        event.dynamics = {
+          ...interpreted,
+          text: names.filter(name => name !== 'other-dynamics').join('') || other.trim()
+        };
+      } else if (tag === 'wedge') {
+        event.wedge = {
+          type: (child.getAttribute('type') || 'crescendo').toLowerCase(),
+          number: parseInt(child.getAttribute('number') || '1', 10) || 1,
+          spread: parseFloat(child.getAttribute('spread') || '') || null
+        };
+      } else if (tag === 'words') {
+        const text = child.textContent.trim();
+        if (text) event.words = event.words ? `${event.words} ${text}` : text;
+      } else if (tag === 'rehearsal') {
+        const text = child.textContent.trim();
+        if (text) event.rehearsal = text;
+      } else if (tag === 'metronome') {
+        event.metronome = parseMetronome(child);
+      }
+    }
+  }
+
+  const soundEl = directionEl.querySelector('sound');
+  if (soundEl) {
+    Object.assign(event, readSoundElement(soundEl, event));
+  }
+
+  // A written metronome mark is a tempo instruction even without a <sound>.
+  if (event.tempo === null && Number.isFinite(event.metronome?.bpm)) {
+    event.tempo = event.metronome.bpm;
+  }
+
+  return event;
+}
+
+/**
+ * Read the playback hints on a <sound> element.
+ * @param {Element} soundEl
+ * @param {object} [base] existing values to preserve
+ * @returns {{ tempo: number|null, soundDynamics: number|null, navigation: Array<string> }}
+ */
+function readSoundElement(soundEl, base = {}) {
+  const tempoAttribute = parseFloat(soundEl.getAttribute('tempo') || '');
+  const dynamicsAttribute = soundEl.getAttribute('dynamics');
+  const navigation = [...(base.navigation || [])];
+
+  for (const attribute of ['dacapo', 'dalsegno', 'tocoda', 'fine', 'segno', 'coda']) {
+    if (soundEl.hasAttribute(attribute)) navigation.push(attribute);
+  }
+
+  return {
+    tempo: Number.isFinite(tempoAttribute) && tempoAttribute > 0 ? tempoAttribute : (base.tempo ?? null),
+    soundDynamics: dynamicsAttribute !== null
+      ? velocityFromSoundDynamics(dynamicsAttribute)
+      : (base.soundDynamics ?? null),
+    navigation
+  };
+}
+
+/**
+ * Parse one <barline> element.
+ *
+ * Barlines carry the performance structure (repeat signs and numbered endings)
+ * as well as how the line is drawn, and both matter: the first decides the order
+ * bars are sung in, the second is what makes a score look like a score.
+ *
+ * @param {Element} barlineEl
+ * @returns {object}
+ */
+function parseBarline(barlineEl) {
+  const location = barlineEl.getAttribute('location') || 'right';
+  const style = barlineEl.querySelector('bar-style')?.textContent?.trim().toLowerCase() || null;
+
+  const repeatEl = barlineEl.querySelector('repeat');
+  const repeat = repeatEl
+    ? {
+      direction: (repeatEl.getAttribute('direction') || 'backward').toLowerCase(),
+      times: parseInt(repeatEl.getAttribute('times') || '', 10) || null,
+      winged: repeatEl.getAttribute('winged') || null
+    }
+    : null;
+
+  const endingEl = barlineEl.querySelector('ending');
+  const ending = endingEl
+    ? {
+      numbers: String(endingEl.getAttribute('number') || '')
+        .split(/[,\s]+/)
+        .map(value => parseInt(value, 10))
+        .filter(Number.isFinite),
+      type: (endingEl.getAttribute('type') || 'start').toLowerCase(),
+      text: endingEl.textContent.trim() || null
+    }
+    : null;
+
+  const fermatas = [];
+  for (const fermataEl of barlineEl.querySelectorAll('fermata')) {
+    const type = fermataEl.getAttribute('type') || 'upright';
+    fermatas.push({
+      type,
+      shape: fermataEl.textContent.trim() || 'normal',
+      placement: fermataEl.getAttribute('placement') || (type === 'inverted' ? 'below' : 'above'),
+      location
+    });
+  }
+
+  return { location, style, repeat, ending, fermatas };
 }
 
 /**
@@ -310,13 +651,15 @@ function findClefForStaff(measures, staff) {
  *
  * Pure (no DOM) so it can be unit tested directly.
  *
- * @param {Array} events - ordered events: { kind: 'note'|'backup'|'forward', ... }
+ * @param {Array} events - ordered events: { kind: 'note'|'backup'|'forward'|'direction', ... }
  * @param {number} divisions - divisions per quarter note for this measure
- * @returns {{ notes: Array, beats: number }} notes with timing and measure length in beats
+ * @returns {{ notes: Array, directions: Array, beats: number }} notes and directions
+ *   with timing, plus the measure length in beats
  */
 export function layoutMeasure(events, divisions) {
   const div = divisions > 0 ? divisions : 1;
   const notes = [];
+  const directions = [];
   let cursor = 0;       // current time position within the measure, in divisions
   let maxCursor = 0;    // furthest point reached (= measure length)
   let lastStart = 0;    // onset of the last non-chord note, so chords can share it
@@ -329,6 +672,14 @@ export function layoutMeasure(events, divisions) {
     if (ev.kind === 'forward') {
       cursor += ev.duration || 0;
       if (cursor > maxCursor) maxCursor = cursor;
+      continue;
+    }
+    if (ev.kind === 'direction') {
+      // A direction sounds at the cursor, shifted by its own <offset>. It takes
+      // no time of its own, so the cursor does not move.
+      const { kind, offset, ...rest } = ev;
+      const startDiv = Math.max(0, cursor + (offset || 0));
+      directions.push({ ...rest, startBeatInMeasure: startDiv / div });
       continue;
     }
 
@@ -351,8 +702,17 @@ export function layoutMeasure(events, divisions) {
       startBeatInMeasure: startDiv / div,
       staccato: !!ev.staccato
     };
+    if (ev.staccatissimo) note.staccatissimo = true;
+    if (ev.accent) note.accent = true;
+    if (ev.strongAccent) note.strongAccent = true;
+    if (ev.tenuto) note.tenuto = true;
+    if (ev.breathMark) note.breathMark = true;
+    if (ev.caesura) note.caesura = true;
+    if (ev.ornaments) note.ornaments = [...ev.ornaments];
+    if (ev.noteDynamics) note.noteDynamics = { ...ev.noteDynamics };
     if (ev.pitch) note.pitch = { ...ev.pitch };
     if (ev.lyric) note.lyric = { ...ev.lyric };
+    if (ev.lyrics) note.lyrics = ev.lyrics.map(lyric => ({ ...lyric }));
     if (ev.tie) note.tie = { ...ev.tie };
     if (ev.ties) note.ties = ev.ties.map(tie => ({ ...tie }));
     if (ev.stem) note.stem = ev.stem;
@@ -373,7 +733,7 @@ export function layoutMeasure(events, divisions) {
     }
   }
 
-  return { notes, beats: maxCursor / div };
+  return { notes, directions, beats: maxCursor / div };
 }
 
 /**
@@ -388,14 +748,21 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
   const clefs = cloneClefs(currentClefs);
   const result = {
     number: parseInt(measureEl.getAttribute('number') || '1', 10),
+    // A pickup bar is shorter than its time signature and is conventionally
+    // unnumbered, which is worth knowing when labelling bars for the singer.
+    isPickup: measureEl.getAttribute('implicit') === 'yes',
     notes: [],
+    directions: [],
     divisions: currentDivisions,
     timeSignature: currentTimeSignature,
     keySignature: null,
     tempo: null,
+    transpose: null,
     voices: new Set(),
     beats: 0,
+    barlines: [],
     barlineFermatas: [],
+    navigation: [],
     clefs: cloneClefs(clefs)
   };
 
@@ -430,26 +797,36 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
         const clef = parseClef(clefEl);
         clefs[clef.staff] = clef;
       }
+      const transposeEl = child.querySelector('transpose');
+      if (transposeEl) result.transpose = parseTranspose(transposeEl);
     } else if (tag === 'direction') {
-      const sound = child.querySelector('sound');
-      if (sound && sound.getAttribute('tempo')) {
-        result.tempo = parseFloat(sound.getAttribute('tempo'));
-      }
+      const direction = parseDirection(child);
+      events.push(direction);
+      // Kept for callers that only need "the tempo somewhere in this measure".
+      if (direction.tempo !== null && result.tempo === null) result.tempo = direction.tempo;
+      if (direction.navigation.length) result.navigation.push(...direction.navigation);
     } else if (tag === 'sound') {
-      if (child.getAttribute('tempo')) {
-        result.tempo = parseFloat(child.getAttribute('tempo'));
-      }
+      const sound = readSoundElement(child);
+      events.push({
+        kind: 'direction',
+        offset: 0,
+        placement: null,
+        staff: 1,
+        dynamics: null,
+        wedge: null,
+        words: null,
+        rehearsal: null,
+        metronome: null,
+        ...sound
+      });
+      if (sound.tempo !== null && result.tempo === null) result.tempo = sound.tempo;
+      if (sound.navigation.length) result.navigation.push(...sound.navigation);
     } else if (tag === 'barline') {
-      const location = child.getAttribute('location') || 'right';
-      for (const fermataEl of child.querySelectorAll('fermata')) {
-        const type = fermataEl.getAttribute('type') || 'upright';
-        result.barlineFermatas.push({
-          type,
-          shape: fermataEl.textContent.trim() || 'normal',
-          placement: fermataEl.getAttribute('placement') || (type === 'inverted' ? 'below' : 'above'),
-          location
-        });
-      }
+      const barline = parseBarline(child);
+      result.barlines.push(barline);
+      // Barline fermatas keep their own list because the hold they create is
+      // timed from the barline rather than from a note.
+      result.barlineFermatas.push(...barline.fermatas);
     } else if (tag === 'backup') {
       events.push({ kind: 'backup', duration: parseInt(child.querySelector('duration')?.textContent || '0', 10) });
     } else if (tag === 'forward') {
@@ -476,12 +853,36 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
         if (pitchEl) ev.pitch = parsePitch(pitchEl);
       }
 
-      const lyricEl = child.querySelector('lyric');
-      if (lyricEl) {
-        ev.lyric = {
-          text: lyricEl.querySelector('text')?.textContent || '',
-          syllabic: lyricEl.querySelector('syllabic')?.textContent || 'single'
-        };
+      // Every verse, not just the first. A hymn or a strophic part song carries
+      // several, and a singer rehearsing verse three needs verse three.
+      const lyricEls = Array.from(child.querySelectorAll('lyric'));
+      if (lyricEls.length) {
+        const lyrics = lyricEls.map((lyricEl, lyricIndex) => {
+          // One <lyric> can hold several <text> runs joined by <elision>, which
+          // is how two words sung on one note are written.
+          const textParts = Array.from(lyricEl.querySelectorAll('text'))
+            .map(element => element.textContent || '');
+          const elisions = Array.from(lyricEl.querySelectorAll('elision'))
+            .map(element => element.textContent || ' ');
+          let text = textParts[0] || '';
+          for (let part = 1; part < textParts.length; part++) {
+            text += (elisions[part - 1] ?? ' ') + textParts[part];
+          }
+          return {
+            number: parseInt(lyricEl.getAttribute('number') || String(lyricIndex + 1), 10) ||
+              lyricIndex + 1,
+            name: lyricEl.getAttribute('name') || null,
+            text,
+            syllabic: lyricEl.querySelector('syllabic')?.textContent || 'single',
+            extend: lyricEl.querySelector('extend') !== null,
+            hasElision: elisions.length > 0
+          };
+        }).sort((left, right) => left.number - right.number);
+
+        ev.lyrics = lyrics;
+        // The single-verse field stays for the vowel logic and anything else
+        // that only ever wanted the top line.
+        ev.lyric = { text: lyrics[0].text, syllabic: lyrics[0].syllabic };
       }
 
       // Preserve the source stem and beam state so short notes can be drawn as
@@ -537,10 +938,42 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
           }));
         }
 
-        // Preserve staccato so playback can distinguish intentionally detached
-        // notes from ordinary vocal note changes.
-        if (notationsEl.querySelector('articulations > staccato')) {
-          ev.staccato = true;
+        // Articulations change how a note is sung rather than which note it is,
+        // so each one playback can act on is preserved separately.
+        const articulationsEl = notationsEl.querySelector('articulations');
+        if (articulationsEl) {
+          if (articulationsEl.querySelector('staccato')) ev.staccato = true;
+          if (articulationsEl.querySelector('staccatissimo')) {
+            ev.staccato = true;
+            ev.staccatissimo = true;
+          }
+          if (articulationsEl.querySelector('accent')) ev.accent = true;
+          if (articulationsEl.querySelector('strong-accent')) ev.strongAccent = true;
+          if (articulationsEl.querySelector('tenuto')) ev.tenuto = true;
+          if (articulationsEl.querySelector('breath-mark')) ev.breathMark = true;
+          if (articulationsEl.querySelector('caesura')) ev.caesura = true;
+        }
+
+        // Ornaments are drawn but not realised: a rendered trill that does not
+        // match what a singer is told to sing is worse than no trill at all.
+        const ornamentsEl = notationsEl.querySelector('ornaments');
+        if (ornamentsEl) {
+          const names = Array.from(ornamentsEl.children)
+            .map(element => element.tagName.toLowerCase())
+            .filter(name => name !== 'accidental-mark');
+          if (names.length) ev.ornaments = names;
+        }
+
+        // A dynamic marking attached directly to a note, rather than written as
+        // a separate direction.
+        const noteDynamicsEl = notationsEl.querySelector('dynamics');
+        if (noteDynamicsEl) {
+          const names = Array.from(noteDynamicsEl.children)
+            .map(element => element.tagName.toLowerCase());
+          ev.noteDynamics = interpretDynamicNames(
+            names,
+            noteDynamicsEl.querySelector('other-dynamics')?.textContent || ''
+          );
         }
 
         const fermataEl = notationsEl.querySelector('fermata');
@@ -587,7 +1020,9 @@ function parseMeasure(measureEl, currentDivisions, currentTimeSignature, current
   result.clefs = cloneClefs(clefs);
   const laid = layoutMeasure(events, divisions);
   result.notes = laid.notes;
+  result.directions = laid.directions;
   result.beats = laid.beats;
+  result.navigation = [...new Set(result.navigation)];
   return result;
 }
 
@@ -610,12 +1045,36 @@ function splitByVoice(measures) {
   for (const voice of voices) {
     voiceMap.set(voice, measures.map(measure => ({
       number: measure.number,
-      notes: measure.notes.filter(note => note.voice === voice),
+      isPickup: measure.isPickup,
+      // Forced stem directions are dropped. On a shared staff they encode "upper
+      // voice up, lower voice down", which only means anything while the voices
+      // sit together. Once each voice has a staff of its own those directions are
+      // wrong: an alto line written low in a treble clef would keep its down
+      // stems and hang three spaces below every notehead, straight through the
+      // words. Clearing them lets the renderer choose by position, as it does for
+      // any single-voice staff.
+      notes: measure.notes
+        .filter(note => note.voice === voice)
+        .map(note => (note.stem === 'up' || note.stem === 'down'
+          ? { ...note, stem: null }
+          : note)),
+      // Directions belong to the staff, not to one voice on it, so every split
+      // voice keeps them. Dynamics and hairpins therefore still apply when a
+      // condensed score is opened out into separate sections.
+      directions: (measure.directions || []).map(direction => ({ ...direction })),
       divisions: measure.divisions,
       timeSignature: measure.timeSignature,
       keySignature: measure.keySignature,
       tempo: measure.tempo,
+      transpose: measure.transpose ? { ...measure.transpose } : null,
+      barlines: (measure.barlines || []).map(barline => ({
+        ...barline,
+        repeat: barline.repeat ? { ...barline.repeat } : null,
+        ending: barline.ending ? { ...barline.ending, numbers: [...barline.ending.numbers] } : null,
+        fermatas: barline.fermatas.map(fermata => ({ ...fermata }))
+      })),
       barlineFermatas: measure.barlineFermatas.map(fermata => ({ ...fermata })),
+      navigation: [...(measure.navigation || [])],
       clefs: cloneClefs(measure.clefs),
       startBeat: measure.startBeat,
       beats: measure.beats
@@ -698,7 +1157,7 @@ export function parseMusicXML(xmlString, xmlDoc) {
   // Check for parse errors
   const parseError = doc.querySelector('parsererror');
   if (parseError) {
-    throw new Error('Invalid MusicXML: ' + parseError.textContent);
+    throw new Error('This file could not be read as MusicXML. It may be damaged or in another format.');
   }
 
   // Extract metadata
@@ -712,7 +1171,7 @@ export function parseMusicXML(xmlString, xmlDoc) {
   // Extract part list
   const partListEl = doc.querySelector('part-list');
   if (!partListEl) {
-    throw new Error('No part-list found in MusicXML');
+    throw new Error('This MusicXML file has no part list, so there is nothing to practise.');
   }
 
   const scorePartElements = partListEl.querySelectorAll('score-part');
@@ -814,6 +1273,7 @@ export function parseMusicXML(xmlString, xmlDoc) {
           voiceNumber: voiceNum,
           staffNumber,
           clef: findClefForStaff(voiceMeasures, staffNumber),
+          transpose: resolvePartTranspose(voiceMeasures),
           measures: voiceMeasures,
           isSubPart: true
         });
@@ -821,12 +1281,17 @@ export function parseMusicXML(xmlString, xmlDoc) {
     } else {
       const partMeasures = measures.map(m => ({
         number: m.number,
+        isPickup: m.isPickup,
         notes: m.notes,
+        directions: m.directions,
         divisions: m.divisions,
         timeSignature: m.timeSignature,
         keySignature: m.keySignature,
         tempo: m.tempo,
+        transpose: m.transpose ? { ...m.transpose } : null,
+        barlines: m.barlines,
         barlineFermatas: m.barlineFermatas.map(fermata => ({ ...fermata })),
+        navigation: [...(m.navigation || [])],
         clefs: cloneClefs(m.clefs),
         startBeat: m.startBeat,
         beats: m.beats
@@ -847,6 +1312,7 @@ export function parseMusicXML(xmlString, xmlDoc) {
         voiceNumber: allVoices.values().next().value || 1,
         staffNumber,
         clef: findClefForStaff(partMeasures, staffNumber),
+        transpose: resolvePartTranspose(partMeasures),
         measures: partMeasures,
         isSubPart: false
       });
@@ -855,21 +1321,174 @@ export function parseMusicXML(xmlString, xmlDoc) {
 
   normalizePartMeasureTimelines(parts);
 
-  // Extract global tempo if available
-  let globalTempo = 120; // default
-  for (const part of parts) {
-    for (const measure of part.measures) {
-      if (measure.tempo) {
-        globalTempo = measure.tempo;
-        break;
-      }
-    }
-    if (globalTempo !== 120) break;
-  }
+  // Tempo, repeat structure and the feature summary all describe the score as a
+  // whole, so they are resolved once here rather than per part.
+  metadata.tempoMap = collectTempoMap(parts);
+  metadata.baseTempo = metadata.tempoMap[0]?.bpm ?? 120;
+  // Kept for callers that only ever wanted the opening tempo.
+  metadata.tempo = metadata.baseTempo;
 
-  metadata.tempo = globalTempo;
+  const structure = collectScoreStructure(parts);
+  metadata.measureStructure = structure.measures;
+  metadata.repeatPlan = buildRepeatPlan(structure.measures);
+  metadata.features = summariseFeatures(parts, metadata);
 
   return { parts, metadata };
+}
+
+/**
+ * First transposition declared anywhere in a part.
+ *
+ * A transposition stays in force until it is changed, and a change mid-part is
+ * rare enough in choral music that the opening value is the useful one.
+ *
+ * @param {Array} measures
+ * @returns {object|null}
+ */
+function resolvePartTranspose(measures = []) {
+  for (const measure of measures) {
+    if (measure?.transpose && measure.transpose.semitones !== 0) {
+      return { ...measure.transpose };
+    }
+  }
+  return null;
+}
+
+/**
+ * Gather every written tempo marking across the score into one map.
+ *
+ * Tempo directions are usually written on the top part only, so all parts are
+ * scanned and the results merged by beat.
+ *
+ * @param {Array} parts
+ * @returns {Array<{beat: number, bpm: number}>}
+ */
+function collectTempoMap(parts = []) {
+  const entries = [];
+  for (const part of parts) {
+    for (const measure of part.measures || []) {
+      const measureStart = Number(measure.startBeat) || 0;
+      for (const direction of measure.directions || []) {
+        if (Number.isFinite(direction?.tempo) && direction.tempo > 0) {
+          entries.push({
+            beat: measureStart + (Number(direction.startBeatInMeasure) || 0),
+            bpm: direction.tempo
+          });
+        }
+      }
+    }
+  }
+  return buildTempoMap(entries, { baseTempo: 120 });
+}
+
+/**
+ * Reduce the score to the per-measure information the repeat expander needs.
+ *
+ * Barlines are a property of the system, not of one voice, so any part that
+ * carries them describes the structure. Taking the union is more forgiving than
+ * trusting a single part, because exporters do not always repeat the markings on
+ * every staff.
+ *
+ * @param {Array} parts
+ * @returns {{ measures: Array<{number: number, barlines: Array, navigation: Array}> }}
+ */
+function collectScoreStructure(parts = []) {
+  const measureCount = Math.max(0, ...parts.map(part => part.measures?.length || 0));
+  const measures = [];
+
+  for (let index = 0; index < measureCount; index++) {
+    const barlines = [];
+    const navigation = new Set();
+    let number = index + 1;
+    let startBeat = 0;
+    let beats = 0;
+
+    for (const part of parts) {
+      const measure = part.measures?.[index];
+      if (!measure) continue;
+      if (measure.number !== undefined) number = measure.number;
+      startBeat = Number(measure.startBeat) || 0;
+      beats = Math.max(beats, Number(measure.beats) || 0);
+      for (const mark of measure.navigation || []) navigation.add(mark);
+
+      for (const barline of measure.barlines || []) {
+        const alreadyKnown = barlines.some(existing =>
+          existing.location === barline.location &&
+          existing.style === barline.style &&
+          existing.repeat?.direction === barline.repeat?.direction &&
+          existing.ending?.type === barline.ending?.type &&
+          String(existing.ending?.numbers) === String(barline.ending?.numbers)
+        );
+        if (!alreadyKnown) barlines.push(barline);
+      }
+    }
+
+    measures.push({ index, number, startBeat, beats, barlines, navigation: [...navigation] });
+  }
+
+  return { measures };
+}
+
+/**
+ * Describe what the score contains, so the app can tell a singer when something
+ * written on the page is not reflected in playback instead of quietly ignoring it.
+ *
+ * @param {Array} parts
+ * @param {object} metadata
+ * @returns {object}
+ */
+function summariseFeatures(parts = [], metadata = {}) {
+  let dynamicCount = 0;
+  let wedgeCount = 0;
+  let verseCount = 0;
+  let ornamentCount = 0;
+  let hasTranspose = false;
+  const timeSignatures = new Set();
+  const keySignatures = new Set();
+
+  for (const part of parts) {
+    if (part.transpose?.semitones) hasTranspose = true;
+    for (const measure of part.measures || []) {
+      if (measure.timeSignature) {
+        timeSignatures.add(`${measure.timeSignature.numerator}/${measure.timeSignature.denominator}`);
+      }
+      if (measure.keySignature) keySignatures.add(Number(measure.keySignature.fifths) || 0);
+      for (const direction of measure.directions || []) {
+        if (direction.dynamics || direction.soundDynamics !== null) dynamicCount++;
+        if (direction.wedge && direction.wedge.type !== 'stop') wedgeCount++;
+      }
+      for (const note of measure.notes || []) {
+        if (note.lyrics) verseCount = Math.max(verseCount, note.lyrics.length);
+        if (note.ornaments?.length) ornamentCount++;
+      }
+    }
+  }
+
+  const repeatPlan = metadata.repeatPlan || { hasRepeats: false, navigationMarks: [] };
+  const measureCount = metadata.measureStructure?.length || 0;
+
+  // Anything listed here is drawn or parsed but deliberately not performed.
+  const unperformed = [];
+  if (repeatPlan.navigationMarks?.length) unperformed.push('repeat jumps (D.C., D.S., Coda)');
+  if (ornamentCount > 0) unperformed.push('ornaments');
+  if (repeatPlan.truncated) unperformed.push('an unusually long repeat structure');
+
+  return {
+    measureCount,
+    verseCount,
+    hasDynamics: dynamicCount > 0,
+    hasWedges: wedgeCount > 0,
+    hasRepeats: Boolean(repeatPlan.hasRepeats),
+    repeatsExpanded: Boolean(repeatPlan.hasRepeats) &&
+      !isStraightThrough(repeatPlan.order || [], measureCount),
+    hasTempoChanges: (metadata.tempoMap?.length || 0) > 1,
+    hasTimeSignatureChanges: timeSignatures.size > 1,
+    hasKeyChanges: keySignatures.size > 1,
+    hasMultipleVerses: verseCount > 1,
+    hasOrnaments: ornamentCount > 0,
+    hasTranspose,
+    unperformed
+  };
 }
 
 /**
@@ -880,18 +1499,10 @@ export function parseMusicXML(xmlString, xmlDoc) {
  */
 export async function parseFile(file) {
   const arrayBuffer = await file.arrayBuffer();
+  const text = isMxlFile(arrayBuffer)
+    ? await readMxl(arrayBuffer)
+    : new TextDecoder('utf-8').decode(arrayBuffer);
 
-  // Check if it's a compressed MXL file
-  if (isMxlFile(arrayBuffer)) {
-    throw new Error(
-      'This appears to be a compressed MXL file. ' +
-      'Please extract it first and upload the .xml or .musicxml file inside. ' +
-      'MXL files are ZIP archives containing the actual MusicXML data.'
-    );
-  }
-
-  // Parse as plain XML text
-  const text = new TextDecoder('utf-8').decode(arrayBuffer);
   const result = parseMusicXML(text);
   result.rawXml = text;
   return result;

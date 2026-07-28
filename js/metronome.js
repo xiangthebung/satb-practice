@@ -1,45 +1,63 @@
 /**
  * Metronome Module
- * Generates click sounds using oscillator bursts via Web Audio API.
- * Supports tempo adjustment, time signature, visual beat indicator, and tap tempo.
+ *
+ * Schedules woodblock-style clicks against the score's own measure boundaries,
+ * so accents stay correct through pickup bars and time-signature changes.
+ * The clicks are routed to a bus that bypasses the playback compressor: a click
+ * that hits the compressor ducks the voices on every beat.
  */
 
+/** Total lifetime of one click, comfortably past its decay. */
+const CLICK_LENGTH = 0.07;
+
 /**
- * Calculate the interval between beats in milliseconds.
+ * How often the click sounds, relative to the beat the time signature counts.
+ *
+ * "Bars only" is for holding a slow tempo without the clutter of every beat, and
+ * the subdivisions are for the opposite problem: pinning down where the offbeats
+ * fall in a passage that keeps slipping.
+ */
+export const CLICK_PATTERNS = [
+  { id: 'bars', label: 'Bars only', factor: 0 },
+  { id: 'beat', label: 'Every beat', factor: 1 },
+  { id: 'eighths', label: 'Eighths', factor: 2 },
+  { id: 'triplets', label: 'Triplets', factor: 3 },
+  { id: 'sixteenths', label: 'Sixteenths', factor: 4 }
+];
+
+const PATTERN_BY_ID = new Map(CLICK_PATTERNS.map(pattern => [pattern.id, pattern]));
+
+/** True when the id names a known click pattern. */
+export function isClickPattern(id) {
+  return PATTERN_BY_ID.has(id);
+}
+
+/**
+ * Grid spacing for a click pattern, in quarter-note beats.
+ *
+ * "Bars only" has no regular spacing of its own: it uses the beat grid and then
+ * suppresses everything that is not a downbeat, because bar lengths change and a
+ * fixed spacing would drift out of the music.
+ *
+ * @param {string} patternId
+ * @param {number} denominator time-signature denominator
+ * @returns {number}
+ */
+export function clickGridStep(patternId, denominator = 4) {
+  const beatStep = 4 / (Number(denominator) || 4);
+  const factor = PATTERN_BY_ID.get(patternId)?.factor ?? 1;
+  if (factor <= 0) return beatStep;
+  return beatStep / factor;
+}
+
+/**
+ * Interval between beats in seconds.
  * @param {number} bpm - beats per minute
- * @returns {number} interval in milliseconds
+ * @returns {number}
  */
-export function bpmToInterval(bpm) {
+export function beatIntervalSeconds(bpm) {
   if (bpm <= 0) return 0;
-  return 60000 / bpm;
-}
-
-/**
- * Calculate BPM from an array of tap intervals (in ms).
- * @param {number[]} intervals - array of time intervals between taps
- * @returns {number} calculated BPM (rounded to nearest integer)
- */
-export function calculateTapTempo(intervals) {
-  if (!intervals || intervals.length === 0) return 0;
-  const avgInterval = intervals.reduce((sum, v) => sum + v, 0) / intervals.length;
-  if (avgInterval <= 0) return 0;
-  return Math.round(60000 / avgInterval);
-}
-
-/**
- * Calculate the next beat time using lookahead scheduling.
- * @param {number} currentTime - current AudioContext time
- * @param {number} lastBeatTime - time of the last scheduled beat
- * @param {number} beatInterval - interval between beats in seconds
- * @returns {number} time of the next beat
- */
-export function getNextBeatTime(currentTime, lastBeatTime, beatInterval) {
-  let nextTime = lastBeatTime + beatInterval;
-  // If we've fallen behind, snap to next upcoming beat
-  while (nextTime < currentTime) {
-    nextTime += beatInterval;
-  }
-  return nextTime;
+  return 60 / bpm;
 }
 
 /**
@@ -51,20 +69,28 @@ export class Metronome {
     this.destination = destinationNode;
     this.tempo = 120;
     this.timeSignature = { numerator: 4, denominator: 4 };
+    /** Which beats and subdivisions are clicked. */
+    this.pattern = 'beat';
+    /** Click level, 0..1, applied on top of the accent difference. */
+    this.volume = 1;
     this.isRunning = false;
     this.currentBeat = 0;
-    this.lastBeatTime = 0;
     this.startTime = 0;
-    this.nextScoreBeat = 0;
-    this.scoreToPlaybackBeat = beat => beat;
+    // How a performance position becomes a time offset from the transport start.
+    // Supplied by the engine so a score that changes tempo clicks in step with
+    // the music instead of drifting away from it.
+    this.playbackBeatToSeconds = beat => beat * beatIntervalSeconds(this.tempo);
+    /** Supplied by the engine; walks the performance rather than the page. */
+    this.nextGridPosition = null;
+    this.searchFrom = 0;
+    this.searchInclusive = true;
     this.schedulerTimer = null;
     this.scheduledClicks = new Set();
+    this.clickNoise = null;
     this.visualTimers = new Set();
     this.lookaheadTime = 0.1; // seconds
     this.scheduleIntervalMs = 25; // ms
     this.onBeat = null; // callback(beatNumber, isDownbeat)
-    this.tapTimes = [];
-    this.maxTapInterval = 2000; // max ms between taps before reset
     // Measure boundaries from the score: sorted array of score-beat positions
     // where each measure starts. Used to determine true downbeats (accents)
     // instead of relying on a simple modulo counter which breaks on pickup
@@ -87,6 +113,71 @@ export class Metronome {
    */
   setTimeSignature(numerator, denominator) {
     this.timeSignature = { numerator, denominator };
+  }
+
+  /**
+   * Choose which beats and subdivisions are clicked.
+   * @param {string} patternId one of CLICK_PATTERNS
+   */
+  setPattern(patternId) {
+    this.pattern = isClickPattern(patternId) ? patternId : 'beat';
+  }
+
+  /**
+   * Set the click level.
+   * @param {number} percent 0 to 100
+   */
+  setVolume(percent) {
+    const level = Number(percent);
+    this.volume = Number.isFinite(level) ? Math.max(0, Math.min(1, level / 100)) : 1;
+  }
+
+  /** Grid spacing the current pattern needs, in quarter-note beats. */
+  getGridStep() {
+    return clickGridStep(this.pattern, this.timeSignature.denominator);
+  }
+
+  /**
+   * Play a count-in leading up to a start time.
+   *
+   * This is deliberately separate from the running click: a count-in is wanted
+   * whether or not the metronome itself is on, because its job is to tell the
+   * singer when to come in rather than to keep time through the piece.
+   *
+   * @param {{ startTime: number, clicks: number, interval: number, beatsPerBar?: number }} options
+   */
+  playCountIn({ startTime, clicks, interval, beatsPerBar = 4 } = {}) {
+    const count = Math.round(Number(clicks) || 0);
+    const gap = Number(interval);
+    if (count <= 0 || !Number.isFinite(gap) || gap <= 0) return;
+    if (!Number.isFinite(startTime) || !this.audioContext) return;
+
+    const firstClick = startTime - count * gap;
+    const now = this.audioContext.currentTime;
+    for (let index = 0; index < count; index++) {
+      const time = firstClick + index * gap;
+      if (time < now - 0.01) continue;
+      // Accent the first count of each bar so a two-bar count-in is countable.
+      const isDownbeat = beatsPerBar > 0 && index % beatsPerBar === 0;
+      this.scheduleClick(time, isDownbeat);
+      this.flashAt(time, isDownbeat, (index % Math.max(1, beatsPerBar)) + 1);
+    }
+  }
+
+  /**
+   * Fire the visual beat callback at an AudioContext time.
+   * @param {number} time
+   * @param {boolean} isDownbeat
+   * @param {number} beatInMeasure
+   */
+  flashAt(time, isDownbeat, beatInMeasure) {
+    if (!this.onBeat || !this.audioContext) return;
+    const delay = Math.max(0, (time - this.audioContext.currentTime) * 1000);
+    const visualTimer = setTimeout(() => {
+      this.visualTimers.delete(visualTimer);
+      if (this.onBeat) this.onBeat(beatInMeasure, isDownbeat);
+    }, delay);
+    this.visualTimers.add(visualTimer);
   }
 
   /**
@@ -123,37 +214,62 @@ export class Metronome {
 
   /**
    * Start the metronome.
-   * @param {object} [syncOptions] - optional score-aware synchronization
-   * @param {number} [syncOptions.startTime] - AudioContext time reference for score beat 0
-   * @param {number} [syncOptions.currentScoreBeat] - current quarter-note score position
-   * @param {(beat: number) => number} [syncOptions.scoreToPlaybackBeat] - fermata timeline mapping
+   *
+   * When given a timeline the clicks walk the performance: every pass through a
+   * repeated section is counted, a held fermata is waited out in silence, and a
+   * written tempo change is followed. Without one, it falls back to a plain
+   * steady click from wherever it was started.
+   *
+   * @param {object} [syncOptions]
+   * @param {number} [syncOptions.startTime] AudioContext time for playback beat 0
+   * @param {number} [syncOptions.currentPlaybackBeat] where the transport is now
+   * @param {(after: number, step: number, options?: object) => object|null} [syncOptions.nextGridPosition]
+   * @param {(beat: number) => number} [syncOptions.playbackBeatToSeconds]
    */
   start(syncOptions) {
     if (this.isRunning) return;
     this.isRunning = true;
 
-    const denominator = Number(this.timeSignature.denominator) || 4;
-    const scoreBeatStep = 4 / denominator;
     if (syncOptions && typeof syncOptions.startTime === 'number') {
       this.startTime = syncOptions.startTime;
-      this.scoreToPlaybackBeat = typeof syncOptions.scoreToPlaybackBeat === 'function'
-        ? syncOptions.scoreToPlaybackBeat
-        : beat => beat;
-      const currentScoreBeat = Number(
-        syncOptions.currentScoreBeat ?? syncOptions.currentBeat ?? 0
-      );
-      this.nextScoreBeat = Math.max(
-        0,
-        Math.ceil((currentScoreBeat - 1e-6) / scoreBeatStep) * scoreBeatStep
-      );
+      this.playbackBeatToSeconds = typeof syncOptions.playbackBeatToSeconds === 'function'
+        ? syncOptions.playbackBeatToSeconds
+        : beat => beat * beatIntervalSeconds(this.tempo);
+      this.nextGridPosition = typeof syncOptions.nextGridPosition === 'function'
+        ? syncOptions.nextGridPosition
+        : null;
+      this.searchFrom = Math.max(0, Number(syncOptions.currentPlaybackBeat) || 0);
     } else {
       this.startTime = this.audioContext.currentTime;
-      this.scoreToPlaybackBeat = beat => beat;
-      this.nextScoreBeat = 0;
+      this.playbackBeatToSeconds = beat => beat * beatIntervalSeconds(this.tempo);
+      this.nextGridPosition = null;
+      this.searchFrom = 0;
     }
 
-    this.currentBeat = Math.round(this.nextScoreBeat / scoreBeatStep);
+    // The first click may fall exactly on the position the transport starts at.
+    this.searchInclusive = true;
+    this.currentBeat = 0;
     this.schedule();
+  }
+
+  /**
+   * Find the next click, in performance coordinates.
+   *
+   * Falls back to a plain grid when no timeline was supplied, which is what the
+   * metronome does when it is used on its own without a score loaded.
+   *
+   * @param {number} step grid spacing in quarter-note beats
+   * @returns {{ playbackBeat: number, scoreBeat: number }|null}
+   */
+  findNextClick(step) {
+    if (this.nextGridPosition) {
+      return this.nextGridPosition(this.searchFrom, step, { inclusive: this.searchInclusive });
+    }
+    const grid = step > 0 ? step : 1;
+    const next = this.searchInclusive
+      ? Math.max(0, Math.ceil((this.searchFrom - 1e-6) / grid) * grid)
+      : Math.max(0, Math.floor((this.searchFrom + 1e-6) / grid) * grid + grid);
+    return { playbackBeat: next, scoreBeat: next };
   }
 
   /**
@@ -173,14 +289,18 @@ export class Metronome {
 
     // The lookahead scheduler may have queued clicks that have not started yet.
     // Silence and stop those nodes so restarting at a new tempo cannot play both
-    // the old and new click. Let an already-sounding 60 ms click finish naturally.
+    // the old and new click. Let an already-sounding click finish naturally.
     const now = this.audioContext.currentTime;
     for (const click of this.scheduledClicks) {
       if (click.startTime >= now) {
         try {
-          click.gainNode.gain.cancelScheduledValues(now);
-          click.gainNode.gain.setValueAtTime(0, now);
-          click.oscillator.stop(now);
+          click.output.gain.cancelScheduledValues(now);
+          click.output.gain.setValueAtTime(0, now);
+          for (const source of click.sources) {
+            try {
+              source.stop(now);
+            } catch (e) { /* already stopped */ }
+          }
         } catch (e) { /* already stopped */ }
       }
     }
@@ -191,24 +311,41 @@ export class Metronome {
     const scheduleAhead = () => {
       if (!this.isRunning) return;
 
-      const quarterDuration = 60 / this.tempo;
       const denominator = Number(this.timeSignature.denominator) || 4;
       const numerator = Number(this.timeSignature.numerator) || 4;
       const scoreBeatStep = 4 / denominator;
+      const gridStep = this.getGridStep();
+      const barsOnly = this.pattern === 'bars';
       const currentTime = this.audioContext.currentTime;
       const scheduleUntil = currentTime + this.lookaheadTime;
 
       while (this.isRunning) {
-        const playbackBeat = this.scoreToPlaybackBeat(this.nextScoreBeat);
-        const clickTime = this.startTime + playbackBeat * quarterDuration;
+        const position = this.findNextClick(gridStep);
+        if (!position) break; // past the end of the performance
+
+        const clickTime = this.startTime + this.playbackBeatToSeconds(position.playbackBeat);
         if (clickTime > scheduleUntil) break;
 
-        const clickIndex = Math.round(this.nextScoreBeat / scoreBeatStep);
-        if (clickTime >= currentTime - 0.01) {
-          const isDownbeat = this.isDownbeatAtScoreBeat(this.nextScoreBeat, clickIndex);
-          this.scheduleClick(clickTime, isDownbeat);
+        const clickIndex = Math.round(position.scoreBeat / scoreBeatStep);
+        const isDownbeat = this.isDownbeatAtScoreBeat(position.scoreBeat, clickIndex);
+        // A subdivision falls between the counted beats, so it is never accented
+        // and is quieter than the beat it belongs to.
+        const isOffGrid = Math.abs(
+          position.scoreBeat - Math.round(position.scoreBeat / scoreBeatStep) * scoreBeatStep
+        ) > 1e-6;
 
-          if (this.onBeat) {
+        // "Bars only" walks the beat grid and keeps just the downbeats, because
+        // bar lengths change and a fixed spacing would drift out of the music.
+        if (barsOnly && !isDownbeat) {
+          this.searchFrom = position.playbackBeat;
+          this.searchInclusive = false;
+          continue;
+        }
+
+        if (clickTime >= currentTime - 0.01) {
+          this.scheduleClick(clickTime, isDownbeat, { subdivision: isOffGrid });
+
+          if (this.onBeat && !isOffGrid) {
             // Compute the beat number within the current measure. When measure
             // boundaries are available, count clicks since the last measure start.
             // Otherwise fall back to modulo arithmetic.
@@ -216,10 +353,10 @@ export class Metronome {
             if (this.measureStartBeats) {
               let measureStart = 0;
               for (const start of this.measureStartBeats) {
-                if (start > this.nextScoreBeat + 1e-3) break;
+                if (start > position.scoreBeat + 1e-3) break;
                 measureStart = start;
               }
-              beatInMeasure = Math.round((this.nextScoreBeat - measureStart) / scoreBeatStep);
+              beatInMeasure = Math.round((position.scoreBeat - measureStart) / scoreBeatStep);
             } else {
               beatInMeasure = ((clickIndex % numerator) + numerator) % numerator;
             }
@@ -234,9 +371,9 @@ export class Metronome {
           }
         }
 
-        this.lastBeatTime = clickTime;
         this.currentBeat = clickIndex;
-        this.nextScoreBeat += scoreBeatStep;
+        this.searchFrom = position.playbackBeat;
+        this.searchInclusive = false;
       }
     };
 
@@ -244,80 +381,99 @@ export class Metronome {
     this.schedulerTimer = setInterval(scheduleAhead, this.scheduleIntervalMs);
   }
 
-  /**
-   * Schedule a click sound at a specific time.
-   * @param {number} time - AudioContext time to play the click
-   * @param {boolean} isDownbeat - true for beat 1 (higher pitch)
-   */
-  scheduleClick(time, isDownbeat) {
-    const oscillator = this.audioContext.createOscillator();
-    const gainNode = this.audioContext.createGain();
-
-    // High pitch for downbeat, lower for other beats
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(
-      isDownbeat ? 1000 : 800,
-      time
-    );
-
-    // Short burst envelope
-    gainNode.gain.setValueAtTime(0, time);
-    gainNode.gain.linearRampToValueAtTime(0.5, time + 0.001);
-    gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
-
-    oscillator.connect(gainNode);
-    gainNode.connect(this.destination);
-
-    oscillator.start(time);
-    oscillator.stop(time + 0.06);
-
-    const clickEntry = {
-      oscillator,
-      gainNode,
-      startTime: time,
-      endTime: time + 0.06
-    };
-    this.scheduledClicks.add(clickEntry);
-
-    oscillator.onended = () => {
-      this.scheduledClicks.delete(clickEntry);
-      try {
-        oscillator.disconnect();
-        gainNode.disconnect();
-      } catch (e) { /* already disconnected */ }
-    };
+  /** Short burst of noise reused by every click's attack transient. */
+  getClickNoise() {
+    if (this.clickNoise) return this.clickNoise;
+    const ctx = this.audioContext;
+    const length = Math.max(1, Math.floor(ctx.sampleRate * 0.05));
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+    this.clickNoise = buffer;
+    return buffer;
   }
 
   /**
-   * Record a tap for tap tempo calculation.
-   * @returns {number|null} calculated BPM if enough taps, null otherwise
+   * Schedule a click at a specific time.
+   *
+   * Modelled on a struck woodblock rather than a beep: a couple of
+   * milliseconds of band-passed noise for the edge, then two inharmonic
+   * partials that decay almost immediately. The transient is what makes a
+   * click easy to lock onto, and the fast decay keeps it out of the way of the
+   * voices.
+   *
+   * @param {number} time - AudioContext time to play the click
+   * @param {boolean} isDownbeat - true for beat 1 (brighter and a little louder)
    */
-  tap() {
-    const now = Date.now();
+  scheduleClick(time, isDownbeat, { subdivision = false } = {}) {
+    const ctx = this.audioContext;
+    const output = ctx.createGain();
+    // A subdivision sits under the beat it belongs to rather than competing
+    // with it, so it is markedly quieter than an ordinary beat.
+    const baseLevel = isDownbeat ? 0.26 : subdivision ? 0.1 : 0.19;
+    output.gain.value = baseLevel * this.volume;
+    if (output.gain.value <= 0.0001) return;
+    output.connect(this.destination);
 
-    // Reset if too long since last tap
-    if (this.tapTimes.length > 0 &&
-        now - this.tapTimes[this.tapTimes.length - 1] > this.maxTapInterval) {
-      this.tapTimes = [];
+    const sources = [];
+    const nodes = [output];
+    const endTime = time + CLICK_LENGTH;
+
+    const base = isDownbeat ? 1500 : 1050;
+    const partials = [
+      { ratio: 1, gain: 1, decay: 0.035 },
+      { ratio: 2.76, gain: 0.32, decay: 0.016 }
+    ];
+    for (const partial of partials) {
+      const oscillator = ctx.createOscillator();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(base * partial.ratio, time);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, time);
+      gain.gain.linearRampToValueAtTime(partial.gain, time + 0.0015);
+      gain.gain.exponentialRampToValueAtTime(0.0005, time + partial.decay);
+
+      oscillator.connect(gain);
+      gain.connect(output);
+      oscillator.start(time);
+      oscillator.stop(endTime);
+      sources.push(oscillator);
+      nodes.push(gain);
     }
 
-    this.tapTimes.push(now);
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getClickNoise();
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = isDownbeat ? 3200 : 2400;
+    band.Q.value = 1.2;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0, time);
+    noiseGain.gain.linearRampToValueAtTime(0.5, time + 0.0008);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0005, time + 0.012);
 
-    // Keep last 8 taps
-    if (this.tapTimes.length > 8) {
-      this.tapTimes.shift();
-    }
+    noise.connect(band);
+    band.connect(noiseGain);
+    noiseGain.connect(output);
+    noise.start(time);
+    noise.stop(endTime);
+    sources.push(noise);
+    nodes.push(band, noiseGain);
 
-    // Need at least 2 taps to calculate
-    if (this.tapTimes.length < 2) return null;
+    const clickEntry = { sources, nodes, output, startTime: time, endTime };
+    this.scheduledClicks.add(clickEntry);
 
-    // Calculate intervals between consecutive taps
-    const intervals = [];
-    for (let i = 1; i < this.tapTimes.length; i++) {
-      intervals.push(this.tapTimes[i] - this.tapTimes[i - 1]);
-    }
-
-    return calculateTapTempo(intervals);
+    // Every source stops at the same moment, so the first one to report in can
+    // release the whole click.
+    sources[0].onended = () => {
+      this.scheduledClicks.delete(clickEntry);
+      for (const node of nodes.concat(sources)) {
+        try {
+          node.disconnect();
+        } catch (e) { /* already disconnected */ }
+      }
+    };
   }
 
   /**
@@ -326,6 +482,8 @@ export class Metronome {
   reset() {
     this.stop();
     this.currentBeat = 0;
-    this.tapTimes = [];
+    this.searchFrom = 0;
+    this.searchInclusive = true;
+    this.nextGridPosition = null;
   }
 }

@@ -4,7 +4,16 @@
  * and user pitch overlay with accuracy feedback.
  */
 
-import { frequencyToNote, getPartColor, pitchToMidi } from './utils.js';
+import { getPartColor, pitchToMidi } from './utils.js';
+import { ensureContrast, readScoreTheme } from './theme.js';
+import {
+  accidentalWidth,
+  clefGlyphWidth,
+  drawAccidental,
+  drawClefGlyph,
+  drawTimeSignature,
+  timeSignatureWidth
+} from './glyphs.js';
 
 const STEP_ORDER = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
 const NOTE_DURATION_BEATS = {
@@ -35,18 +44,37 @@ const FLAG_COUNTS = {
 };
 const OPEN_NOTE_TYPES = new Set(['maxima', 'long', 'breve', 'whole', 'half']);
 const STEMLESS_NOTE_TYPES = new Set(['maxima', 'long', 'breve', 'whole']);
-const CLEF_SYMBOLS = {
-  G: String.fromCodePoint(0x1D11E),
-  F: String.fromCodePoint(0x1D122),
-  C: String.fromCodePoint(0x1D121)
+
+/** Order in which sharps and flats appear in a key signature. */
+const SHARP_ORDER = ['F', 'C', 'G', 'D', 'A', 'E', 'B'];
+const FLAT_ORDER = ['B', 'E', 'A', 'D', 'G', 'C', 'F'];
+
+/**
+ * Conventional staff positions of key-signature accidentals in a treble clef,
+ * counted in half-steps of staff position from the bottom line. Other clefs are
+ * derived from these by the diatonic offset of their bottom line.
+ */
+const TREBLE_KEY_POSITIONS = {
+  sharp: { F: 8, C: 5, G: 9, D: 6, A: 3, E: 7, B: 4 },
+  flat: { B: 4, E: 7, A: 3, D: 6, G: 2, C: 5, F: 1 }
 };
-const MUSIC_FONT_STACK = '"Apple Symbols", "Noto Music", "Bravura", serif';
-const PITCH_FEEDBACK_COLORS = {
-  correct: '#72d6a0',
-  close: '#f2bf62',
-  off: '#ff7082',
-  neutral: '#64a8ff'
-};
+const TREBLE_BOTTOM_LINE_INDEX = 30; // diatonic index of E4
+const UI_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+
+/** Widest the fixed part-name gutter is allowed to get. */
+const MAX_NAME_GUTTER = 104;
+
+/** Lyrics are read as words, so they use a text face rather than the UI face. */
+const LYRIC_FONT_STACK = 'Georgia, "Iowan Old Style", "Times New Roman", serif';
+
+/** Time-signature numerals, which are conventionally a serif face. */
+const TIME_FONT_STACK = 'Georgia, "Times New Roman", serif';
+
+/**
+ * Room between successive key-signature accidentals, in staff spaces.
+ * Sharps are narrower than flats, so they can sit closer together.
+ */
+const KEY_ACCIDENTAL_STEP = { sharp: 0.92, flat: 0.98 };
 
 /**
  * Decide whether a score-space x coordinate should be painted for one render
@@ -74,6 +102,174 @@ export function isScoreElementVisible(
 }
 
 /**
+ * Reduce a part to the key and time signatures it is written in, and where each
+ * one takes effect.
+ *
+ * MusicXML declares a key only when it changes and carries the time signature
+ * forward on every measure, so the two need different treatment: keys are read
+ * from the declarations, times from the points where the value differs from the
+ * measure before. Both lists always open with an entry at beat zero, so callers
+ * never have to special-case the start of the score.
+ *
+ * @param {object} part
+ * @returns {{ keys: Array<object>, times: Array<object> }}
+ */
+export function collectStaffAttributes(part) {
+  const keys = [];
+  const times = [];
+  const measures = part?.measures || [];
+
+  for (let index = 0; index < measures.length; index++) {
+    const measure = measures[index];
+    const startBeat = Number(measure?.startBeat) || 0;
+
+    if (measure?.keySignature) {
+      const fifths = Math.trunc(Number(measure.keySignature.fifths) || 0);
+      const previous = keys[keys.length - 1];
+      if (!previous || previous.fifths !== fifths) {
+        keys.push({ startBeat, measureIndex: index, fifths });
+      }
+    }
+
+    const time = measure?.timeSignature;
+    const numerator = Number(time?.numerator);
+    const denominator = Number(time?.denominator);
+    if (numerator > 0 && denominator > 0) {
+      const previous = times[times.length - 1];
+      const changed = !previous ||
+        previous.numerator !== numerator ||
+        previous.denominator !== denominator;
+      if (changed) times.push({ startBeat, measureIndex: index, numerator, denominator });
+    }
+  }
+
+  if (!keys.length || keys[0].startBeat > 0) {
+    keys.unshift({ startBeat: 0, measureIndex: 0, fifths: keys[0]?.fifths ?? 0 });
+  }
+  if (!times.length) {
+    times.push({ startBeat: 0, measureIndex: 0, numerator: 4, denominator: 4 });
+  }
+  return { keys, times };
+}
+
+/** A stem runs three staff spaces, which is six half-space positions. */
+const STEM_REACH_POSITIONS = 6;
+
+/** Half-space position of the middle staff line, where stem direction flips. */
+const MIDDLE_LINE_POSITION = 4;
+
+/**
+ * The lowest staff position any of a part's ink reaches.
+ *
+ * Positions count half-spaces up from the bottom staff line, so a negative
+ * result means the part hangs below the staff on ledger lines. That is entirely
+ * normal — an alto line written in a treble clef often does — and anything
+ * placed under the staff has to clear it.
+ *
+ * Stems count, not just noteheads. A note above the middle line is stemmed
+ * downwards and its stem, and any beam that ends there, reaches three spaces
+ * below the head; measuring heads alone would put the words through the beams.
+ *
+ * @param {object} part
+ * @param {object} fallbackClef used where a note carries no clef of its own
+ * @returns {number} 0 when the part never goes below the bottom line
+ */
+export function getLowestStaffPosition(part, fallbackClef) {
+  let lowest = 0;
+  for (const measure of part?.measures || []) {
+    for (const note of measure.notes || []) {
+      if (note.isRest || !note.pitch) continue;
+      const clef = normalizeClef(note.clef) || fallbackClef;
+      const position = getStaffPositionForClef(note.pitch.step, note.pitch.octave, clef);
+      if (!Number.isFinite(position)) continue;
+      lowest = Math.min(lowest, position);
+
+      const stemsDown = note.stem === 'down' ||
+        (note.stem !== 'up' && note.stem !== 'none' && position >= MIDDLE_LINE_POSITION);
+      if (stemsDown && getNoteRenderInfo(note).hasStem) {
+        lowest = Math.min(lowest, position - STEM_REACH_POSITIONS);
+      }
+    }
+  }
+  return lowest;
+}
+
+/**
+ * Which verses a part actually sings, so the layout can ignore the parts that
+ * carry no words at all.
+ *
+ * A note holding exactly one lyric is shown whatever verse is selected, because
+ * a score with a single unnumbered verse should not go blank when the picker
+ * moves; that case is tracked separately from the numbered verses.
+ *
+ * @param {object} part
+ * @returns {{verses: Set<number>, hasUnnumbered: boolean}}
+ */
+export function collectPartVerses(part) {
+  const verses = new Set();
+  let hasUnnumbered = false;
+  for (const measure of part?.measures || []) {
+    for (const note of measure.notes || []) {
+      const lyrics = note.lyrics;
+      if (!Array.isArray(lyrics) || !lyrics.length) continue;
+      if (lyrics.length === 1 && String(lyrics[0].text || '').trim()) hasUnnumbered = true;
+      for (const lyric of lyrics) {
+        if (!String(lyric.text || '').trim()) continue;
+        verses.add(Number(lyric.number) || 1);
+      }
+    }
+  }
+  return { verses, hasUnnumbered };
+}
+
+/**
+ * Which accidentals a key change has to cancel with naturals.
+ *
+ * Engraved music cancels what the previous key put in force before showing the
+ * new signature, otherwise a reader coming from three sharps to one flat has no
+ * signal that two of those sharps have gone.
+ *
+ * @param {number} fromFifths
+ * @param {number} toFifths
+ * @returns {Array<{step: string, position: number}>} positions in the given clef order
+ */
+export function getKeyCancellation(fromFifths, toFifths, clef) {
+  const from = Math.trunc(Number(fromFifths) || 0);
+  const to = Math.trunc(Number(toFifths) || 0);
+  if (from === 0) return [];
+  // Changing between sharps and flats cancels everything; staying on the same
+  // side cancels only the accidentals that have been dropped.
+  const sameSide = Math.sign(from) === Math.sign(to);
+  const keep = sameSide ? Math.abs(to) : 0;
+  const layout = getKeySignatureLayout(from, clef);
+  return layout.slice(keep).map(item => ({ step: item.step, position: item.position }));
+}
+
+/**
+ * Short, readable stave label. The parser appends "(Voice 2)" to split voices,
+ * which is too long for the fixed gutter, so it becomes a trailing number.
+ * @param {object} part
+ * @returns {string}
+ */
+export function getPartLabel(part) {
+  const name = String(part?.name || '').trim();
+  const voiceSuffix = name.match(/\s*\(voice\s+(\d+)\)\s*$/i);
+  const baseName = voiceSuffix ? name.slice(0, voiceSuffix.index).trim() : name;
+  if (voiceSuffix && baseName) return `${baseName} ${voiceSuffix[1]}`;
+  return baseName || part?.voiceType || 'Part';
+}
+
+/** Truncate text with an ellipsis so it never spills out of the gutter. */
+function fitText(ctx, text, maxWidth) {
+  if (maxWidth <= 0 || ctx.measureText(text).width <= maxWidth) return text;
+  let clipped = text;
+  while (clipped.length > 1 && ctx.measureText(`${clipped}…`).width > maxWidth) {
+    clipped = clipped.slice(0, -1);
+  }
+  return `${clipped}…`;
+}
+
+/**
  * Convert detector output into a fractional MIDI value without losing cents.
  * @param {object} pitchData
  * @returns {number|null}
@@ -94,30 +290,26 @@ function getDetectedMidi(pitchData) {
 /**
  * Classify a sung pitch against the active score note, rather than against the
  * detector's nearest chromatic note (which can never be more than 50c away).
+ * Hysteresis keeps gentle vibrato from flickering between two classifications.
  * @param {number|null} centsFromTarget
- * @returns {{ accuracy: string, color: string }}
+ * @param {string} previousAccuracy
+ * @returns {string} 'neutral' | 'correct' | 'close' | 'off'
  */
-function getPitchFeedback(centsFromTarget, previousAccuracy = 'neutral') {
-  if (!Number.isFinite(centsFromTarget)) {
-    return { accuracy: 'neutral', color: PITCH_FEEDBACK_COLORS.neutral };
-  }
+export function classifyPitchAgainstTarget(centsFromTarget, previousAccuracy = 'neutral') {
+  if (!Number.isFinite(centsFromTarget)) return 'neutral';
 
   const absCents = Math.abs(centsFromTarget);
-  let accuracy;
-
-  // Separate entry and exit thresholds keep gentle vibrato from repeatedly
-  // changing the label and color at a hard boundary.
+  // Separate entry and exit thresholds per current state.
   if (previousAccuracy === 'correct') {
-    accuracy = absCents <= 32 ? 'correct' : absCents <= 65 ? 'close' : 'off';
-  } else if (previousAccuracy === 'close') {
-    accuracy = absCents <= 20 ? 'correct' : absCents <= 70 ? 'close' : 'off';
-  } else if (previousAccuracy === 'off') {
-    accuracy = absCents <= 20 ? 'correct' : absCents <= 55 ? 'close' : 'off';
-  } else {
-    accuracy = absCents <= 25 ? 'correct' : absCents <= 60 ? 'close' : 'off';
+    return absCents <= 32 ? 'correct' : absCents <= 65 ? 'close' : 'off';
   }
-
-  return { accuracy, color: PITCH_FEEDBACK_COLORS[accuracy] };
+  if (previousAccuracy === 'close') {
+    return absCents <= 20 ? 'correct' : absCents <= 70 ? 'close' : 'off';
+  }
+  if (previousAccuracy === 'off') {
+    return absCents <= 20 ? 'correct' : absCents <= 55 ? 'close' : 'off';
+  }
+  return absCents <= 25 ? 'correct' : absCents <= 60 ? 'close' : 'off';
 }
 
 /**
@@ -261,28 +453,62 @@ export function getStaffPositionForClef(noteName, octave, clef) {
 }
 
 /**
- * Legacy helper retained for callers that use the original treble/bass scale.
- * @param {string} noteName - e.g., 'C', 'D#', 'Bb'
- * @param {number} octave
- * @param {string} clef - 'treble' or 'bass'
- * @returns {number} position (higher = higher on staff)
+ * Diatonic index of a clef's bottom staff line.
+ * @param {object|string|null} clef
+ * @returns {number}
  */
-export function getNoteStaffPosition(noteName, octave, clef) {
-  const step = String(noteName || 'C').charAt(0).toUpperCase();
-  const stepIndex = STEP_ORDER[step] ?? 0;
-  if (clef === 'bass') {
-    return (octave - 2) * 7 + stepIndex - 2;
-  }
-  return (octave - 4) * 7 + stepIndex;
+export function getClefBottomLineIndex(clef) {
+  const descriptor = normalizeClef(clef) || { sign: 'G', line: 2 };
+  const reference = descriptor.sign === 'F'
+    ? { step: 'F', octave: 3 }
+    : descriptor.sign === 'C'
+      ? { step: 'C', octave: 4 }
+      : { step: 'G', octave: 4 };
+  const referenceIndex = reference.octave * 7 + STEP_ORDER[reference.step];
+  return referenceIndex - (descriptor.line - 1) * 2;
 }
 
 /**
- * Determine the conventional broad clef family for a voice type.
- * @param {string} voiceType
- * @returns {string} 'treble' or 'bass'
+ * Alteration that each diatonic step carries under a key signature.
+ * @param {number} fifths - MusicXML fifths (negative for flats)
+ * @returns {Record<string, number>}
  */
-export function getClefForPart(voiceType) {
-  return inferVoiceClef(voiceType)?.sign === 'F' ? 'bass' : 'treble';
+export function getKeySignatureAlters(fifths) {
+  const value = Math.trunc(Number(fifths) || 0);
+  const count = Math.min(7, Math.abs(value));
+  const order = value > 0 ? SHARP_ORDER : FLAT_ORDER;
+  const alters = {};
+  for (let index = 0; index < count; index++) {
+    alters[order[index]] = value > 0 ? 1 : -1;
+  }
+  return alters;
+}
+
+/**
+ * Key-signature accidentals in drawing order with their staff positions.
+ * @param {number} fifths
+ * @param {object|string|null} clef
+ * @returns {Array<{ step: string, alter: number, position: number }>}
+ */
+export function getKeySignatureLayout(fifths, clef) {
+  const value = Math.trunc(Number(fifths) || 0);
+  const count = Math.min(7, Math.abs(value));
+  if (count === 0) return [];
+
+  const isSharp = value > 0;
+  const order = isSharp ? SHARP_ORDER : FLAT_ORDER;
+  const positions = isSharp ? TREBLE_KEY_POSITIONS.sharp : TREBLE_KEY_POSITIONS.flat;
+  const bottomLineIndex = getClefBottomLineIndex(clef);
+  const offset = (((TREBLE_BOTTOM_LINE_INDEX - bottomLineIndex) % 7) + 7) % 7;
+  const shift = (7 - offset) % 7;
+
+  return order.slice(0, count).map(step => {
+    let position = positions[step] - shift;
+    // Keep the group inside the staff, or just above it as engravers do.
+    while (position < 0) position += 7;
+    while (position > 9) position -= 7;
+    return { step, alter: isSharp ? 1 : -1, position };
+  });
 }
 
 const LAYOUT_BEAT_PRECISION = 1e9;
@@ -540,34 +766,50 @@ export class NotationRenderer {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
 
-    // Layout configuration
+    // Layout configuration, in CSS pixels.
     this.config = {
-      staffHeight: 60,
       // Keep dense SATB scores comfortably scannable without forcing singers
       // to scroll through large empty bands between adjacent staves.
-      staffSpacing: 124,
-      lineSpacing: 12, // pixels between staff lines
-      noteWidth: 40, // preferred horizontal space per beat
+      staffSpacing: 112,
+      lineSpacing: 11, // pixels between staff lines
+      noteWidth: 42, // preferred horizontal space per beat
       minNoteSpacing: 30, // minimum center-to-center gap for distinct onsets
       measurePadding: 18, // breathing room between notes and barlines
-      marginLeft: 100,
-      marginTop: 40,
+      marginLeft: 104,
+      marginTop: 44,
       marginRight: 40,
-      clefWidth: 70,
-      measureBarWidth: 2,
-      cursorColor: 'rgba(74, 158, 255, 0.6)',
-      cursorWidth: 3,
-      cursorAnchorRatio: 0.4, // pin the playback cursor left of screen center
+      clefWidth: 56,
+      measureBarWidth: 1.4,
+      cursorWidth: 2,
+      cursorAnchorRatio: 0.38, // pin the playback cursor left of screen center
       pitchTrailMaxSamples: 240,
+      lyricGap: 2.1,  // staff spaces from the bottom line to the lyric baseline
+      lyricClearance: 1.4, // staff spaces kept between the lowest ink and the words
+      lyricSize: 1.05, // lyric text size, in staff spaces
       ...options
     };
+
+    /** Show the words under the staves. */
+    this.showLyrics = true;
+    /** Which verse to show, for a score that carries several. */
+    this.verse = 1;
+    /** Show the time signature in the gutter and at any change. */
+    this.showTimeSignatures = true;
+
+    // Canvas coordinates are kept in CSS pixels; the backing store is scaled by
+    // the device pixel ratio so notation stays crisp on high-density screens.
+    this.pixelRatio = 1;
+    this.viewWidth = 0;
+    this.viewHeight = 0;
+    this.staffTop = this.config.marginTop;
+    this.staffSpacing = this.config.staffSpacing;
+    this.theme = readScoreTheme();
+    this.partInkCache = new Map();
 
     this.parts = [];
     this.metadata = null;
     this.horizontalLayout = buildHorizontalScoreLayout([], this.config);
     this.scrollX = 0;
-    this.scrollX = 0;
-    this.userPitch = null; // { frequency, noteName, octave, cents, accuracy }
     this.currentPitchSample = null;
     this.userPitchTrail = [];
     this.isPitchContinuous = false;
@@ -598,9 +840,9 @@ export class NotationRenderer {
     this.parts = Array.isArray(parts) ? parts : [];
     this.metadata = metadata;
     this.horizontalLayout = buildHorizontalScoreLayout(this.parts, this.config);
+    this.buildStaffAttributes();
     this.buildPitchTimelines();
     this.currentBeat = 0;
-    this.userPitch = null;
     this.currentPitchSample = null;
     this.userPitchTrail = [];
     this.isPitchContinuous = false;
@@ -611,27 +853,286 @@ export class NotationRenderer {
   }
 
   /**
-   * Resize the canvas to fit content.
-   * Width matches the parent; height expands to fit all staves so the
-   * container can scroll vertically when parts exceed the viewport.
+   * Apply a colour palette read from the interface tokens.
+   * @param {object} theme
+   */
+  setTheme(theme) {
+    if (!theme) return;
+    this.theme = { ...this.theme, ...theme };
+    this.partInkCache.clear();
+    this.invalidateStaticScore();
+    this.requestRender();
+  }
+
+  /** Resolve a voice colour that stays legible on the current paper colour. */
+  getPartInk(part) {
+    const base = getPartColor(part?.voiceType || part?.name || '');
+    const key = `${base}|${this.theme.paper}`;
+    if (!this.partInkCache.has(key)) {
+      this.partInkCache.set(key, ensureContrast(base, this.theme.paper, 3.6));
+    }
+    return this.partInkCache.get(key);
+  }
+
+  /** Resolve the feedback colour for a pitch accuracy classification. */
+  getPitchColor(accuracy) {
+    if (accuracy === 'correct') return this.theme.pitchCorrect;
+    if (accuracy === 'close') return this.theme.pitchClose;
+    if (accuracy === 'off') return this.theme.pitchOff;
+    return this.theme.pitchNeutral;
+  }
+
+  /**
+   * Match the canvas to its container and to the display density.
+   * Width follows the parent; height expands to fit every stave so the frame
+   * can scroll vertically, and short scores are centred instead of hugging the
+   * top edge of a tall viewport.
    */
   resize() {
     if (!this.canvas || !this.canvas.parentElement) return;
     const parent = this.canvas.parentElement;
-    const width = parent.clientWidth;
+    const ratio = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    const width = Math.max(1, Math.floor(parent.clientWidth));
+    const availableHeight = Math.max(1, Math.floor(parent.clientHeight));
 
-    const requiredHeight = this.parts.length > 0
-      ? this.config.marginTop + this.parts.length * this.config.staffSpacing + 40
-      : parent.clientHeight;
-    const height = Math.max(parent.clientHeight, requiredHeight);
+    // The part-name gutter is fixed while the music scrolls past it, so on a
+    // phone a desktop-sized gutter would eat a quarter of the screen and leave
+    // very little music in view. Give it a share of the width instead.
+    this.config.marginLeft = Math.round(
+      Math.max(52, Math.min(MAX_NAME_GUTTER, width * 0.16))
+    );
 
-    // Changing a canvas dimension clears it, and the static score cache is
-    // sized for that exact viewport height. Avoid doing either during resize
-    // events that do not change the rendered dimensions.
-    if (this.canvas.width === width && this.canvas.height === height) return;
-    this.canvas.width = width;
-    this.canvas.height = height;
+    // Words need room of their own under each staff, so showing them raises the
+    // minimum gap between staves rather than letting them collide. The room is
+    // measured from the part that hangs lowest, since that is the one whose
+    // words sit furthest down.
+    const lyricRoom = this.showLyrics ? this.getLyricRoom() : 0;
+    const baseSpacing = this.config.staffSpacing + lyricRoom;
+    const { marginTop } = this.config;
+    const bottomMargin = 24 + lyricRoom;
+
+    // Spread the staves out to use a tall window, up to a comfortable limit,
+    // then centre whatever space is still left over.
+    let spacing = baseSpacing;
+    let staffTop = marginTop;
+    let contentHeight = availableHeight;
+    if (this.parts.length > 0) {
+      const room = availableHeight - marginTop - bottomMargin;
+      spacing = Math.min(
+        baseSpacing * 1.5,
+        Math.max(baseSpacing, room / this.parts.length)
+      );
+      contentHeight = marginTop + this.parts.length * spacing + bottomMargin;
+      if (availableHeight > contentHeight) {
+        staffTop = marginTop + (availableHeight - contentHeight) / 2;
+      }
+    }
+    const height = Math.max(availableHeight, contentHeight);
+
+    const unchanged = this.viewWidth === width &&
+      this.viewHeight === height &&
+      this.pixelRatio === ratio &&
+      this.staffSpacing === spacing &&
+      this.staffTop === staffTop;
+    if (unchanged) return;
+
+    this.viewWidth = width;
+    this.viewHeight = height;
+    this.pixelRatio = ratio;
+    this.staffSpacing = spacing;
+    this.staffTop = staffTop;
+    this.canvas.width = Math.round(width * ratio);
+    this.canvas.height = Math.round(height * ratio);
+    this.canvas.style.height = `${height}px`;
     this.invalidateStaticScore();
+  }
+
+  /** Vertical position of a stave by section index. */
+  getStaffY(partIndex) {
+    return this.staffTop + partIndex * this.staffSpacing;
+  }
+
+  /**
+   * Show or hide the words under the staves.
+   * Changing this changes how much room each staff needs, so the layout is
+   * remeasured rather than only repainted.
+   */
+  setLyricsVisible(visible) {
+    const next = Boolean(visible);
+    if (next === this.showLyrics) return;
+    this.showLyrics = next;
+    this.invalidateStaticScore();
+    this.resize();
+    this.render();
+  }
+
+  /**
+   * Choose which verse to show.
+   * Verses can belong to different parts, so the room the words need is
+   * remeasured rather than assumed unchanged.
+   */
+  setVerse(verse) {
+    const next = Math.max(1, Math.round(Number(verse) || 1));
+    if (next === this.verse) return;
+    this.verse = next;
+    this.invalidateStaticScore();
+    this.resize();
+    this.render();
+  }
+
+  /** Show or hide time signatures. */
+  setTimeSignaturesVisible(visible) {
+    const next = Boolean(visible);
+    if (next === this.showTimeSignatures) return;
+    this.showTimeSignatures = next;
+    // The gutter reserves room for the time signature, so it has to be remeasured.
+    this.buildStaffAttributes();
+    this.horizontalLayout = buildHorizontalScoreLayout(this.parts, this.config);
+    this.invalidateStaticScore();
+    this.resize();
+    this.render();
+  }
+
+  /**
+   * Does this part sing words in the verse now selected?
+   *
+   * Condensed scores routinely attach the text to one voice of a shared staff,
+   * so a part can be wordless while its neighbours are not.
+   */
+  partSingsSelectedVerse(part) {
+    const entry = this.partVerses?.get(part?.id);
+    if (!entry) return false;
+    return entry.hasUnnumbered || entry.verses.has(this.verse);
+  }
+
+  /**
+   * Vertical room the words need below the staves, in pixels.
+   *
+   * Only the parts that actually sing the selected verse are measured. A silent
+   * part reserving lyric room would push every staff apart for words that are
+   * never drawn.
+   */
+  getLyricRoom() {
+    const { lineSpacing, lyricSize } = this.config;
+    let room = 0;
+    for (const part of this.parts) {
+      if (!this.partSingsSelectedVerse(part)) continue;
+      room = Math.max(
+        room,
+        this.getLyricBaselineOffset(part) + lineSpacing * (lyricSize + 0.5)
+      );
+    }
+    return room;
+  }
+
+  /** How many verses the loaded score carries. */
+  getVerseCount() {
+    let count = 0;
+    for (const part of this.parts) {
+      for (const measure of part.measures || []) {
+        for (const note of measure.notes || []) {
+          for (const lyric of note.lyrics || []) {
+            count = Math.max(count, Number(lyric.number) || 1);
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Resolve the key and time signatures each section is written in, including
+   * any changes partway through, and reserve gutter room for the opening pair.
+   *
+   * A key change matters for more than appearance: accidentals are spelled
+   * against whichever signature is in force, so reading a modulating score
+   * against the opening key would print a natural on every note of the new key.
+   */
+  buildStaffAttributes() {
+    this.partAttributes = new Map();
+    this.partLyricDrop = new Map();
+    this.partVerses = new Map();
+    let widestSignature = 0;
+    let widestTime = { numerator: 4, denominator: 4 };
+
+    for (let index = 0; index < this.parts.length; index++) {
+      const part = this.parts[index];
+      const attributes = collectStaffAttributes(part);
+      this.partAttributes.set(part.id, attributes);
+
+      // How far the part's lowest note hangs below its staff, so words can be
+      // placed clear of it.
+      const fallbackClef = getClefDescriptorForPart(part, index, this.parts.length);
+      const lowest = getLowestStaffPosition(part, fallbackClef);
+      this.partLyricDrop.set(part.id, Math.max(0, -lowest / 2));
+      this.partVerses.set(part.id, collectPartVerses(part));
+
+      for (const key of attributes.keys) {
+        widestSignature = Math.max(widestSignature, Math.min(7, Math.abs(key.fifths)));
+      }
+      const opening = attributes.times[0];
+      if (opening && String(opening.numerator).length > String(widestTime.numerator).length) {
+        widestTime = opening;
+      }
+    }
+
+    // The gutter has to hold the widest clef, the widest key signature and the
+    // opening time signature. Derived from the staff space rather than fixed
+    // pixels so the reserved room stays correct at any size.
+    const { lineSpacing } = this.config;
+    const widestClef = Math.max(
+      ...this.parts.map((part, index) =>
+        clefGlyphWidth(
+          getClefDescriptorForPart(part, index, this.parts.length).sign,
+          lineSpacing
+        )
+      ),
+      clefGlyphWidth('G', lineSpacing)
+    );
+    const signatureRoom = widestSignature > 0
+      ? widestSignature * KEY_ACCIDENTAL_STEP.flat * lineSpacing + lineSpacing * 0.5
+      : lineSpacing * 0.4;
+    const timeRoom = this.showTimeSignatures
+      ? timeSignatureWidth(widestTime, lineSpacing) + lineSpacing * 0.3
+      : 0;
+    this.config.clefWidth = Math.round(widestClef + signatureRoom + timeRoom);
+  }
+
+  /** The key signature in force for a part at a score beat. */
+  getKeyFifthsAt(part, beat) {
+    const keys = this.partAttributes?.get(part?.id)?.keys;
+    if (!keys?.length) return 0;
+    let fifths = keys[0].fifths;
+    for (const key of keys) {
+      if (key.startBeat > beat + 1e-6) break;
+      fifths = key.fifths;
+    }
+    return fifths;
+  }
+
+  /** The time signature in force for a part at a score beat. */
+  getTimeSignatureAt(part, beat) {
+    const times = this.partAttributes?.get(part?.id)?.times;
+    if (!times?.length) return null;
+    let current = times[0];
+    for (const time of times) {
+      if (time.startBeat > beat + 1e-6) break;
+      current = time;
+    }
+    return current;
+  }
+
+  /**
+   * Release a renderer that is being replaced, so a queued frame from the old
+   * instance cannot paint over the new score.
+   */
+  destroy() {
+    if (this.renderFrame !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.renderFrame);
+    }
+    this.renderFrame = null;
+    this.invalidateStaticScore();
+    this.parts = [];
   }
 
   /** Drop cached score tiles after a score or viewport change. */
@@ -778,7 +1279,7 @@ export class NotationRenderer {
   setScrollX(scrollX) {
     const scoreLeft = this.config.marginLeft + this.config.clefWidth;
     const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
-    const maxScroll = Math.max(0, contentWidth - this.canvas.width);
+    const maxScroll = Math.max(0, contentWidth - this.viewWidth);
     const nextScroll = Math.max(0, Math.min(maxScroll, Number(scrollX) || 0));
     if (Math.abs(nextScroll - this.scrollX) < 0.01) return;
     this.scrollX = nextScroll;
@@ -875,19 +1376,19 @@ export class NotationRenderer {
   ensureBeatVisible(beat, options = {}) {
     const targetX = this.getScoreX(beat);
     const scoreLeft = this.config.marginLeft + this.config.clefWidth;
-    const padding = Math.min(48, Math.max(12, this.canvas.width * 0.08));
+    const padding = Math.min(48, Math.max(12, this.viewWidth * 0.08));
     const visibleLeft = this.scrollX + scoreLeft + padding;
-    const visibleRight = this.scrollX + this.canvas.width - padding;
+    const visibleRight = this.scrollX + this.viewWidth - padding;
     let nextScroll = this.scrollX;
 
     if (targetX < visibleLeft) {
       nextScroll = targetX - scoreLeft - padding;
     } else if (targetX > visibleRight) {
-      nextScroll = targetX - this.canvas.width + padding;
+      nextScroll = targetX - this.viewWidth + padding;
     }
 
     const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
-    const maxScroll = Math.max(0, contentWidth - this.canvas.width);
+    const maxScroll = Math.max(0, contentWidth - this.viewWidth);
     this.scrollX = Math.max(0, Math.min(maxScroll, nextScroll));
     if (options.render !== false) {
       this.render();
@@ -903,7 +1404,6 @@ export class NotationRenderer {
    */
   setUserPitch(pitchData, samplePosition = this.currentBeat) {
     if (!pitchData) {
-      this.userPitch = null;
       this.currentPitchSample = null;
       this.isPitchContinuous = false;
       this.pitchAccuracyState = 'neutral';
@@ -917,9 +1417,7 @@ export class NotationRenderer {
     const beat = Number.isFinite(Number(position.beat))
       ? Math.max(0, Number(position.beat))
       : this.currentBeat;
-    const selectedPitchData = this.selectPitchCandidate(pitchData, beat, {
-      isFermataHold: !!position.isFermataHold
-    });
+    const selectedPitchData = this.selectPitchCandidate(pitchData);
 
     // A valid smoothed detector frame advances the marker immediately; the
     // detector has already rejected silence and out-of-range measurements.
@@ -928,7 +1426,6 @@ export class NotationRenderer {
       return this.currentPitchSample;
     }
 
-    this.userPitch = selectedPitchData;
     const sample = this.createPitchSample(selectedPitchData, beat, {
       isFermataHold: !!position.isFermataHold
     });
@@ -1102,8 +1599,8 @@ export class NotationRenderer {
       }
     }
 
-    const feedback = getPitchFeedback(centsFromTarget, this.pitchAccuracyState);
-    this.pitchAccuracyState = feedback.accuracy;
+    const accuracy = classifyPitchAgainstTarget(centsFromTarget, this.pitchAccuracyState);
+    this.pitchAccuracyState = accuracy;
     return {
       beat,
       partIndex: selected.partIndex,
@@ -1114,8 +1611,8 @@ export class NotationRenderer {
       centsFromTarget,
       hasTarget: !!target,
       isRightNote,
-      accuracy: feedback.accuracy,
-      color: feedback.color
+      accuracy,
+      color: this.getPitchColor(accuracy)
     };
   }
 
@@ -1173,9 +1670,9 @@ export class NotationRenderer {
   autoScroll() {
     const cursorX = this.getScoreX(this.currentBeat);
     const scoreLeft = this.config.marginLeft + this.config.clefWidth;
-    const anchorX = this.canvas.width * this.config.cursorAnchorRatio;
+    const anchorX = this.viewWidth * this.config.cursorAnchorRatio;
     const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
-    const maxScroll = Math.max(0, contentWidth - this.canvas.width);
+    const maxScroll = Math.max(0, contentWidth - this.viewWidth);
     this.scrollX = Math.max(0, Math.min(maxScroll, cursorX - anchorX));
   }
 
@@ -1192,19 +1689,15 @@ export class NotationRenderer {
     }
 
     const ctx = this.ctx;
-    const { width, height } = this.canvas;
+    const width = this.viewWidth;
+    const height = this.viewHeight;
 
-    // Clear canvas
-    ctx.fillStyle = '#1a1a2e';
+    // Draw in CSS pixels; the backing store is larger on high-density screens.
+    ctx.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    ctx.fillStyle = this.theme.paper;
     ctx.fillRect(0, 0, width, height);
 
-    if (!this.parts || this.parts.length === 0) {
-      ctx.fillStyle = '#6a6a7a';
-      ctx.font = '16px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('No music loaded', width / 2, height / 2);
-      return;
-    }
+    if (!this.parts || this.parts.length === 0) return;
 
     // The score body is expensive to lay out and does not change while the
     // current beat changes. Composite its cached tiles, then paint only the
@@ -1248,7 +1741,7 @@ export class NotationRenderer {
   getStaticScoreWidth() {
     const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
     const scoreWidth = scoreOrigin + this.horizontalLayout.totalWidth + this.config.marginRight;
-    return Math.max(1, Math.ceil(Math.max(this.canvas.width, scoreWidth)));
+    return Math.max(1, Math.ceil(Math.max(this.viewWidth, scoreWidth)));
   }
 
   /**
@@ -1264,36 +1757,37 @@ export class NotationRenderer {
     const cached = this.staticScoreTiles.get(tileIndex);
     if (cached) {
       cached.lastUsed = ++this.staticTileAccess;
-      return cached.canvas;
+      return cached;
     }
 
+    const tileCssWidth = Math.min(tileWidth, contentWidth - tileStart);
     const tile = document.createElement('canvas');
-    tile.width = Math.min(tileWidth, contentWidth - tileStart);
-    tile.height = this.canvas.height;
+    tile.width = Math.round(tileCssWidth * this.pixelRatio);
+    tile.height = Math.round(this.viewHeight * this.pixelRatio);
     const tileCtx = tile.getContext('2d');
     if (!tileCtx) return null;
 
+    tileCtx.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
     tileCtx.save();
     tileCtx.translate(-tileStart, 0);
     for (let i = 0; i < this.parts.length; i++) {
-      const yOffset = this.config.marginTop + i * this.config.staffSpacing;
-      this.drawPartStaff(tileCtx, this.parts[i], yOffset, i, {
-        includePartName: false,
-        includeScaffold: false,
+      this.drawPartStaff(tileCtx, this.parts[i], this.getStaffY(i), i, {
         scrollX: tileStart,
-        viewportWidth: tile.width,
+        viewportWidth: tileCssWidth,
         staticViewport: true
       });
     }
     this.drawMeasureNumbers(tileCtx, {
       scrollX: tileStart,
-      viewportWidth: tile.width,
+      viewportWidth: tileCssWidth,
       staticViewport: true
     });
     tileCtx.restore();
 
     this.staticScoreTiles.set(tileIndex, {
       canvas: tile,
+      cssWidth: tileCssWidth,
+      cssHeight: this.viewHeight,
       lastUsed: ++this.staticTileAccess
     });
 
@@ -1312,7 +1806,7 @@ export class NotationRenderer {
       if (oldestIndex !== null) this.staticScoreTiles.delete(oldestIndex);
     }
 
-    return tile;
+    return this.staticScoreTiles.get(tileIndex);
   }
 
   /** Composite just the score tiles visible in the current canvas viewport. */
@@ -1320,27 +1814,35 @@ export class NotationRenderer {
     const tileWidth = 2048;
     const contentWidth = this.getStaticScoreWidth();
     const firstTile = Math.floor(Math.max(0, this.scrollX) / tileWidth);
-    const finalX = Math.min(contentWidth - 1, this.scrollX + this.canvas.width - 1);
+    const finalX = Math.min(contentWidth - 1, this.scrollX + this.viewWidth - 1);
     const lastTile = Math.floor(Math.max(0, finalX) / tileWidth);
 
     for (let tileIndex = firstTile; tileIndex <= lastTile; tileIndex++) {
       const tile = this.getStaticScoreTile(tileIndex);
-      if (tile) ctx.drawImage(tile, tileIndex * tileWidth - this.scrollX, 0);
+      if (!tile) continue;
+      ctx.drawImage(
+        tile.canvas,
+        tileIndex * tileWidth - this.scrollX,
+        0,
+        tile.cssWidth,
+        tile.cssHeight
+      );
     }
   }
 
   /** Draw compact measure labels once in the score layer for rehearsal context. */
   drawMeasureNumbers(ctx, options = {}) {
-    const { marginLeft, clefWidth, marginTop } = this.config;
+    const { marginLeft, clefWidth } = this.config;
     const scoreOrigin = marginLeft + clefWidth;
+    const labelY = Math.max(14, this.staffTop - 20);
     const viewportScrollX = Number.isFinite(options.scrollX) ? options.scrollX : this.scrollX;
     const viewportWidth = Number.isFinite(options.viewportWidth)
       ? options.viewportWidth
-      : this.canvas.width;
+      : this.viewWidth;
     const staticViewport = options.staticViewport === true;
     ctx.save();
-    ctx.fillStyle = '#9aabd0';
-    ctx.font = '700 11px sans-serif';
+    ctx.fillStyle = this.theme.label;
+    ctx.font = `600 10.5px ${UI_FONT_STACK}`;
     ctx.textAlign = 'left';
     for (let index = 0; index < this.horizontalLayout.measures.length; index++) {
       const measure = this.horizontalLayout.measures[index];
@@ -1352,7 +1854,7 @@ export class NotationRenderer {
         scoreOrigin,
         staticViewport
       )) continue;
-      ctx.fillText(`M. ${measure.number || index + 1}`, x, Math.max(16, marginTop - 18));
+      ctx.fillText(String(measure.number || index + 1), x, labelY);
     }
     ctx.restore();
   }
@@ -1360,121 +1862,115 @@ export class NotationRenderer {
   /** Draw part labels in the fixed left gutter above the cached score body. */
   drawPartNames(ctx) {
     const { lineSpacing, marginLeft } = this.config;
-    ctx.font = 'bold 12px sans-serif';
+    const maxWidth = marginLeft - 24;
+    ctx.save();
+    ctx.font = `600 12px ${UI_FONT_STACK}`;
     ctx.textAlign = 'left';
-    for (let i = 0; i < this.parts.length; i++) {
-      const dimmed = this.focusSelectedPart && this.parts[i].id !== this.selectedPartId;
+    ctx.textBaseline = 'middle';
+    for (let index = 0; index < this.parts.length; index++) {
+      const part = this.parts[index];
+      const dimmed = this.focusSelectedPart && part.id !== this.selectedPartId;
       ctx.save();
-      if (dimmed) ctx.globalAlpha = 0.3;
-      const yOffset = this.config.marginTop + i * this.config.staffSpacing;
-      ctx.fillStyle = getPartColor(this.parts[i].voiceType);
-      ctx.fillText(this.parts[i].name, marginLeft - 70, yOffset + lineSpacing * 2 + 4);
+      if (dimmed) ctx.globalAlpha = 0.32;
+      ctx.fillStyle = this.getPartInk(part);
+      ctx.fillText(
+        fitText(ctx, getPartLabel(part), maxWidth),
+        12,
+        this.getStaffY(index) + lineSpacing * 2
+      );
       ctx.restore();
     }
+    ctx.restore();
   }
 
   /** Draw the fixed staff lines and clef gutter above the cached note tiles. */
   drawPartScaffolds(ctx) {
-    const { lineSpacing, marginLeft, marginRight, clefWidth, measureBarWidth } = this.config;
+    const { lineSpacing, marginLeft, marginRight, clefWidth } = this.config;
     const scoreOrigin = marginLeft + clefWidth;
     const contentEnd = scoreOrigin + this.horizontalLayout.totalWidth + marginRight;
-    const totalWidth = Math.max(this.canvas.width, contentEnd - this.scrollX);
+    const totalWidth = Math.max(this.viewWidth, contentEnd - this.scrollX);
+    const bandHeight = lineSpacing * 4 + 40;
 
-    ctx.strokeStyle = '#3a4a6a';
     ctx.lineWidth = 1;
     for (let index = 0; index < this.parts.length; index++) {
       const isSelected = this.parts[index].id === this.selectedPartId;
       const dimmed = this.focusSelectedPart && !isSelected;
-      const yOffset = this.config.marginTop + index * this.config.staffSpacing;
+      const yOffset = this.getStaffY(index);
       ctx.save();
       if (isSelected) {
-        // The selected card in the sidebar should have an equally clear
-        // counterpart on the score, even before Focus my part is enabled.
-        ctx.fillStyle = this.focusSelectedPart
-          ? 'rgba(74, 158, 255, 0.11)'
-          : 'rgba(74, 158, 255, 0.055)';
-        ctx.fillRect(marginLeft - 12, yOffset - 22, totalWidth - marginLeft + 24, lineSpacing * 4 + 44);
-        ctx.fillStyle = 'rgba(74, 158, 255, 0.78)';
-        ctx.fillRect(marginLeft - 12, yOffset - 22, 3, lineSpacing * 4 + 44);
+        // The selected row in the parts panel gets an equally clear counterpart
+        // on the score, even before other staves are dimmed.
+        ctx.fillStyle = this.theme.selectionFill;
+        ctx.fillRect(0, yOffset - 20, totalWidth, bandHeight);
+        ctx.fillStyle = this.theme.selectionEdge;
+        ctx.fillRect(0, yOffset - 20, 2.5, bandHeight);
       }
-      if (dimmed) ctx.globalAlpha = 0.3;
+      if (dimmed) ctx.globalAlpha = 0.32;
+      ctx.strokeStyle = this.theme.staffLine;
       for (let line = 0; line < 5; line++) {
-        const y = yOffset + line * lineSpacing;
+        const y = Math.round(yOffset + line * lineSpacing) + 0.5;
         ctx.beginPath();
         ctx.moveTo(marginLeft, y);
         ctx.lineTo(totalWidth, y);
         ctx.stroke();
       }
-      this.drawClef(
-        ctx,
-        getClefDescriptorForPart(this.parts[index], index, this.parts.length),
-        marginLeft + 10,
-        yOffset
-      );
+      const part = this.parts[index];
+      const clef = getClefDescriptorForPart(part, index, this.parts.length);
+      const clefX = marginLeft + lineSpacing * 0.5;
+      this.drawClef(ctx, clef, clefX, yOffset);
+
+      const attributes = this.partAttributes?.get(part.id);
+      const openingFifths = attributes?.keys[0]?.fifths || 0;
+      const keyX = clefX + clefGlyphWidth(clef.sign, lineSpacing) + lineSpacing * 0.35;
+      this.drawKeySignature(ctx, openingFifths, clef, keyX, yOffset);
+
+      if (this.showTimeSignatures && attributes?.times[0]) {
+        const timeX = keyX + this.getKeySignatureWidth(openingFifths) + lineSpacing * 0.3 +
+          timeSignatureWidth(attributes.times[0], lineSpacing) / 2;
+        drawTimeSignature(
+          ctx,
+          attributes.times[0],
+          timeX,
+          yOffset,
+          lineSpacing,
+          this.theme.ink,
+          TIME_FONT_STACK
+        );
+      }
       ctx.restore();
     }
   }
 
   /**
-   * Draw a single part's staff with notes.
+   * Draw one section's notes, barlines and articulations into the score layer.
+   * Staff lines, clefs and labels live in the fixed gutter layer instead, so
+   * they stay put while this layer scrolls.
+   *
    * @param {CanvasRenderingContext2D} ctx
    * @param {object} part
    * @param {number} yOffset - vertical position of the staff top
    * @param {number} partIndex - section index, used for SATB clef fallback
+   * @param {{ scrollX?: number, viewportWidth?: number, staticViewport?: boolean }} options
    */
   drawPartStaff(ctx, part, yOffset, partIndex = 0, options = {}) {
-    const { lineSpacing, marginLeft, marginRight, clefWidth, measureBarWidth } = this.config;
-    const color = getPartColor(part.voiceType);
+    const { lineSpacing, marginLeft, clefWidth, measureBarWidth } = this.config;
+    const color = this.getPartInk(part);
     const clef = getClefDescriptorForPart(part, partIndex, this.parts.length);
     const scoreOrigin = marginLeft + clefWidth;
     const viewportScrollX = Number.isFinite(options.scrollX) ? options.scrollX : this.scrollX;
     const viewportWidth = Number.isFinite(options.viewportWidth)
       ? options.viewportWidth
-      : this.canvas.width;
+      : this.viewWidth;
     const staticViewport = options.staticViewport === true;
     const dimmed = this.focusSelectedPart && part.id !== this.selectedPartId;
     if (dimmed) {
       ctx.save();
-      ctx.globalAlpha = 0.3;
-    }
-
-    // Draw part name
-    if (options.includePartName !== false) {
-      ctx.fillStyle = color;
-      ctx.font = 'bold 12px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(
-        part.name,
-        marginLeft - 70 + (staticViewport ? 0 : viewportScrollX),
-        yOffset + lineSpacing * 2 + 4
-      );
-    }
-
-    if (options.includeScaffold !== false) {
-      // Draw 5 staff lines across the full shared score width. The viewport-sized
-      // fallback keeps lines continuous when the score is shorter than the canvas.
-      ctx.strokeStyle = '#3a4a6a';
-      ctx.lineWidth = 1;
-      const contentEnd = scoreOrigin + this.horizontalLayout.totalWidth + marginRight;
-      const totalWidth = Math.max(
-        viewportWidth + (staticViewport ? 0 : viewportScrollX),
-        contentEnd
-      );
-      for (let line = 0; line < 5; line++) {
-        const y = yOffset + line * lineSpacing;
-        ctx.beginPath();
-        ctx.moveTo(marginLeft + (staticViewport ? 0 : viewportScrollX), y);
-        ctx.lineTo(totalWidth, y);
-        ctx.stroke();
-      }
-
-      // Draw the score's clef (or the SATB fallback) at the start of the staff.
-      this.drawClef(ctx, clef, marginLeft + 10 + (staticViewport ? 0 : viewportScrollX), yOffset);
+      ctx.globalAlpha = 0.32;
     }
 
     // Every staff uses the same measure boundaries, including sections with an
     // empty or omitted source measure. This keeps all barlines vertically aligned.
-    ctx.strokeStyle = '#4a5a7a';
+    ctx.strokeStyle = this.theme.barline;
     ctx.lineWidth = measureBarWidth || 1;
     const sharedMeasures = this.horizontalLayout.measures;
     for (let measureIndex = 1; measureIndex < sharedMeasures.length; measureIndex++) {
@@ -1492,6 +1988,12 @@ export class NotationRenderer {
       ctx.stroke();
     }
 
+    // Accidentals follow whichever key signature is printed at that point and
+    // reset at every barline, the way engraved music does, instead of marking
+    // every altered note.
+    const accidentals = new WeakMap();
+    const tiedAlters = new Map();
+
     // Build geometry before drawing. Beams need every member's position in
     // order to choose one stem direction and one shared beam line.
     const allLayouts = [];
@@ -1500,6 +2002,25 @@ export class NotationRenderer {
       const measure = part.measures[mIdx];
       const measureLayout = this.horizontalLayout.getMeasure(measure, mIdx);
       if (!measureLayout) continue;
+
+      // Resolve accidentals in sounding order, which can differ from document
+      // order when a part uses <backup> to write several voices on one staff.
+      const keyAlters = getKeySignatureAlters(
+        this.getKeyFifthsAt(part, measureLayout.startBeat)
+      );
+      const measureAlters = new Map();
+      const sounding = (measure.notes || [])
+        .filter(note => !note.isRest && note.pitch)
+        .sort((left, right) =>
+          (Number(left.startBeatInMeasure) || 0) - (Number(right.startBeatInMeasure) || 0)
+        );
+      for (const note of sounding) {
+        accidentals.set(note, this.resolveAccidental(note, {
+          keyAlters,
+          measureAlters,
+          tiedAlters
+        }));
+      }
 
       const measureLayouts = (measure.notes || []).map((note, noteIndex) => {
         const localBeat = Number(note.startBeatInMeasure) || 0;
@@ -1514,9 +2035,11 @@ export class NotationRenderer {
         );
         const noteClef = normalizeClef(note.clef) || clef;
         let y = yOffset + lineSpacing * 2;
+        let showAccidental = false;
         if (!note.isRest && note.pitch) {
           const position = getStaffPositionForClef(note.pitch.step, note.pitch.octave, noteClef);
           y = yOffset + (4 * lineSpacing) - (position * lineSpacing / 2);
+          showAccidental = accidentals.get(note) === true;
         }
         return {
           note,
@@ -1526,11 +2049,13 @@ export class NotationRenderer {
           x,
           y,
           visible,
+          showAccidental,
           appearance: getNoteRenderInfo(note)
         };
       });
 
       allLayouts.push(...measureLayouts);
+
       for (const fermata of measure.barlineFermatas || []) {
         const x = scoreOrigin + (fermata.location === 'left'
           ? measureLayout.startX
@@ -1564,7 +2089,8 @@ export class NotationRenderer {
           stemUp: layout.stemUp,
           stemEndY: layout.stemEndY,
           suppressStem: layout.suppressStem,
-          suppressFlags: layout.suppressFlags
+          suppressFlags: layout.suppressFlags,
+          showAccidental: layout.showAccidental
         });
       } else if (note.isRest) {
         this.drawRestGlyph(ctx, x, note, yOffset, color);
@@ -1576,6 +2102,15 @@ export class NotationRenderer {
     }
     for (const group of this.collectTupletGroups(allLayouts)) {
       this.drawTupletGroup(ctx, group, yOffset, color);
+    }
+    this.drawStaffAttributeChanges(ctx, part, clef, yOffset, {
+      viewportScrollX,
+      viewportWidth,
+      staticViewport
+    });
+    if (this.showLyrics) {
+      const entries = this.collectLyricEntries(allLayouts);
+      if (entries.length) this.drawLyrics(ctx, entries, part, yOffset, color);
     }
     this.drawConnectionCurves(ctx, allLayouts, yOffset, color, {
       left: viewportScrollX,
@@ -1683,7 +2218,7 @@ export class NotationRenderer {
     const drawSegment = (from, to, level) => {
       const y = group.beamY + direction * (level - 1) * beamSpacing;
       ctx.strokeStyle = color;
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 3.4;
       ctx.lineCap = 'butt';
       ctx.beginPath();
       ctx.moveTo(from, y);
@@ -1972,7 +2507,7 @@ export class NotationRenderer {
     const fermata = boundary.fermata;
     const below = fermata.placement === 'below' || fermata.type === 'inverted';
     ctx.save();
-    ctx.strokeStyle = '#4a5a7a';
+    ctx.strokeStyle = this.theme.barline;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(boundary.x, yOffset);
@@ -2017,37 +2552,294 @@ export class NotationRenderer {
     ctx.restore();
   }
 
-  /** Draw an actual G, F, or C clef plus any octave-transposition mark. */
+  /**
+   * Draw a G, F, or C clef plus any octave-transposition mark.
+   *
+   * Drawn from paths rather than set as a character, so the score looks the same
+   * on every machine instead of depending on a music font being installed.
+   */
   drawClef(ctx, clef, x, yOffset) {
     const { lineSpacing } = this.config;
     const descriptor = normalizeClef(clef) || { sign: 'G', line: 2, octaveChange: 0 };
-    const symbol = CLEF_SYMBOLS[descriptor.sign] || descriptor.sign;
+    drawClefGlyph(
+      ctx,
+      descriptor,
+      x,
+      yOffset,
+      lineSpacing,
+      this.theme.ink,
+      `600 ${Math.round(lineSpacing * 0.95)}px ${UI_FONT_STACK}`
+    );
+  }
+
+  /**
+   * Decide whether a note needs a printed accidental.
+   *
+   * A pitch is spelled only when it differs from what the printed key signature
+   * and earlier accidentals in the same bar already imply, and a tied note never
+   * repeats its accidental.
+   *
+   * @param {object} note
+   * @param {{ keyAlters: object, measureAlters: Map, tiedAlters: Map }} context
+   * @returns {boolean}
+   */
+  resolveAccidental(note, context) {
+    const alter = Math.trunc(Number(note.pitch?.alter) || 0);
+    const step = String(note.pitch.step || '').toUpperCase();
+    const pitchKey = `${step}${note.pitch.octave}`;
+    const implied = context.measureAlters.has(pitchKey)
+      ? context.measureAlters.get(pitchKey)
+      : (context.keyAlters[step] ?? 0);
+
+    let show = alter !== implied;
+    if (show) context.measureAlters.set(pitchKey, alter);
+    if (show && note.tie?.stop && context.tiedAlters.get(pitchKey) === alter) show = false;
+    if (note.tie?.start) context.tiedAlters.set(pitchKey, alter);
+    else if (note.tie?.stop) context.tiedAlters.delete(pitchKey);
+    return show;
+  }
+
+  /**
+   * Choose which verse of a note's lyrics to show.
+   *
+   * A hymn or part song carries several, and a singer rehearsing verse three
+   * wants verse three. When the chosen verse is missing on a note the note
+   * simply has no syllable, which is correct: not every verse has a word on
+   * every note.
+   *
+   * @param {object} note
+   * @returns {object|null}
+   */
+  selectLyric(note) {
+    const lyrics = note?.lyrics;
+    if (!Array.isArray(lyrics) || !lyrics.length) return null;
+    const wanted = lyrics.find(lyric => Number(lyric.number) === this.verse);
+    // A score with one unnumbered verse should still show it whatever the picker
+    // says, otherwise choosing verse 2 blanks a single-verse score.
+    const chosen = wanted || (lyrics.length === 1 ? lyrics[0] : null);
+    if (!chosen) return null;
+    const text = String(chosen.text || '').trim();
+    if (!text) return null;
+    return { ...chosen, text };
+  }
+
+  /**
+   * Gather the syllables to draw under a staff, in score order.
+   *
+   * Each entry remembers where the *next note* is, not the next syllable. A
+   * melisma is held across the notes that follow it, so its extender line has to
+   * stop at the next note; running it to the next syllable would draw a rule
+   * across several bars.
+   *
+   * @param {Array<object>} layouts every note layout for the part
+   * @returns {Array<{x: number, nextNoteX: number|null, lyric: object}>}
+   */
+  collectLyricEntries(layouts) {
+    const ordered = [...layouts]
+      .filter(layout => !layout.note.isGrace)
+      .sort((left, right) => left.absoluteBeat - right.absoluteBeat);
+
+    const entries = [];
+    for (let index = 0; index < ordered.length; index++) {
+      const layout = ordered[index];
+      const lyric = this.selectLyric(layout.note);
+      if (!lyric || !layout.visible) continue;
+
+      // Skip past any chord tones sharing this onset to find the next note.
+      let nextNoteX = null;
+      for (let ahead = index + 1; ahead < ordered.length; ahead++) {
+        if (ordered[ahead].absoluteBeat > layout.absoluteBeat + 1e-6) {
+          nextNoteX = ordered[ahead].x;
+          break;
+        }
+      }
+      entries.push({ x: layout.x, nextNoteX, lyric });
+    }
+    return entries;
+  }
+
+  /**
+   * How far below a staff its lyrics sit, in pixels.
+   *
+   * A fixed distance collides with any part whose notes hang below the staff on
+   * ledger lines, which is normal for an alto line written in a treble clef. The
+   * words are therefore placed under the lowest note the part actually reaches.
+   *
+   * @param {object} part
+   * @returns {number}
+   */
+  getLyricBaselineOffset(part) {
+    const { lineSpacing, lyricGap, lyricClearance } = this.config;
+    const belowStaffSpaces = this.partLyricDrop?.get(part?.id) ?? 0;
+    return Math.max(lyricGap, belowStaffSpaces + lyricClearance) * lineSpacing;
+  }
+
+  /**
+   * Draw a line of lyrics under a staff.
+   *
+   * A syllable in the middle of a word is followed by a hyphen, and one held
+   * across several notes by an extender line, because without them a singer
+   * cannot tell "glo-ri-a" from three separate words.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {Array<{x: number, nextNoteX: number|null, lyric: object}>} entries
+   * @param {object} part
+   * @param {number} yOffset staff top
+   * @param {string} color
+   */
+  drawLyrics(ctx, entries, part, yOffset, color) {
+    const { lineSpacing, lyricSize } = this.config;
+    const baseline = yOffset + lineSpacing * 4 + this.getLyricBaselineOffset(part);
+    const size = Math.max(8, Math.round(lineSpacing * lyricSize));
 
     ctx.save();
-    ctx.fillStyle = '#e0e0e0';
-    ctx.font = `42px ${MUSIC_FONT_STACK}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(symbol, x, yOffset + lineSpacing * 2);
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    ctx.font = `${size}px ${LYRIC_FONT_STACK}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
 
-    if (descriptor.octaveChange) {
-      const octaves = Math.abs(descriptor.octaveChange);
-      const label = octaves === 1 ? '8' : String(octaves * 7 + 1);
-      ctx.font = 'bold 10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'alphabetic';
-      const labelY = descriptor.octaveChange < 0
-        ? yOffset + lineSpacing * 4 + 12
-        : yOffset - 4;
-      ctx.fillText(label, x + 14, labelY);
+    for (let index = 0; index < entries.length; index++) {
+      const { x, lyric } = entries[index];
+      ctx.fillText(lyric.text, x, baseline);
+
+      const next = entries[index + 1];
+      const continues = lyric.syllabic === 'begin' || lyric.syllabic === 'middle';
+      if (continues && next) {
+        // A hyphen sits midway between the two syllables it joins.
+        const width = ctx.measureText(lyric.text).width;
+        const gapStart = x + width / 2;
+        const gapEnd = next.x - ctx.measureText(next.lyric.text).width / 2;
+        if (gapEnd - gapStart > size * 0.5) {
+          ctx.fillText('-', (gapStart + gapEnd) / 2, baseline);
+        }
+      } else if (lyric.extend && entries[index].nextNoteX !== null) {
+        // A melisma runs an underline as far as the next note, which is where
+        // the held syllable stops.
+        const width = ctx.measureText(lyric.text).width;
+        const lineStart = x + width / 2 + size * 0.2;
+        const lineEnd = entries[index].nextNoteX - size * 0.3;
+        if (lineEnd > lineStart) {
+          ctx.lineWidth = Math.max(1, lineSpacing * 0.09);
+          ctx.beginPath();
+          ctx.moveTo(lineStart, baseline - size * 0.08);
+          ctx.lineTo(lineEnd, baseline - size * 0.08);
+          ctx.stroke();
+        }
+      }
     }
     ctx.restore();
+  }
+
+  /**
+   * Draw key and time signature changes at the barline where they take effect.
+   *
+   * The opening pair lives in the fixed gutter, so only the changes appear here,
+   * in the scrolling score layer where the music they apply to is.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {object} part
+   * @param {object} clef
+   * @param {number} yOffset
+   * @param {{viewportScrollX: number, viewportWidth: number, staticViewport: boolean}} viewport
+   */
+  drawStaffAttributeChanges(ctx, part, clef, yOffset, viewport) {
+    const attributes = this.partAttributes?.get(part.id);
+    if (!attributes) return;
+
+    const { lineSpacing, marginLeft, clefWidth } = this.config;
+    const scoreOrigin = marginLeft + clefWidth;
+    const visible = (x) => isScoreElementVisible(
+      x,
+      viewport.viewportScrollX,
+      viewport.viewportWidth,
+      scoreOrigin,
+      viewport.staticViewport
+    );
+
+    // Keys first, then times, so a bar that changes both reads key-then-time
+    // the way it would be engraved.
+    for (let index = 1; index < attributes.keys.length; index++) {
+      const change = attributes.keys[index];
+      const measureLayout = this.horizontalLayout.measures[change.measureIndex];
+      if (!measureLayout) continue;
+      const x = scoreOrigin + measureLayout.startX + lineSpacing * 0.4;
+      if (!visible(x)) continue;
+      this.drawKeyChange(ctx, attributes.keys[index - 1].fifths, change.fifths, clef, x, yOffset);
+    }
+
+    if (!this.showTimeSignatures) return;
+    for (let index = 1; index < attributes.times.length; index++) {
+      const change = attributes.times[index];
+      const measureLayout = this.horizontalLayout.measures[change.measureIndex];
+      if (!measureLayout) continue;
+      const keyRoom = this.getKeyChangeWidth(
+        this.getKeyFifthsAt(part, change.startBeat - 1e-3),
+        this.getKeyFifthsAt(part, change.startBeat),
+        clef
+      );
+      const x = scoreOrigin + measureLayout.startX + lineSpacing * 0.4 + keyRoom +
+        timeSignatureWidth(change, lineSpacing) / 2;
+      if (!visible(x)) continue;
+      drawTimeSignature(ctx, change, x, yOffset, lineSpacing, this.theme.ink, TIME_FONT_STACK);
+    }
+  }
+
+  /**
+   * Draw a key change: cancel what the old key put in force, then show the new
+   * signature.
+   */
+  drawKeyChange(ctx, fromFifths, toFifths, clef, x, yOffset) {
+    const { lineSpacing } = this.config;
+    const cancellation = getKeyCancellation(fromFifths, toFifths, clef);
+    let cursor = x;
+
+    for (const item of cancellation) {
+      const y = yOffset + 4 * lineSpacing - item.position * lineSpacing / 2;
+      drawAccidental(ctx, 0, cursor, y, lineSpacing, this.theme.ink);
+      cursor += KEY_ACCIDENTAL_STEP.sharp * lineSpacing;
+    }
+    if (cancellation.length) cursor += lineSpacing * 0.25;
+    this.drawKeySignature(ctx, toFifths, clef, cursor, yOffset);
+  }
+
+  /** Horizontal room a key change needs, including any cancelling naturals. */
+  getKeyChangeWidth(fromFifths, toFifths, clef) {
+    if (fromFifths === toFifths) return 0;
+    const { lineSpacing } = this.config;
+    const cancellation = getKeyCancellation(fromFifths, toFifths, clef);
+    const cancelRoom = cancellation.length
+      ? cancellation.length * KEY_ACCIDENTAL_STEP.sharp * lineSpacing + lineSpacing * 0.25
+      : 0;
+    return cancelRoom + this.getKeySignatureWidth(toFifths) + lineSpacing * 0.3;
+  }
+
+  /** Draw a key signature next to a clef. */
+  drawKeySignature(ctx, fifths, clef, x, yOffset) {
+    const layout = getKeySignatureLayout(fifths, clef);
+    if (layout.length === 0) return;
+
+    const { lineSpacing } = this.config;
+    const step = (fifths < 0 ? KEY_ACCIDENTAL_STEP.flat : KEY_ACCIDENTAL_STEP.sharp) * lineSpacing;
+    layout.forEach((accidental, index) => {
+      const y = yOffset + 4 * lineSpacing - accidental.position * lineSpacing / 2;
+      drawAccidental(ctx, accidental.alter, x + index * step, y, lineSpacing, this.theme.ink);
+    });
+  }
+
+  /** Horizontal room a key signature needs, in pixels. */
+  getKeySignatureWidth(fifths) {
+    const count = Math.min(7, Math.abs(Math.trunc(Number(fifths) || 0)));
+    if (count === 0) return 0;
+    const { lineSpacing } = this.config;
+    const step = (fifths < 0 ? KEY_ACCIDENTAL_STEP.flat : KEY_ACCIDENTAL_STEP.sharp) * lineSpacing;
+    return (count - 1) * step + accidentalWidth(fifths < 0 ? -1 : 1, lineSpacing);
   }
 
   /** Draw ledger lines above or below a staff for one note head. */
   drawLedgerLines(ctx, noteX, noteY, yOffset) {
     const { lineSpacing } = this.config;
-    ctx.strokeStyle = '#5a6a8a';
+    ctx.strokeStyle = this.theme.ledger;
     ctx.lineWidth = 1;
 
     for (let y = yOffset + 5 * lineSpacing; y <= noteY + lineSpacing / 4; y += lineSpacing) {
@@ -2072,26 +2864,19 @@ export class NotationRenderer {
     const radiusX = (appearance.type === 'whole' || appearance.type === 'breve' ? 7 : 6) * scale;
     const radiusY = 4.5 * scale;
 
-    // Key signatures are not drawn yet, so show every altered pitch directly
-    // beside its notehead. Repeating the glyph keeps double accidentals legible
-    // even when the canvas font does not include dedicated double-sharp/flat symbols.
+    // Only accidentals the key signature does not already imply are printed.
     const alter = Math.trunc(Number(note.pitch?.alter) || 0);
-    if (alter !== 0) {
-      const accidental = (alter > 0 ? '♯' : '♭').repeat(Math.abs(alter));
-      ctx.save();
-      ctx.fillStyle = color;
-      ctx.font = `${Math.round(21 * scale)}px "Times New Roman", "Noto Music", serif`;
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(accidental, noteX - radiusX - 2 * scale, noteY);
-      ctx.restore();
+    if (options.showAccidental) {
+      const glyphSpace = lineSpacing * scale;
+      const clearance = radiusX + 2 * scale + accidentalWidth(alter, glyphSpace) / 2;
+      drawAccidental(ctx, alter, noteX - clearance, noteY, glyphSpace, color);
     }
 
     ctx.beginPath();
     ctx.ellipse(noteX, noteY, radiusX, radiusY, -0.2, 0, Math.PI * 2);
     if (appearance.openHead) {
       // Mask the staff line through an open head before outlining it.
-      ctx.fillStyle = '#1a1a2e';
+      ctx.fillStyle = this.theme.paper;
       ctx.fill();
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.8;
@@ -2224,21 +3009,28 @@ export class NotationRenderer {
 
 
   /**
-   * Draw the playback position cursor.
+   * Draw the playback position cursor across every stave.
    * @param {CanvasRenderingContext2D} ctx
    */
   drawCursor(ctx) {
-    if (this.currentBeat <= 0) return;
+    // The cursor is also drawn at beat 0 so the starting point is always visible.
+    if (!(this.currentBeat >= 0) || this.parts.length === 0) return;
 
-    const { marginTop, staffSpacing, cursorColor, cursorWidth } = this.config;
+    const { lineSpacing, cursorWidth } = this.config;
     const cursorX = this.getScoreX(this.currentBeat);
+    const top = this.staffTop - 14;
+    const bottom = this.getStaffY(this.parts.length - 1) + lineSpacing * 4 + 14;
 
-    ctx.strokeStyle = cursorColor;
+    ctx.save();
+    ctx.strokeStyle = this.theme.cursor;
+    ctx.globalAlpha = 0.75;
     ctx.lineWidth = cursorWidth;
+    ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(cursorX, marginTop - 10);
-    ctx.lineTo(cursorX, marginTop + this.parts.length * staffSpacing - 20);
+    ctx.moveTo(cursorX, top);
+    ctx.lineTo(cursorX, bottom);
     ctx.stroke();
+    ctx.restore();
   }
 
   /**
@@ -2247,8 +3039,8 @@ export class NotationRenderer {
    * @returns {{ x: number, y: number, yOffset: number }}
    */
   getPitchSamplePosition(sample) {
-    const { marginTop, staffSpacing, lineSpacing } = this.config;
-    const yOffset = marginTop + sample.partIndex * staffSpacing;
+    const { lineSpacing } = this.config;
+    const yOffset = this.getStaffY(sample.partIndex);
     const staffPosition = getStaffPositionForClef(sample.step, sample.octave, sample.clef);
     return {
       x: this.getScoreX(sample.beat),
@@ -2272,8 +3064,8 @@ export class NotationRenderer {
     ctx.rect(
       marginLeft + clefWidth + this.scrollX,
       0,
-      Math.max(0, this.canvas.width - marginLeft - clefWidth),
-      this.canvas.height
+      Math.max(0, this.viewWidth - marginLeft - clefWidth),
+      this.viewHeight
     );
     ctx.clip();
     ctx.lineCap = 'round';
@@ -2313,27 +3105,14 @@ export class NotationRenderer {
     this.drawLedgerLines(ctx, x, noteY, yOffset);
 
     ctx.save();
-    ctx.globalAlpha = 0.95;
     ctx.fillStyle = sample.color;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-    ctx.lineWidth = 1.5;
-    ctx.shadowColor = sample.color;
-    ctx.shadowBlur = sample.accuracy === 'correct' ? 12 : 6;
+    ctx.strokeStyle = this.theme.paper;
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(x, noteY, sample.accuracy === 'correct' ? 6 : 5, 0, Math.PI * 2);
     ctx.fill();
-    ctx.shadowBlur = 0;
     ctx.stroke();
     ctx.restore();
-  }
-
-  /**
-   * Scroll to a specific beat position.
-   * @param {number} beat
-   */
-  scrollToBeat(beat) {
-    this.scrollX = Math.max(0, this.getScoreX(beat) - this.canvas.width * 0.3);
-    this.render();
   }
 
   /**
@@ -2342,7 +3121,6 @@ export class NotationRenderer {
   reset() {
     this.scrollX = 0;
     this.currentBeat = 0;
-    this.userPitch = null;
     this.currentPitchSample = null;
     this.userPitchTrail = [];
     this.isPitchContinuous = false;

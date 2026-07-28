@@ -73,12 +73,23 @@ export function noteToMidi(noteName, octave) {
 
 /**
  * Convert MIDI number to frequency in Hz.
+ *
+ * The tuning reference is a parameter rather than a constant because choirs do
+ * not all tune to 440: a group singing at 415 or 442 needs the app to agree
+ * with the room, and a few cents of disagreement is audible over an evening.
+ *
  * @param {number} midi - MIDI note number
+ * @param {number} [referenceHz] - frequency of A4, defaults to 440
  * @returns {number} frequency in Hz
  */
-export function midiToFrequency(midi) {
-  return A4_FREQUENCY * Math.pow(2, (midi - A4_MIDI) / 12);
+export function midiToFrequency(midi, referenceHz = A4_FREQUENCY) {
+  const reference = Number(referenceHz);
+  const anchor = Number.isFinite(reference) && reference > 0 ? reference : A4_FREQUENCY;
+  return anchor * Math.pow(2, (midi - A4_MIDI) / 12);
 }
+
+/** Concert pitch, the tuning reference everything falls back to. */
+export const STANDARD_TUNING_HZ = A4_FREQUENCY;
 
 /**
  * Convert a note name and octave to frequency.
@@ -92,14 +103,22 @@ export function noteToFrequency(noteName, octave) {
 
 /**
  * Convert a frequency to the nearest note name, octave, and cents offset.
+ *
+ * The tuning reference matters here as much as it does going the other way: a
+ * choir singing at 442 is in tune with itself, and the guidance has to agree
+ * rather than reporting everyone eight cents sharp all evening.
+ *
  * @param {number} frequency - frequency in Hz
+ * @param {number} [referenceHz] - frequency of A4, defaults to 440
  * @returns {{ noteName: string, octave: number, cents: number, midi: number }}
  */
-export function frequencyToNote(frequency) {
+export function frequencyToNote(frequency, referenceHz = A4_FREQUENCY) {
   if (frequency <= 0) {
     return null;
   }
-  const midiFloat = 12 * Math.log2(frequency / A4_FREQUENCY) + A4_MIDI;
+  const reference = Number(referenceHz);
+  const anchor = Number.isFinite(reference) && reference > 0 ? reference : A4_FREQUENCY;
+  const midiFloat = 12 * Math.log2(frequency / anchor) + A4_MIDI;
   const midi = Math.round(midiFloat);
   const cents = Math.round((midiFloat - midi) * 100);
   const noteIndex = ((midi % 12) + 12) % 12;
@@ -113,24 +132,10 @@ export function frequencyToNote(frequency) {
 }
 
 /**
- * Convert MIDI number to note name and octave.
- * @param {number} midi - MIDI note number
- * @returns {{ noteName: string, octave: number }}
- */
-export function midiToNoteName(midi) {
-  const noteIndex = ((midi % 12) + 12) % 12;
-  const octave = Math.floor(midi / 12) - 1;
-  return {
-    noteName: NOTE_NAMES[noteIndex],
-    octave
-  };
-}
-
-/**
- * Color constants for voice parts.
+ * Colour constants for voice parts.
  * Supports standard SATB plus numbered subdivisions.
  */
-export const PART_COLORS = {
+const PART_COLORS = {
   soprano: '#4a9eff',
   'soprano 1': '#4a9eff',
   'soprano 2': '#7bb8ff',
@@ -171,36 +176,3 @@ export function getPartColor(partName) {
   // Default color for unknown parts
   return '#9e9e9e';
 }
-
-/**
- * Standard duration types in MusicXML and their beat values (in quarter-note beats).
- */
-export const DURATION_TYPES = {
-  'whole': 4,
-  'half': 2,
-  'quarter': 1,
-  'eighth': 0.5,
-  '16th': 0.25,
-  '32nd': 0.125,
-  '64th': 0.0625
-};
-
-/**
- * Calculate actual duration in beats considering dots.
- * @param {string} durationType - e.g. 'quarter', 'half'
- * @param {number} dots - number of dots
- * @returns {number} duration in beats
- */
-export function calculateDuration(durationType, dots = 0) {
-  let baseDuration = DURATION_TYPES[durationType] || 1;
-  let totalDuration = baseDuration;
-  let dotValue = baseDuration;
-  for (let i = 0; i < dots; i++) {
-    dotValue /= 2;
-    totalDuration += dotValue;
-  }
-  return totalDuration;
-}
-
-// Export constants for testing
-export { NOTE_NAMES, A4_FREQUENCY, A4_MIDI, FLAT_TO_SHARP };

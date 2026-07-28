@@ -1,0 +1,29 @@
+{
+  "name": "choir-practice",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A browser rehearsal tool for choir singers: open a MusicXML score, pick your part, and balance the other voices around it.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "test": "node tests/run-tests.js",
+    "test:static": "node tests/check-static.js",
+    "test:parser": "node tests/parse-samples.js",
+    "check": "npm run lint && npm run test:static && npm test && npm run test:parser",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "serve": "node tools/serve.js",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install --with-deps chromium",
+    "verify": "npm run check && npm run e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1",
+    "eslint": "^9.32.0",
+    "globals": "^16.3.0",
+    "linkedom": "^0.18.11"
+  }
+}

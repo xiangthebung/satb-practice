@@ -4,7 +4,7 @@
  * Implements a simplified YIN algorithm for accurate fundamental frequency detection.
  */
 
-import { frequencyToNote } from './utils.js';
+import { STANDARD_TUNING_HZ, frequencyToNote } from './utils.js';
 
 const MIN_PITCH_HZ = 50;
 const MAX_PITCH_HZ = 2000;
@@ -104,27 +104,6 @@ export function analysePitchYin(buffer, sampleRate) {
 }
 
 /**
- * Compute the autocorrelation-based pitch using a simplified YIN algorithm.
- * @param {Float32Array} buffer - audio sample buffer from AnalyserNode
- * @param {number} sampleRate - audio sample rate
- * @returns {number} detected frequency in Hz, or -1 if no pitch detected
- */
-export function detectPitchAutocorrelation(buffer, sampleRate) {
-  return analysePitchYin(buffer, sampleRate)?.frequency ?? -1;
-}
-
-/**
- * Calculate cents difference between two frequencies.
- * @param {number} detected - detected frequency
- * @param {number} target - target frequency
- * @returns {number} cents difference (positive = sharp, negative = flat)
- */
-export function centsDifference(detected, target) {
-  if (detected <= 0 || target <= 0) return 0;
-  return 1200 * Math.log2(detected / target);
-}
-
-/**
  * Determine pitch accuracy classification.
  * @param {number} cents - absolute cents difference
  * @returns {string} 'correct' (<=50 cents), 'close' (<=100 cents), or 'off'
@@ -173,6 +152,21 @@ export class PitchDetector {
     this.minimumInputLatencySeconds = 0.045;
     this.captureLatencySeconds = this.minimumInputLatencySeconds;
     this.processingLatencySeconds = 0;
+
+    // The tuning the guidance judges against. A choir singing at 442 is in tune
+    // with itself, and the feedback has to agree with the room.
+    this.tuningHz = STANDARD_TUNING_HZ;
+  }
+
+  /**
+   * Set the tuning reference for A4 in hertz.
+   * @param {number} hertz
+   */
+  setTuning(hertz) {
+    const reference = Number(hertz);
+    this.tuningHz = Number.isFinite(reference) && reference > 0
+      ? Math.max(390, Math.min(490, reference))
+      : STANDARD_TUNING_HZ;
   }
 
   /**
@@ -232,7 +226,8 @@ export class PitchDetector {
       this.detectLoop();
       return true;
     } catch (err) {
-      console.error('Microphone access denied:', err);
+      // A refused or unavailable microphone is a user choice, not a fault.
+      console.warn('Microphone unavailable:', err?.name || err);
       this.stop();
       return false;
     }
@@ -339,7 +334,7 @@ export class PitchDetector {
         return;
       }
 
-      const noteInfo = frequencyToNote(this.lastFrequency);
+      const noteInfo = frequencyToNote(this.lastFrequency, this.tuningHz);
       if (noteInfo && this.onPitchDetected) {
         // Preserve capture-aligned trail placement without changing the pitch
         // calculation itself.
@@ -373,11 +368,4 @@ export class PitchDetector {
     this.animationFrame = requestAnimationFrame(() => this.detectLoop());
   }
 
-  /**
-   * Check if the detector is currently active.
-   * @returns {boolean}
-   */
-  getIsActive() {
-    return this.isActive;
-  }
 }

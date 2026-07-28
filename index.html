@@ -2,340 +2,537 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="A browser-based rehearsal tool for practicing choir parts with MusicXML scores.">
-  <meta name="theme-color" content="#1a1a2e">
-  <title>Choir Practice Tool</title>
-  <link rel="stylesheet" href="css/styles.css?v=guided-tour-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="Practice your choir part in the browser: open a MusicXML score, balance the voices, and sing along with playback, a metronome, and microphone pitch guidance.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <title>Choir Practice</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='%230071e3' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5.5l10-2V16'/%3E%3Ccircle cx='6.5' cy='18' r='2.5'/%3E%3Ccircle cx='16.5' cy='16' r='2.5'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-  <header class="app-header">
-    <h1 class="app-title">
-      <button id="app-title" class="app-home-link" type="button" title="Return to home" aria-label="Return to Choir Practice Tool home">
-        <svg class="app-home-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M3 10.8 12 3l9 7.8"/>
-          <path d="M5.5 9.2V21h13V9.2"/>
-          <path d="M9.5 21v-6h5v6"/>
-        </svg>
-        <span>Choir Practice Tool</span>
-      </button>
-    </h1>
-    <span id="score-title" class="score-title"></span>
-    <span class="app-attribution">by Xiang Li · Created with AI</span>
-    <div class="export-group" id="export-group" style="display:none">
-      <details class="export-menu">
-        <summary class="export-menu-trigger" aria-label="Export score">Export</summary>
-        <div class="export-menu-popover">
-          <button id="export-btn" class="export-btn" title="Export MusicXML with current settings">
-        <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <polyline points="7 10 12 15 17 10"/>
-          <line x1="12" y1="15" x2="12" y2="3"/>
-        </svg>
-        <span>MusicXML</span>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="app-bar">
+    <button id="home-btn" class="brand" type="button" aria-label="Choir Practice home">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18V5.5l10-2V16"/>
+        <circle cx="6.5" cy="18" r="2.5"/>
+        <circle cx="16.5" cy="16" r="2.5"/>
+      </svg>
+      <span class="brand-name">Choir Practice</span>
+    </button>
+
+    <div class="app-bar-meta">
+      <p id="score-meta" class="score-meta" hidden>
+        <span id="score-name" class="score-name"></span>
+        <span id="score-composer" class="score-composer"></span>
+      </p>
+    </div>
+
+    <div class="app-bar-actions">
+      <div class="menu" id="export-menu" hidden>
+        <button id="export-btn" class="btn btn-quiet" type="button" popovertarget="export-popover" aria-expanded="false">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3v11"/>
+            <path d="M8 10.5 12 14.5l4-4"/>
+            <path d="M5 18.5h14"/>
+          </svg>
+          <span>Export</span>
+        </button>
+        <div id="export-popover" class="popover popover-end" popover>
+          <p class="popover-title">Export this practice mix</p>
+          <button id="export-wav-btn" class="menu-item" type="button">
+            <span class="menu-item-label">Audio (WAV)</span>
+            <span class="menu-item-hint">Renders the current balance and tempo</span>
           </button>
-          <button id="export-audio-btn" class="export-btn export-audio-btn" title="Export audio as WAV with current volume settings">
-        <svg class="export-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M9 18V5l12-2v13"/>
-          <circle cx="6" cy="18" r="3"/>
-          <circle cx="18" cy="16" r="3"/>
-        </svg>
-        <span class="export-audio-label">Export WAV</span>
+          <button id="export-xml-btn" class="menu-item" type="button">
+            <span class="menu-item-label">Score (MusicXML)</span>
+            <span class="menu-item-hint">Keeps your tempo and part names</span>
           </button>
         </div>
-      </details>
+      </div>
+
+      <button id="help-btn" class="icon-btn" type="button" aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .9-1 1.6v.4"/>
+          <path d="M12 17h.01"/>
+        </svg>
+      </button>
     </div>
   </header>
 
-  <main class="app-layout">
-    <!-- Sidebar for part controls -->
-    <aside class="sidebar" id="sidebar">
-      <section class="sidebar-parts" aria-labelledby="parts-title">
-        <div class="sidebar-header">
-          <div>
-            <h2 id="parts-title">Parts</h2>
-            <p class="sidebar-hint">Choose your section, then press play.</p>
-          </div>
-          <button id="focus-part-btn" class="focus-part-btn" type="button" aria-pressed="false" title="Emphasize your selected part">Focus my part</button>
+  <main id="main" class="app-main" tabindex="-1">
+    <!-- Home: pick a score -->
+    <section id="home" class="home" aria-labelledby="home-title">
+      <div class="home-inner">
+        <div class="home-intro">
+          <p class="eyebrow">Choir rehearsal, in your browser</p>
+          <h1 id="home-title">Practice your part</h1>
+          <p class="lede">Open a score, choose the line you sing, then balance the other voices around it.</p>
+          <ol class="steps">
+            <li><span class="step-index" aria-hidden="true">1</span>Open a score</li>
+            <li><span class="step-index" aria-hidden="true">2</span>Choose your part</li>
+            <li><span class="step-index" aria-hidden="true">3</span>Press play</li>
+          </ol>
         </div>
-        <div id="parts-list" class="parts-list">
-          <p class="no-parts-message">Your parts will appear here after you open a score.</p>
-        </div>
-      </section>
-    </aside>
 
-    <!-- Main content area -->
-    <section class="main-content" id="main-content" aria-busy="false">
-      <div id="loading-status" class="loading-status" role="status" aria-live="polite" hidden>
-        <span class="loading-spinner" aria-hidden="true"></span>
-        <span id="loading-status-text">Opening score…</span>
-      </div>
-
-      <!-- Home screen with sample pieces and file upload -->
-      <div id="upload-prompt" class="upload-prompt">
-        <section class="home-intro" aria-labelledby="home-title">
-          <p class="home-eyebrow">Choir rehearsal, in your browser</p>
-          <h2 id="home-title">Practice the part you hear</h2>
-          <p class="home-intro-copy">Open a sample or upload your own MusicXML score, then shape the mix around your voice.</p>
-          <div class="home-intro-actions">
-            <button id="start-tour-btn" class="home-tour-btn" type="button">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M12 10v6" />
-                <path d="M12 7h.01" />
-              </svg>
-              <span>Take the quick tour</span>
+        <section class="library" aria-labelledby="library-title">
+          <h2 id="library-title" class="section-title">Start with a sample</h2>
+          <div id="sample-list" class="sample-grid">
+            <button class="sample" type="button" data-sample-path="sample-pieces/Draw On, Sweet Night.musicxml">
+              <span class="sample-art" aria-hidden="true">♪</span>
+              <span class="sample-title">Draw on, sweet night</span>
+              <span class="sample-composer">John Wilbye</span>
+              <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
-            <span class="home-tour-meta">7 steps · follow the arrows</span>
-          </div>
-        </section>
-
-        <section class="home-samples" aria-labelledby="sample-pieces-title">
-          <div class="home-samples-heading">
-            <h2 id="sample-pieces-title">Try a sample piece</h2>
-            <p>Start practicing with one of these included MusicXML files.</p>
-          </div>
-          <div id="sample-pieces-list" class="home-sample-list">
-            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Draw On, Sweet Night.musicxml">
-              <span class="sample-piece-art" aria-hidden="true">♪</span>
-              <span class="sample-piece-title">Draw on, sweet night</span>
-              <span class="sample-piece-meta">John Wilbye</span>
-              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
+            <button class="sample" type="button" data-sample-path="sample-pieces/Smavinir fagrir.musicxml">
+              <span class="sample-art" aria-hidden="true">♭</span>
+              <span class="sample-title">Smávinir fagrir</span>
+              <span class="sample-composer">Jóhannes Björnsson</span>
+              <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
-            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Smavinir fagrir.musicxml">
-              <span class="sample-piece-art" aria-hidden="true">♭</span>
-              <span class="sample-piece-title">Smavinir fagrir</span>
-              <span class="sample-piece-meta">Johannes Björnsson</span>
-              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
-            </button>
-            <button class="sample-piece" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">
-              <span class="sample-piece-art" aria-hidden="true">♩</span>
-              <span class="sample-piece-title">Quick! We have but a second</span>
-              <span class="sample-piece-meta">C. V. Stanford</span>
-              <span class="sample-piece-action" aria-hidden="true">Open piece <span>→</span></span>
+            <button class="sample" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">
+              <span class="sample-art" aria-hidden="true">♩</span>
+              <span class="sample-title">Quick! We have but a second</span>
+              <span class="sample-composer">C. V. Stanford</span>
+              <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
           </div>
         </section>
 
-        <div id="file-upload-zone" class="file-upload-zone" role="button" tabindex="0" aria-controls="file-input" aria-label="Upload a MusicXML file">
-          <div class="upload-icon">&#9835;</div>
-          <h3>Upload your own score</h3>
-          <p>Drag and drop a .musicxml file here</p>
-          <p class="upload-hint">or click to browse · uncompressed MusicXML only</p>
-          <input type="file" id="file-input" accept=".musicxml,.xml" style="display:none">
-        </div>
-      </div>
+        <section class="open-own" aria-labelledby="open-own-title">
+          <h2 id="open-own-title" class="section-title">Or open your own</h2>
+          <button id="dropzone" class="dropzone" type="button" aria-describedby="dropzone-hint">
+            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 16V4"/>
+              <path d="m7.5 8.5 4.5-4.5 4.5 4.5"/>
+              <path d="M5 15v3.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V15"/>
+            </svg>
+            <span class="dropzone-label">Choose a MusicXML file</span>
+            <span id="dropzone-hint" class="dropzone-hint">or drag one here · .musicxml, .xml, .mxl</span>
+          </button>
+          <input type="file" id="file-input" class="visually-hidden" accept=".musicxml,.xml,.mxl">
+        </section>
 
-      <!-- Notation display area with canvas -->
-      <div id="notation-area" class="notation-area" style="display: none;">
-        <canvas
-          id="notation-canvas"
-          class="notation-canvas"
-          role="img"
-          tabindex="0"
-          aria-describedby="score-help"
-          aria-label="Interactive music score. Click to jump or drag to scrub."
-        ></canvas>
-        <div id="score-help" class="score-help" role="note">
-          <span class="score-help-label">Quick guide</span>
-          <span>Click the score to jump</span>
-          <span aria-hidden="true">·</span>
-          <span>drag to scrub</span>
-          <span aria-hidden="true">·</span>
-          <span><kbd>Space</kbd> play/pause</span>
-          <span aria-hidden="true">·</span>
-          <span><kbd>←</kbd><kbd>→</kbd> move by bar</span>
-        </div>
+        <p class="home-credit">Made by Xiang Li · Created with AI · Everything runs in your browser</p>
       </div>
-
-      <!-- Calm, glanceable pitch guidance — no rapidly changing numbers -->
-      <div
-        id="pitch-indicator"
-        class="pitch-indicator"
-        data-state="listening"
-        role="img"
-        aria-label="Microphone listening"
-        style="display: none;"
-      >
-        <span id="pitch-guidance" class="pitch-guidance">Listening</span>
-        <div class="pitch-guide" aria-hidden="true">
-          <span class="pitch-guide-center"></span>
-          <span class="pitch-orb"></span>
-        </div>
-      </div>
-      <span
-        id="pitch-announcement"
-        class="visually-hidden"
-        aria-live="polite"
-        aria-atomic="true"
-      ></span>
     </section>
-  </main>
 
-  <!-- Interactive first-visit walkthrough -->
-  <div
-    id="onboarding-modal"
-    class="onboarding-modal guided-tour"
-    role="region"
-    aria-label="Interactive walkthrough"
-    aria-labelledby="onboarding-title"
-    aria-describedby="onboarding-description"
-    aria-hidden="true"
-    hidden
-  >
-    <div id="onboarding-card" class="onboarding-card" role="dialog">
-      <div class="onboarding-progress" aria-hidden="true">
-        <div class="onboarding-progress-dots">
-          <span class="onboarding-progress-dot"></span>
-          <span class="onboarding-progress-dot"></span>
-          <span class="onboarding-progress-dot"></span>
-          <span class="onboarding-progress-dot"></span>
-          <span class="onboarding-progress-dot"></span>
-          <span class="onboarding-progress-dot"></span>
-          <span class="onboarding-progress-dot"></span>
-        </div>
-      </div>
-      <h2 id="onboarding-title">Open a score</h2>
-      <p id="onboarding-description" aria-live="polite">Click a sample piece or upload your own MusicXML score to begin.</p>
-      <div class="onboarding-actions">
-        <button id="onboarding-skip" class="onboarding-btn secondary" type="button">Skip tour</button>
-        <button id="onboarding-next" class="onboarding-btn primary" type="button" hidden>Next</button>
-      </div>
-    </div>
-    <div id="onboarding-arrow" class="onboarding-arrow" aria-hidden="true" hidden>
-      <svg fill="none" preserveAspectRatio="none" aria-hidden="true">
-        <path id="onboarding-arrow-line" class="onboarding-arrow-line" />
-        <path id="onboarding-arrow-head" class="onboarding-arrow-head" />
-      </svg>
-    </div>
-  </div>
-
-  <!-- Microphone setup guidance -->
-  <div
-    id="mic-prompt"
-    class="mic-prompt"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="mic-prompt-title"
-    aria-describedby="mic-prompt-description"
-    aria-hidden="true"
-    hidden
-  >
-    <div class="mic-prompt-card" role="document">
-      <div class="mic-prompt-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 18v-3a9 9 0 0 1 18 0v3"/>
-          <path d="M3 17h3v4H3zM18 17h3v4h-3z"/>
-          <path d="M6 21h2a4 4 0 0 0 4-4"/>
-        </svg>
-      </div>
-      <h2 id="mic-prompt-title">Use headphones for microphone practice</h2>
-      <p id="mic-prompt-description">
-        For the best experience and to prevent audio feedback, connect headphones or earphones before turning on the microphone. Audio is analysed locally in your browser and is never recorded or uploaded by this app.
-      </p>
-      <label class="mic-prompt-dont-show">
-        <input type="checkbox" id="mic-prompt-dont-show">
-        Don't show again
-      </label>
-      <div class="mic-prompt-actions">
-        <button id="mic-prompt-cancel" class="mic-prompt-btn secondary" type="button">Not now</button>
-        <button id="mic-prompt-continue" class="mic-prompt-btn primary" type="button">Continue to microphone</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bottom transport toolbar -->
-  <footer class="transport-toolbar">
-    <!-- Seek / progress bar spanning full width -->
-    <div class="transport-progress">
-      <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" class="seek-slider" title="Seek position" aria-label="Score position" disabled>
+    <div id="loading" class="loading" role="status" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <span id="loading-text">Opening score…</span>
     </div>
 
-    <!-- Main controls row -->
-    <div class="transport-row">
-      <!-- Left: time + tempo -->
-      <div class="transport-left">
-        <span id="seek-time" class="seek-time">0:00</span>
-        <div class="tempo-control" id="tempo-control">
-          <div class="tempo-scrubber" id="tempo-scrubber" role="spinbutton" tabindex="0" aria-label="Tempo" aria-valuemin="40" aria-valuemax="240" aria-valuenow="120" title="Drag left/right, scroll, or use arrow keys to adjust tempo">
-            <span id="tempo-value" class="tempo-value">120</span>
-            <span class="tempo-unit">BPM</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Center: play/pause -->
-      <div class="transport-center">
-        <button id="play-btn" class="play-btn" type="button" title="Play/Pause (Space)" aria-label="Play">
-          <svg id="play-icon" class="transport-icon" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="6,4 20,12 6,20"/>
-          </svg>
-          <svg id="pause-icon" class="transport-icon" style="display:none" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="5" y="4" width="4" height="16"/>
-            <rect x="15" y="4" width="4" height="16"/>
-          </svg>
-        </button>
-      </div>
-
-      <!-- Right: metronome, repeat, mic -->
-      <div class="transport-right">
-        <button id="repeat-btn" class="icon-btn" title="Toggle Repeat (R)" aria-label="Toggle repeat" aria-pressed="false">
-          <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M17 1l4 4-4 4"/>
-            <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
-            <path d="M7 23l-4-4 4-4"/>
-            <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
-          </svg>
-        </button>
-        <button id="metronome-btn" class="icon-btn" title="Toggle Metronome (M)" aria-label="Toggle metronome" aria-pressed="false">
-          <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L6 22h12L12 2z"/>
-            <line x1="12" y1="18" x2="16" y2="6"/>
-          </svg>
-          <div id="beat-indicator" class="beat-dot"></div>
-        </button>
-        <button id="mic-btn" class="icon-btn" title="Enable Microphone" aria-label="Enable microphone" aria-pressed="false">
-          <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="1" width="6" height="12" rx="3"/>
-            <path d="M5 10a7 7 0 0 0 14 0"/>
-            <line x1="12" y1="17" x2="12" y2="21"/>
-            <line x1="8" y1="21" x2="16" y2="21"/>
-          </svg>
-        </button>
-        <span id="mic-status" class="mic-status" aria-live="polite">Mic off</span>
-        <div class="settings-menu-wrapper">
-          <button id="settings-btn" class="icon-btn" type="button" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="settings-popover">
-            <svg class="transport-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z"/>
+    <!-- Practice: score, parts, mix -->
+    <div id="practice" class="practice" hidden>
+      <dialog id="parts-panel" class="parts-panel" aria-label="Parts and mix">
+        <div class="panel-head">
+          <h2 class="panel-title">Parts</h2>
+          <button id="parts-close" class="icon-btn panel-close" type="button" aria-label="Close parts">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18"/>
             </svg>
           </button>
-          <div id="settings-popover" class="settings-popover" style="display:none">
-            <div class="settings-popover-row">
-              <label class="settings-popover-label" title="Synthesized tone or human singing voice">Voice</label>
-              <div class="synth-toggle" id="synth-toggle">
-                <button class="synth-toggle-btn" type="button" data-mode="oscillator" aria-pressed="false" title="Synthesized oscillator sound">Synth</button>
-                <button class="synth-toggle-btn active" type="button" data-mode="vocal" aria-pressed="true" title="Human-like singing voice">Vocal</button>
-              </div>
+        </div>
+
+        <div class="panel-scroll">
+          <div id="coach" class="coach" role="note" hidden>
+            <p>Pick the part you sing, then press play.</p>
+            <button id="coach-dismiss" class="btn btn-quiet btn-small" type="button">Got it</button>
+          </div>
+
+          <fieldset class="part-list-wrap">
+            <legend class="panel-label">Your part</legend>
+            <div id="part-list" class="part-list"></div>
+          </fieldset>
+
+          <fieldset class="mix">
+            <legend class="panel-label">Balance</legend>
+            <div id="mix-options" class="mix-options"></div>
+            <div id="others-level-row" class="others-level" hidden>
+              <label for="others-level">Other parts</label>
+              <input id="others-level" type="range" min="0" max="100" step="5" value="35">
+              <output id="others-level-value" for="others-level">35%</output>
             </div>
-            <div class="settings-popover-row">
-              <label class="settings-popover-label" title="How long fermatas are held (1.0x = no extra hold)">Fermata</label>
-              <div class="fermata-scrubber" id="fermata-scrubber" role="spinbutton" tabindex="0" aria-label="Fermata duration" aria-valuemin="1" aria-valuemax="4" aria-valuenow="2" aria-valuetext="2.0 times" title="Drag left/right, scroll, or use arrow keys to adjust">
-                <svg class="scrubber-drag-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 8H12"/>
-                  <path d="M6 6L4 8L6 10"/>
-                  <path d="M10 6L12 8L10 10"/>
-                </svg>
-                <span id="fermata-value">2.0x</span>
-              </div>
+          </fieldset>
+
+          <label class="switch-row" for="dim-others">
+            <span class="switch-label">
+              Dim other staves
+              <span class="switch-hint">Keeps your line easy to follow</span>
+            </span>
+            <input type="checkbox" id="dim-others" class="switch" role="switch">
+          </label>
+        </div>
+      </dialog>
+
+      <section id="stage" class="stage" aria-label="Score" tabindex="-1">
+        <div id="score-frame" class="score-frame">
+          <canvas
+            id="score-canvas"
+            class="score-canvas"
+            tabindex="0"
+            role="img"
+            aria-label="Score"
+            aria-describedby="score-hint"
+          ></canvas>
+          <p id="score-hint" class="visually-hidden">
+            Click the score to jump to a note, drag sideways to scrub, or use the
+            arrow keys to move a bar at a time. Press space to play or pause.
+          </p>
+        </div>
+
+        <div id="pitch-pill" class="pitch-pill" data-state="listening" hidden>
+          <span id="pitch-label" class="pitch-label">Listening</span>
+          <span class="pitch-scale" aria-hidden="true">
+            <span class="pitch-center"></span>
+            <span class="pitch-orb"></span>
+          </span>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer id="transport" class="transport" hidden>
+    <div class="transport-seek">
+      <label class="visually-hidden" for="seek">Score position</label>
+      <input id="seek" class="seek" type="range" min="0" max="1000" step="1" value="0">
+    </div>
+
+    <div class="transport-row">
+      <div class="transport-side transport-left">
+        <span id="time-display" class="time" aria-hidden="true">0:00 / 0:00</span>
+        <div class="tempo">
+          <label class="visually-hidden" for="tempo">Tempo in beats per minute</label>
+          <input id="tempo" class="tempo-range" type="range" min="40" max="240" step="1" value="120">
+          <output id="tempo-value" class="tempo-value" for="tempo">120 BPM</output>
+        </div>
+      </div>
+
+      <div class="transport-center">
+        <button id="prev-bar" class="icon-btn" type="button" aria-label="Previous bar" title="Previous bar (Left arrow)">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M7 5h2v14H7zM19 5.5v13a.7.7 0 0 1-1.1.6l-8-6.3a.8.8 0 0 1 0-1.3l8-6.3a.7.7 0 0 1 1.1.6z"/>
+          </svg>
+        </button>
+        <button id="play-btn" class="play-btn" type="button" aria-label="Play" title="Play or pause (Space)">
+          <svg id="play-icon" class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M8 5.4v13.2a.8.8 0 0 0 1.2.7l10-6.6a.8.8 0 0 0 0-1.4l-10-6.6a.8.8 0 0 0-1.2.7z"/>
+          </svg>
+          <svg id="pause-icon" class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden>
+            <path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>
+          </svg>
+        </button>
+        <button id="next-bar" class="icon-btn" type="button" aria-label="Next bar" title="Next bar (Right arrow)">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M15 5h2v14h-2zM5 5.5v13a.7.7 0 0 0 1.1.6l8-6.3a.8.8 0 0 0 0-1.3l-8-6.3A.7.7 0 0 0 5 5.5z"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="transport-side transport-right">
+        <button id="parts-btn" class="icon-btn panel-trigger" type="button" aria-label="Parts and mix" title="Parts and mix">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <path d="M6 4v16M12 4v16M18 4v16"/>
+            <circle cx="6" cy="9" r="2.1" fill="currentColor" stroke="none"/>
+            <circle cx="12" cy="14" r="2.1" fill="currentColor" stroke="none"/>
+            <circle cx="18" cy="8" r="2.1" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+        <div class="loop-group">
+          <button id="loop-btn" class="icon-btn" type="button" aria-pressed="false" aria-label="Loop" title="Loop (R)">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M17 4l3 3-3 3"/>
+              <path d="M4 12v-1a4 4 0 0 1 4-4h12"/>
+              <path d="M7 20l-3-3 3-3"/>
+              <path d="M20 12v1a4 4 0 0 1-4 4H4"/>
+            </svg>
+            <span id="loop-range-badge" class="loop-badge" aria-hidden="true" hidden></span>
+          </button>
+          <button
+            id="loop-range-btn"
+            class="caret-btn"
+            type="button"
+            popovertarget="loop-popover"
+            aria-expanded="false"
+            aria-label="Choose the bars to loop"
+            title="Loop range"
+          >
+            <svg class="caret" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </button>
+
+          <div id="loop-popover" class="popover popover-end popover-up" popover>
+            <p class="popover-title">Loop these bars</p>
+            <p id="loop-range-summary" class="popover-note">The whole score</p>
+            <div class="loop-fields">
+              <label class="loop-field">
+                <span>From bar</span>
+                <input id="loop-from" type="number" min="1" step="1" inputmode="numeric">
+              </label>
+              <label class="loop-field">
+                <span>To bar</span>
+                <input id="loop-to" type="number" min="1" step="1" inputmode="numeric">
+              </label>
+            </div>
+            <div class="popover-actions">
+              <button id="loop-mark-start" class="btn btn-quiet btn-small" type="button">
+                Start here
+              </button>
+              <button id="loop-mark-end" class="btn btn-quiet btn-small" type="button">
+                End here
+              </button>
+              <button id="loop-clear" class="btn btn-quiet btn-small" type="button">
+                Whole score
+              </button>
             </div>
           </div>
         </div>
-
+        <button id="metronome-btn" class="icon-btn" type="button" aria-pressed="false" aria-label="Metronome" title="Metronome (M)">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9.6 4h4.8l3.6 16H6z"/>
+            <path d="M12 16.5 17.5 7"/>
+          </svg>
+          <span id="beat-dot" class="beat-dot" aria-hidden="true"></span>
+        </button>
+        <button id="mic-btn" class="icon-btn" type="button" aria-pressed="false" aria-label="Microphone pitch guidance" title="Microphone pitch guidance">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="2.5" width="6" height="11" rx="3"/>
+            <path d="M5.5 11a6.5 6.5 0 0 0 13 0"/>
+            <path d="M12 17.5V21"/>
+          </svg>
+        </button>
+        <button id="settings-btn" class="icon-btn" type="button" aria-haspopup="dialog" aria-label="Settings" title="Settings (,)">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.2"/>
+            <path d="M12 3.5v2.2M12 18.3v2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M3.5 12h2.2M18.3 12h2.2M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6"/>
+          </svg>
+        </button>
       </div>
     </div>
   </footer>
 
-  <script type="module" src="js/app.js?v=guided-tour-8"></script>
+  <!-- Microphone guidance -->
+  <dialog id="mic-dialog" class="modal modal-compact" aria-labelledby="mic-dialog-title">
+    <form method="dialog" class="modal-card">
+      <div class="modal-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 17v-4a8 8 0 0 1 16 0v4"/>
+          <path d="M4 16h2.5v5H4zM17.5 16H20v5h-2.5z"/>
+        </svg>
+      </div>
+      <h2 id="mic-dialog-title">Put your headphones on</h2>
+      <p>Headphones keep the playback out of the microphone, so the pitch guidance follows your voice instead of the app. Audio is analysed on this device and never recorded or uploaded.</p>
+      <label class="checkbox-row">
+        <input type="checkbox" id="mic-skip-prompt">
+        <span>Don't remind me again</span>
+      </label>
+      <div class="modal-actions">
+        <button value="cancel" class="btn btn-quiet" type="submit">Not now</button>
+        <button id="mic-continue" value="continue" class="btn btn-primary" type="submit">Turn on microphone</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settings-dialog" class="modal" aria-labelledby="settings-dialog-title">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <h2 id="settings-dialog-title">Settings</h2>
+        <button id="settings-close" class="icon-btn" type="button" aria-label="Close settings">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="settings-grid">
+        <section class="settings-group">
+          <h3 class="settings-heading">Sound</h3>
+
+          <fieldset class="segmented-field">
+            <legend class="settings-label">Voices or tones</legend>
+            <div class="segmented">
+              <label class="segment">
+                <input type="radio" name="synth-mode" value="vocal" checked>
+                <span>Voices</span>
+              </label>
+              <label class="segment">
+                <input type="radio" name="synth-mode" value="oscillator">
+                <span>Tones</span>
+              </label>
+            </div>
+            <p class="settings-hint">Tones are steadier for checking an interval.</p>
+          </fieldset>
+
+          <div class="settings-row">
+            <label class="settings-label" for="master-volume">Volume</label>
+            <input id="master-volume" type="range" min="0" max="100" step="1" value="100">
+            <output id="master-volume-value" for="master-volume">100%</output>
+          </div>
+
+          <div class="settings-row">
+            <label class="settings-label" for="room">Room</label>
+            <input id="room" type="range" min="0" max="100" step="1" value="34">
+            <output id="room-value" for="room">34%</output>
+          </div>
+
+          <div class="settings-row">
+            <label class="settings-label" for="tuning">Tuning</label>
+            <input id="tuning" type="range" min="415" max="450" step="1" value="440">
+            <output id="tuning-value" for="tuning">A = 440 Hz</output>
+          </div>
+        </section>
+
+        <section class="settings-group">
+          <h3 class="settings-heading">Playback</h3>
+
+          <div class="settings-row">
+            <label class="settings-label" for="transpose">Transpose</label>
+            <input id="transpose" type="range" min="-12" max="12" step="1" value="0">
+            <output id="transpose-value" for="transpose">As written</output>
+          </div>
+          <p class="settings-hint">Moves the sound only. The score stays as printed.</p>
+
+          <div class="settings-row">
+            <label class="settings-label" for="fermata">Fermata hold</label>
+            <input id="fermata" type="range" min="1" max="4" step="0.1" value="2">
+            <output id="fermata-value" for="fermata">2.0×</output>
+          </div>
+
+          <label class="switch-row" for="follow-dynamics">
+            <span class="switch-label">
+              Follow written dynamics
+              <span class="switch-hint">Off keeps one steady level while you learn</span>
+            </span>
+            <input type="checkbox" id="follow-dynamics" class="switch" role="switch" checked>
+          </label>
+
+          <label class="switch-row" for="play-repeats">
+            <span class="switch-label">
+              Play repeats
+              <span class="switch-hint">Off reads the page straight through</span>
+            </span>
+            <input type="checkbox" id="play-repeats" class="switch" role="switch" checked>
+          </label>
+        </section>
+
+        <section class="settings-group">
+          <h3 class="settings-heading">Score</h3>
+
+          <label class="switch-row" for="show-lyrics">
+            <span class="switch-label">
+              Show the words
+              <span class="switch-hint">Under each stave, with hyphens and melismas</span>
+            </span>
+            <input type="checkbox" id="show-lyrics" class="switch" role="switch" checked>
+          </label>
+
+          <div class="settings-row" id="verse-row" hidden>
+            <label class="settings-label" for="verse">Verse</label>
+            <select id="verse" class="select"></select>
+            <span></span>
+          </div>
+
+          <label class="switch-row" for="show-time-signatures">
+            <span class="switch-label">
+              Show time signatures
+              <span class="switch-hint">And any change partway through</span>
+            </span>
+            <input type="checkbox" id="show-time-signatures" class="switch" role="switch" checked>
+          </label>
+        </section>
+
+        <section class="settings-group">
+          <h3 class="settings-heading">Metronome</h3>
+
+          <div class="settings-row">
+            <label class="settings-label" for="click-pattern">Click on</label>
+            <select id="click-pattern" class="select"></select>
+          </div>
+
+          <div class="settings-row">
+            <label class="settings-label" for="click-volume">Click level</label>
+            <input id="click-volume" type="range" min="0" max="100" step="1" value="80">
+            <output id="click-volume-value" for="click-volume">80%</output>
+          </div>
+
+          <div class="settings-row">
+            <label class="settings-label" for="count-in">Count in</label>
+            <input id="count-in" type="range" min="0" max="4" step="1" value="0">
+            <output id="count-in-value" for="count-in">Off</output>
+          </div>
+          <p class="settings-hint">Counted in the bar you start from, so 6/8 counts six.</p>
+        </section>
+      </div>
+
+      <div class="modal-actions modal-actions-split">
+        <button id="settings-reset" class="btn btn-quiet" type="button">Restore defaults</button>
+        <button id="settings-done" class="btn btn-primary" type="button">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Help -->
+  <dialog id="help-dialog" class="modal" aria-labelledby="help-dialog-title">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <h2 id="help-dialog-title">Practising with Choir Practice</h2>
+        <button id="help-close" class="icon-btn" type="button" aria-label="Close help">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="help-grid">
+        <section>
+          <h3>On the score</h3>
+          <ul class="help-list">
+            <li>Click a note to jump there</li>
+            <li>Drag left or right to scrub</li>
+            <li>Scroll sideways to browse ahead</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Keyboard</h3>
+          <ul class="help-list keys">
+            <li><kbd>Space</kbd> Play or pause</li>
+            <li><kbd>←</kbd><kbd>→</kbd> Previous or next bar</li>
+            <li><kbd>Home</kbd> Back to the start</li>
+            <li><kbd>M</kbd> Metronome</li>
+            <li><kbd>R</kbd> Loop</li>
+            <li><kbd>?</kbd> This help</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Scores</h3>
+          <ul class="help-list">
+            <li>Uncompressed <code>.musicxml</code> and <code>.xml</code></li>
+            <li>Compressed <code>.mxl</code> files</li>
+            <li>Rename a part by double-clicking its name</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Privacy</h3>
+          <ul class="help-list">
+            <li>Scores stay on this device</li>
+            <li>Microphone audio is analysed locally and never recorded</li>
+          </ul>
+        </section>
+      </div>
+
+      <p class="modal-footnote">Made by Xiang Li · Created with AI</p>
+    </div>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="assertive" aria-atomic="false"></div>
+  <p id="status-live" class="visually-hidden" role="status" aria-live="polite"></p>
+
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

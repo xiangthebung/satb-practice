@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<!--
+  Glyph proof sheet.
+
+  Development aid for js/glyphs.js: draws every clef and accidental on a real
+  staff at both a large size for checking the shapes and the app's own size for
+  checking they still read when small. Open it with `npm run serve` and visit
+  /tools/glyph-preview.html.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Glyph proof sheet</title>
+  <style>
+    body { margin: 0; padding: 24px; background: #fff; font: 14px system-ui, sans-serif; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="sheet" width="1100" height="620"></canvas>
+
+  <script type="module">
+    import {
+      drawAccidental,
+      drawClefGlyph,
+      drawTimeSignature,
+      accidentalWidth,
+      clefGlyphWidth,
+      staffLineOffset
+    } from '../js/glyphs.js';
+
+    const canvas = document.getElementById('sheet');
+    const ctx = canvas.getContext('2d');
+    const INK = '#1d1d1f';
+
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    /** Draw five staff lines and return the top line's y. */
+    function staff(x, topY, space, width) {
+      ctx.strokeStyle = '#c9c9ce';
+      ctx.lineWidth = 1;
+      for (let line = 0; line <= 4; line++) {
+        const y = topY + line * space;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + width, y);
+        ctx.stroke();
+      }
+      return topY;
+    }
+
+    function label(text, x, y) {
+      ctx.fillStyle = '#86868b';
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(text, x, y);
+    }
+
+    /** One row: clefs, a key signature, a time signature, and accidentals. */
+    function row(topY, space, caption) {
+      const left = 40;
+      const width = 1020;
+      staff(left, topY, space, width);
+      label(`${caption} — staff space ${space}px`, left, topY - space * 2.2);
+
+      let cursor = left + space * 0.6;
+      const clefs = [
+        { sign: 'G', line: 2, octaveChange: 0 },
+        { sign: 'G', line: 2, octaveChange: -1 },
+        { sign: 'F', line: 4, octaveChange: 0 },
+        { sign: 'C', line: 3, octaveChange: 0 },
+        { sign: 'C', line: 4, octaveChange: 0 }
+      ];
+      for (const clef of clefs) {
+        drawClefGlyph(ctx, clef, cursor, topY, space, INK);
+        cursor += clefGlyphWidth(clef.sign, space) + space * 0.5;
+      }
+
+      cursor += space;
+
+      // A key signature of four sharps, then four flats, on their real lines.
+      const sharpPositions = [8, 5, 9, 6];
+      for (const position of sharpPositions) {
+        const y = topY + (4 - position / 2) * space;
+        drawAccidental(ctx, 1, cursor, y, space, INK);
+        cursor += space * 0.78;
+      }
+      cursor += space * 0.8;
+      const flatPositions = [4, 7, 3, 6];
+      for (const position of flatPositions) {
+        const y = topY + (4 - position / 2) * space;
+        drawAccidental(ctx, -1, cursor, y, space, INK);
+        cursor += space * 0.78;
+      }
+
+      cursor += space * 1.2;
+      drawTimeSignature(ctx, { numerator: 4, denominator: 4 }, cursor, topY, space, INK);
+      cursor += space * 2.2;
+      drawTimeSignature(ctx, { numerator: 12, denominator: 8 }, cursor, topY, space, INK);
+      cursor += space * 3;
+
+      // Every accidental against a note head, on the middle line.
+      const middleY = topY + 2 * space;
+      for (const alter of [-2, -1, 0, 1, 2]) {
+        drawAccidental(ctx, alter, cursor, middleY, space, INK);
+        cursor += accidentalWidth(alter, space) * 0.72;
+        ctx.fillStyle = INK;
+        ctx.beginPath();
+        ctx.ellipse(cursor, middleY, space * 0.58, space * 0.42, -0.2, 0, Math.PI * 2);
+        ctx.fill();
+        cursor += space * 1.6;
+      }
+    }
+
+    row(120, 26, 'Large');
+    row(320, 14, 'Medium');
+    row(440, 11, 'App size');
+    row(540, 8, 'Small');
+
+    // Confirm the anchor maths: line 1 is the bottom line.
+    label(
+      `staffLineOffset(1)=${staffLineOffset(1)} (bottom) staffLineOffset(5)=${staffLineOffset(5)} (top)`,
+      40,
+      600
+    );
+  </script>
+</body>
+</html>
