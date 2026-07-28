@@ -432,37 +432,122 @@ test.describe('the score view', () => {
     await expect(page.locator('#show-lyrics')).not.toBeChecked();
   });
 
-  test('the words clear the notes above them', async ({ page }) => {
-    await openSample(page);
+  test('the words are painted clear of the notes above them', async ({ page }) => {
+    // Two voices on one staff routinely carry forced down stems. Opened out onto
+    // a staff each, those stems hang three spaces under every notehead, and the
+    // words used to be drawn straight through them. This is the score that shows
+    // it, so it is the one measured here.
+    await openSample(page, 'Smávinir');
 
-    // Words are placed under the lowest ink the part reaches, stems included, so
-    // there has to be a clear band between the two.
-    const clear = await page.locator('#score-canvas').evaluate(canvas => {
+    /**
+     * Measure each part's lyric band off the painted canvas.
+     *
+     * The band is recorded relative to the part's own staff, because switching
+     * the words off re-spaces the staves while leaving each part's notes in the
+     * same place relative to its staff. Sampling the same band twice therefore
+     * separates the two kinds of ink that share a colour: whatever is still there
+     * with the words switched off is a note, a stem or a beam.
+     */
+    const sampleLyricBands = () => page.locator('#score-canvas').evaluate(canvas => {
       const app = window.choirPracticeApp;
       const renderer = app.renderer;
-      const part = app.state.parts[0];
-      const ratio = renderer.pixelRatio;
-      const { lineSpacing } = renderer.config;
-      const staffBottom = renderer.getStaffY(0) + lineSpacing * 4;
-      const baseline = staffBottom + renderer.getLyricBaselineOffset(part);
-      const ink = renderer.getPartInk(part);
-      const [, r, g, b] = ink.match(/(\d+), (\d+), (\d+)/).map(Number);
-
       const ctx = canvas.getContext('2d');
-      // Look between the lowest note ink and the top of the words.
-      const from = Math.round((baseline - lineSpacing * 1.25) * ratio);
-      const to = Math.round((baseline - lineSpacing * 1.05) * ratio);
-      const { data } = ctx.getImageData(0, from, canvas.width, Math.max(1, to - from));
-      let coloured = 0;
-      for (let index = 0; index < data.length; index += 4) {
-        if (Math.abs(data[index] - r) < 40 &&
-            Math.abs(data[index + 1] - g) < 40 &&
-            Math.abs(data[index + 2] - b) < 40) coloured++;
-      }
-      return coloured;
+      const ratio = renderer.pixelRatio;
+      const { lineSpacing, lyricSize } = renderer.config;
+
+      // The playback cursor is drawn in the accent colour, close enough to a blue
+      // part's ink to be mistaken for it, so its column is left out.
+      const cursorX = (renderer.getScoreX(renderer.currentBeat) - renderer.scrollX) * ratio;
+
+      ctx.save();
+      ctx.font = `${Math.max(8, Math.round(lineSpacing * lyricSize))}px ` +
+        'Georgia, "Iowan Old Style", "Times New Roman", serif';
+      const metrics = ctx.measureText('Sngh');
+      ctx.restore();
+
+      return app.state.parts.map((part, index) => {
+        if (!renderer.partSingsSelectedVerse(part)) return null;
+
+        const staffTop = renderer.getStaffY(index);
+        // Offsets from the staff, so the same band can be found again after the
+        // staves have been re-spaced.
+        const bandTop = lineSpacing * 4 + renderer.getLyricBaselineOffset(part) -
+          metrics.actualBoundingBoxAscent;
+        const bandBottom = lineSpacing * 4 + renderer.getLyricBaselineOffset(part) +
+          metrics.actualBoundingBoxDescent;
+
+        const from = Math.round((staffTop + bandTop) * ratio);
+        const height = Math.max(1, Math.round((staffTop + bandBottom) * ratio) - from);
+        const { data } = ctx.getImageData(0, from, canvas.width, height);
+
+        const [, r, g, b] = renderer.getPartInk(part).match(/(\d+), (\d+), (\d+)/).map(Number);
+        let ink = 0;
+        for (let row = 0; row < height; row++) {
+          for (let x = 0; x < canvas.width; x++) {
+            if (Math.abs(x - cursorX) < 8 * ratio) continue;
+            const at = (row * canvas.width + x) * 4;
+            if (Math.abs(data[at] - r) < 40 &&
+                Math.abs(data[at + 1] - g) < 40 &&
+                Math.abs(data[at + 2] - b) < 40) ink++;
+          }
+        }
+        return { name: part.name, bandTop, bandBottom, ink };
+      }).filter(Boolean);
     });
 
-    expect(clear).toBe(0);
+    const withWords = await sampleLyricBands();
+    expect(withWords.length).toBeGreaterThan(0);
+    // A part can hold words yet have none of them in the opening window, so the
+    // paint check is made across the score.
+    expect(
+      withWords.reduce((sum, row) => sum + row.ink, 0),
+      'no words were painted anywhere'
+    ).toBeGreaterThan(0);
+
+    // Now take the notes on their own. Anything left in a lyric band is ink the
+    // words would have been drawn on top of.
+    await page.locator('#settings-btn').click();
+    await page.locator('#show-lyrics').uncheck();
+    await page.locator('#settings-done').click();
+
+    const bands = withWords.map(row => ({ bandTop: row.bandTop, bandBottom: row.bandBottom }));
+    const intruding = await page.locator('#score-canvas').evaluate((canvas, bands) => {
+      const app = window.choirPracticeApp;
+      const renderer = app.renderer;
+      const ctx = canvas.getContext('2d');
+      const ratio = renderer.pixelRatio;
+      const cursorX = (renderer.getScoreX(renderer.currentBeat) - renderer.scrollX) * ratio;
+
+      const singing = app.state.parts
+        .map((part, index) => ({ part, index }))
+        .filter(entry => renderer.partSingsSelectedVerse(entry.part));
+
+      return singing.map((entry, position) => {
+        const band = bands[position];
+        const staffTop = renderer.getStaffY(entry.index);
+        const from = Math.round((staffTop + band.bandTop) * ratio);
+        const height = Math.max(1, Math.round((staffTop + band.bandBottom) * ratio) - from);
+        const { data } = ctx.getImageData(0, from, canvas.width, height);
+
+        const [, r, g, b] = renderer.getPartInk(entry.part)
+          .match(/(\d+), (\d+), (\d+)/).map(Number);
+        let ink = 0;
+        for (let row = 0; row < height; row++) {
+          for (let x = 0; x < canvas.width; x++) {
+            if (Math.abs(x - cursorX) < 8 * ratio) continue;
+            const at = (row * canvas.width + x) * 4;
+            if (Math.abs(data[at] - r) < 40 &&
+                Math.abs(data[at + 1] - g) < 40 &&
+                Math.abs(data[at + 2] - b) < 40) ink++;
+          }
+        }
+        return { name: entry.part.name, ink };
+      });
+    }, bands);
+
+    for (const row of intruding) {
+      expect(row.ink, `${row.name}: notes reach into the row the words sit on`).toBe(0);
+    }
   });
 
   test('a single-verse score hides the verse picker', async ({ page }) => {
@@ -478,21 +563,46 @@ test.describe('the score view', () => {
     await openSample(page);
     await page.locator('#settings-btn').click();
 
-    const gutter = () => page.locator('#score-canvas').evaluate(canvas => {
+    // Clefs, key signatures and numerals share the fixed gutter that the music
+    // scrolls past. Counting the score ink inside whatever the gutter currently
+    // spans keeps the notes out of the measurement: they begin where it ends, so
+    // the count follows the gutter as it narrows instead of filling up with music.
+    const gutterInk = () => page.locator('#score-canvas').evaluate(canvas => {
       const renderer = window.choirPracticeApp.renderer;
-      return Math.round((renderer.config.marginLeft + renderer.config.clefWidth) *
-        renderer.pixelRatio);
+      const ratio = renderer.pixelRatio;
+      const { marginLeft, clefWidth } = renderer.config;
+      const width = Math.max(1, Math.round((marginLeft + clefWidth) * ratio) - 1);
+
+      const ctx = canvas.getContext('2d');
+      const { data } = ctx.getImageData(0, 0, width, canvas.height);
+      let black = 0;
+      for (let at = 0; at < data.length; at += 4) {
+        // Numerals are printed in the score ink, so the count is limited to
+        // neutral dark pixels; that leaves out the coloured notes and the pale
+        // staff lines running through the gutter.
+        const spread = Math.max(data[at], data[at + 1], data[at + 2]) -
+          Math.min(data[at], data[at + 1], data[at + 2]);
+        if (data[at] < 110 && spread < 30) black++;
+      }
+      return black;
     });
 
-    const strip = await gutter();
-    const withTime = await countInk(page, { fromLeft: strip });
+    const gutter = () => readState(
+      page,
+      'app.renderer.config.marginLeft + app.renderer.config.clefWidth'
+    );
+    const lineSpacing = await readState(page, 'app.renderer.config.lineSpacing');
+
+    const withTime = await gutter();
+    const inkWithTime = await gutterInk();
+    expect(inkWithTime).toBeGreaterThan(0);
 
     await page.locator('#show-time-signatures').uncheck();
     expect(await readState(page, 'app.renderer.showTimeSignatures')).toBe(false);
 
-    expect(await countInk(page, { fromLeft: strip })).toBeLessThan(withTime);
-    // The reserved room shrinks with the numerals, rather than being left empty.
-    expect(await gutter()).toBeLessThan(strip);
+    // The room reserved for the numerals is released rather than left empty.
+    expect(await gutter()).toBeLessThanOrEqual(withTime - lineSpacing);
+    expect(await gutterInk()).toBeLessThan(inkWithTime);
 
     expect(problems).toEqual([]);
   });

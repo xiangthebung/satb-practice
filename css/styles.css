@@ -400,7 +400,6 @@ input[type="checkbox"] {
   font-size: 14px;
 }
 
-
 .score-name {
   overflow: hidden;
   color: var(--text);
@@ -429,7 +428,6 @@ input[type="checkbox"] {
   position: relative;
 }
 
-
 /* =========================================================================
    Home
    ========================================================================= */
@@ -445,7 +443,6 @@ input[type="checkbox"] {
   overflow-y: auto;
   padding: var(--space-6) var(--space-5) var(--space-7);
 }
-
 
 .home-inner {
   display: flex;
@@ -736,7 +733,6 @@ input[type="checkbox"] {
   font-size: 13.5px;
 }
 
-
 /* --- Part rows --------------------------------------------------------- */
 
 .part-list {
@@ -1002,7 +998,6 @@ input[type="checkbox"] {
   font-size: 13px;
 }
 
-
 .others-level output {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
@@ -1131,7 +1126,6 @@ input[type="checkbox"] {
   transform: translateX(-50%);
 }
 
-
 .spinner {
   width: 14px;
   height: 14px;
@@ -1165,7 +1159,6 @@ input[type="checkbox"] {
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
-
 
 .pitch-pill[data-state="correct"] { --pitch-color: var(--pitch-correct); }
 .pitch-pill[data-state="close"] { --pitch-color: var(--pitch-close); }

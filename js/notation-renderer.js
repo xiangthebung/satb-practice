@@ -784,7 +784,10 @@ export class NotationRenderer {
       cursorAnchorRatio: 0.38, // pin the playback cursor left of screen center
       pitchTrailMaxSamples: 240,
       lyricGap: 2.1,  // staff spaces from the bottom line to the lyric baseline
-      lyricClearance: 1.4, // staff spaces kept between the lowest ink and the words
+      // Room kept between the lowest ink and the words. It has to cover more than
+      // the bare stem reach, because a beam is drawn with real thickness and a
+      // sixteenth-note group carries a second bar below the first.
+      lyricClearance: 1.75,
       lyricSize: 1.05, // lyric text size, in staff spaces
       ...options
     };
