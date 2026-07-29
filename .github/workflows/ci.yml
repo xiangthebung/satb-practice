@@ -39,3 +39,14 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+# Deploying is not done here. Cloudflare's own Workers Builds GitHub app is already
+# connected to this repository and builds every push itself — it is what put the
+# current site up, and a `wrangler deploy` job here would either duplicate that or
+# race it. Doing it from Actions would also need a CLOUDFLARE_API_TOKEN secret that
+# this repository does not have, so the job could only ever fail.
+#
+# The tradeoff, worth knowing: Cloudflare deploys on push without waiting for the
+# suites above, so a red build can still reach the site. Moving the deploy back here
+# behind `needs: [checks, browser]` is the fix if that becomes a problem, and it
+# needs the API token plus turning the Workers Builds integration off.

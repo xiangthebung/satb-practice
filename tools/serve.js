@@ -15,7 +15,12 @@ import { stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
+/**
+ * The site, and only the site. `public/` is what Cloudflare publishes, so serving
+ * anything above it locally would mean the dev server and the deployed site
+ * disagree about what exists — which is how a page that works locally ships broken.
+ */
+const ROOT = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const PORT = Number(process.argv[2] || process.env.PORT || 8000);
 
 const CONTENT_TYPES = {

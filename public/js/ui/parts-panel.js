@@ -445,7 +445,12 @@ export class PartsPanel {
 
   setOthersLevel(level) {
     const value = Math.max(0, Math.min(100, Math.round(level)));
-    if (this.othersInput) this.othersInput.value = String(value);
+    if (this.othersInput) {
+      this.othersInput.value = String(value);
+      // The filled length of the track is drawn from this, as it is for the
+      // per-part volumes above it.
+      this.othersInput.style.setProperty('--fill', `${value}%`);
+    }
     if (this.othersOutput) this.othersOutput.textContent = `${value}%`;
   }
 

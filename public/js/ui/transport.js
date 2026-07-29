@@ -228,6 +228,15 @@ export class Transport {
     const value = Math.round(Number(bpm) || 0);
     if (this.tempoValue) this.tempoValue.textContent = `${value} BPM`;
     this.tempoInput?.setAttribute('aria-valuetext', `${value} beats per minute`);
+    if (!this.tempoInput) return;
+    // The slider's filled length is drawn by the stylesheet, so it has to be
+    // told how far along the range the tempo sits.
+    const min = Number(this.tempoInput.min);
+    const max = Number(this.tempoInput.max);
+    const span = max - min;
+    const progress = span > 0 ? (value - min) / span : 0;
+    const percent = Math.max(0, Math.min(1, progress)) * 100;
+    this.tempoInput.style.setProperty('--fill', `${percent.toFixed(2)}%`);
   }
 
   setLoop(active) {
