@@ -48,18 +48,26 @@ python3 -m http.server 8000 --directory public
 The site is a Cloudflare Worker with static assets, configured in
 `wrangler.jsonc`. There is no build step: `public/` is published as it stands.
 
-Pushing to `main` deploys it. The `deploy` job in `.github/workflows/ci.yml` runs
-after the unit and browser suites and is skipped unless both pass, so the live site
-cannot move ahead of a green build. It needs one repository secret:
+Deploys happen through Cloudflare's **Workers Builds** GitHub app, which is already
+connected to this repository. It builds every push by itself and needs no secret
+here — there is deliberately no `wrangler deploy` job in the CI workflow, because it
+would only duplicate or race that.
 
-| Secret | Required | What it is |
-| --- | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | yes | An API token with the **Edit Cloudflare Workers** template |
-| `CLOUDFLARE_ACCOUNT_ID` | only if the token can see more than one account | The account to deploy into |
+Which push reaches the live site depends on the **production branch** set in the
+Cloudflare dashboard, under Workers → satb-practice → Settings → Builds. Only the
+production branch publishes to `satb-practice.xiangli3625.workers.dev`; every other
+branch gets a preview build. Keep that setting and this repository's default branch
+pointing at the same branch, or the site quietly stops tracking the code — that is
+exactly how the deployed site came to be sixteen commits behind.
 
-Add them under Settings → Secrets and variables → Actions.
+Cloudflare deploys on push without waiting for the suites above, so a red build can
+still reach the site. Gating it means moving the deploy into
+`.github/workflows/ci.yml` behind `needs: [checks, browser]`, adding a
+`CLOUDFLARE_API_TOKEN` repository secret (**Edit Cloudflare Workers** token
+template, plus `CLOUDFLARE_ACCOUNT_ID` if it can see more than one account), and
+turning the Workers Builds integration off so the two do not both fire.
 
-To deploy by hand instead:
+To deploy by hand:
 
 ```sh
 npx wrangler login     # once, opens a browser
