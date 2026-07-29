@@ -5,8 +5,14 @@
   "observability": {
     "enabled": true
   },
+  // Only the site. This used to be "." with a `.assetsignore` denylist keeping the
+  // repository out of the deploy, which was the wrong shape twice over: every new
+  // file was a deploy candidate until somebody remembered to exclude it, and
+  // `wrangler dev` watched the whole tree — including its own `.wrangler` state —
+  // so it sat in an infinite reload loop and never served anything. Wrangler was
+  // walking 5,134 files to publish 26.
   "assets": {
-    "directory": "."
+    "directory": "./public"
   },
   "compatibility_flags": [
     "nodejs_compat"

@@ -16,7 +16,7 @@ import {
   getPartColor,
   pitchToMidi,
   pitchToFrequency
-} from '../js/utils.js';
+} from '../public/js/utils.js';
 
 import {
   parseCssColor,
@@ -25,7 +25,7 @@ import {
   ensureContrast,
   mixColors,
   relativeLuminance
-} from '../js/theme.js';
+} from '../public/js/theme.js';
 
 import {
   DEFAULT_OTHERS_LEVEL,
@@ -34,13 +34,13 @@ import {
   getMixVolumes,
   getPresetVolume,
   isMixPreset
-} from '../js/mix.js';
+} from '../public/js/mix.js';
 
 import {
   analysePitchYin,
   classifyAccuracy,
   PitchDetector
-} from '../js/pitch-detector.js';
+} from '../public/js/pitch-detector.js';
 
 import {
   AudioEngine,
@@ -52,7 +52,7 @@ import {
   dynamicLevel,
   playbackBeatToScoreBeat,
   scoreBeatToPlaybackBeat
-} from '../js/audio-engine.js';
+} from '../public/js/audio-engine.js';
 
 import {
   CLICK_PATTERNS,
@@ -60,14 +60,14 @@ import {
   beatIntervalSeconds,
   clickGridStep,
   isClickPattern
-} from '../js/metronome.js';
+} from '../public/js/metronome.js';
 
 import {
   SETTINGS_DEFAULTS,
   describeCountIn,
   describeTranspose,
   describeTuning
-} from '../js/ui/settings.js';
+} from '../public/js/ui/settings.js';
 
 import {
   buildHorizontalScoreLayout,
@@ -85,7 +85,7 @@ import {
   getStaffPositionForClef,
   isScoreElementVisible,
   NotationRenderer
-} from '../js/notation-renderer.js';
+} from '../public/js/notation-renderer.js';
 
 import {
   layoutMeasure,
@@ -96,7 +96,7 @@ import {
   expandCompoundVoiceNames,
   buildPartNameUpdates,
   detectPianoPart
-} from '../js/musicxml-parser.js';
+} from '../public/js/musicxml-parser.js';
 
 import {
   DEFAULT_VELOCITY,
@@ -109,15 +109,15 @@ import {
   stepLevel,
   velocityAt,
   velocityFromSoundDynamics
-} from '../js/dynamics.js';
+} from '../public/js/dynamics.js';
 
 import {
   buildRepeatPlan,
   groupIntoRuns,
   isStraightThrough
-} from '../js/repeats.js';
+} from '../public/js/repeats.js';
 
-import { PlaybackTimeline, buildPlaybackTimeline } from '../js/playback-timeline.js';
+import { PlaybackTimeline, buildPlaybackTimeline } from '../public/js/playback-timeline.js';
 
 import {
   beatToSeconds,
@@ -127,17 +127,17 @@ import {
   secondsToBeat,
   tempoAtBeat,
   tempoScale
-} from '../js/tempo-map.js';
+} from '../public/js/tempo-map.js';
 
 import {
   accidentalWidth,
   clefGlyphWidth,
   staffLineOffset,
   timeSignatureWidth
-} from '../js/glyphs.js';
+} from '../public/js/glyphs.js';
 
-import { describePosition, formatTime } from '../js/ui/transport.js';
-import { getExportBaseName } from '../js/exporters.js';
+import { describePosition, formatTime } from '../public/js/ui/transport.js';
+import { getExportBaseName } from '../public/js/exporters.js';
 
 let passed = 0;
 let failed = 0;

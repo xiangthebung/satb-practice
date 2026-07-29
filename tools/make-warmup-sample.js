@@ -247,6 +247,7 @@ ${renderPart({
 // with a space in its name, and `pathname` hands back `bing%20bong`.
 const target = join(
   fileURLToPath(new URL('..', import.meta.url)),
+  'public',
   'sample-pieces',
   'Warm-up in four parts.musicxml',
 );

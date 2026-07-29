@@ -11,11 +11,11 @@ export default [
       'node_modules/**',
       'test-results/**',
       'playwright-report/**',
-      'sample-pieces/**'
+      'public/sample-pieces/**'
     ]
   },
   {
-    files: ['js/**/*.js'],
+    files: ['public/js/**/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',

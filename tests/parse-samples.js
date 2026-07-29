@@ -15,17 +15,17 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DOMParser } from 'linkedom';
 
-import { parseMusicXML } from '../js/musicxml-parser.js';
+import { parseMusicXML } from '../public/js/musicxml-parser.js';
 import {
   DEFAULT_VELOCITY,
   buildDynamicsTimeline,
   collectPartDynamics,
   velocityAt
-} from '../js/dynamics.js';
-import { compileTempoMap, beatToSeconds } from '../js/tempo-map.js';
+} from '../public/js/dynamics.js';
+import { compileTempoMap, beatToSeconds } from '../public/js/tempo-map.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const SAMPLES = join(ROOT, 'sample-pieces');
+const SAMPLES = join(ROOT, 'public', 'sample-pieces');
 
 let passed = 0;
 let failed = 0;

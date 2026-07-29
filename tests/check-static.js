@@ -16,6 +16,13 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
+/**
+ * The published site. Separate from ROOT because this file checks two different
+ * things: the markup and scripts that ship (under `public/`), and the test sources
+ * that do not. Paths in failure messages stay relative to ROOT so they read the way
+ * you would type them.
+ */
+const SITE = join(ROOT, 'public');
 const failures = [];
 const notes = [];
 
@@ -47,8 +54,8 @@ function stripNonCode(source) {
     .replace(/"(?:\\.|[^"\\\n])*"/g, '""');
 }
 
-const appScripts = collectScripts(join(ROOT, 'js'));
-const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+const appScripts = collectScripts(join(SITE, 'js'));
+const html = readFileSync(join(SITE, 'index.html'), 'utf8');
 
 /* ------------------------------------------------------------ markup ids */
 
@@ -95,13 +102,13 @@ for (const [attribute, pattern] of referenceAttributes) {
 for (const match of html.matchAll(/<(?:script|link)\b[^>]*?(?:src|href)="([^"]+)"/g)) {
   const reference = match[1];
   if (/^(https?:|data:|mailto:|#)/.test(reference)) continue;
-  if (!existsSync(join(ROOT, reference))) {
+  if (!existsSync(join(SITE, reference))) {
     fail(`index.html references a missing asset: ${reference}`);
   }
 }
 
 for (const match of html.matchAll(/data-sample-path="([^"]+)"/g)) {
-  if (!existsSync(join(ROOT, match[1]))) {
+  if (!existsSync(join(SITE, match[1]))) {
     fail(`index.html lists a missing sample score: ${match[1]}`);
   }
 }
