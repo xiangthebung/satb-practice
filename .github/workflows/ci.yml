@@ -39,3 +39,30 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  # Deploying from the same workflow as the checks, rather than from a workflow of
+  # its own, so that `needs` can do the gating. A separate deploy workflow would
+  # either duplicate both suites or race them, and the live site is the one place
+  # where "the tests were probably fine" is not good enough.
+  deploy:
+    name: Deploy to Cloudflare Workers
+    needs: [checks, browser]
+    # Never from a pull request, and never from a branch. `needs` already means this
+    # cannot run unless both suites passed.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # The pinned wrangler from package.json, not a floating one: a deploy that
+      # picks up a new major version on its own is a deploy nobody reviewed.
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Optional. Wrangler infers the account from the token when it belongs to
+          # exactly one; set it as a secret if the token can see several.
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -27,13 +27,49 @@ no accounts, no uploads, no build step.
 
 ## Run locally
 
-Serve the folder with any static web server, then open it in a modern browser.
-A server is required because the sample scores are fetched at runtime.
+The site is `public/`. Serve that directory — not the repository root — with any
+static web server, then open it in a modern browser. A server is required because
+the sample scores are fetched at runtime.
 
 ```sh
-python3 -m http.server 8000
+npm run serve
 # then open http://localhost:8000
 ```
+
+`npm run serve` serves `public/` on port 8000. Anything else that serves a
+directory works too, as long as it is pointed at `public/`:
+
+```sh
+python3 -m http.server 8000 --directory public
+```
+
+## Deploying
+
+The site is a Cloudflare Worker with static assets, configured in
+`wrangler.jsonc`. There is no build step: `public/` is published as it stands.
+
+Pushing to `main` deploys it. The `deploy` job in `.github/workflows/ci.yml` runs
+after the unit and browser suites and is skipped unless both pass, so the live site
+cannot move ahead of a green build. It needs one repository secret:
+
+| Secret | Required | What it is |
+| --- | --- | --- |
+| `CLOUDFLARE_API_TOKEN` | yes | An API token with the **Edit Cloudflare Workers** template |
+| `CLOUDFLARE_ACCOUNT_ID` | only if the token can see more than one account | The account to deploy into |
+
+Add them under Settings → Secrets and variables → Actions.
+
+To deploy by hand instead:
+
+```sh
+npx wrangler login     # once, opens a browser
+npx wrangler deploy
+```
+
+Before either, `npx wrangler deploy --dry-run` prints how many files it is about
+to publish. That number should be the size of `public/` and nothing like it if
+something has gone wrong — it read 5,134 files when the assets directory was still
+the repository root.
 
 ## Keyboard
 
@@ -53,22 +89,31 @@ in the page and is never recorded, stored, or sent anywhere.
 
 ## Project layout
 
+Everything the browser loads is under `public/`, and everything outside it —
+tests, tooling, configuration — is not published. That split is the deploy
+surface: the Worker's assets directory is `public/`, so a new file can only reach
+the live site by being put there deliberately.
+
 ```
-index.html            markup and static structure
-css/styles.css        design tokens, layout, and component styles
-js/app.js             session state and coordination
-js/ui/                parts panel, transport, overlays
-js/musicxml-parser.js MusicXML and .mxl reading
-js/notation-renderer.js  canvas notation and playback cursor
-js/audio-engine.js    scheduling and synthesis, live and offline
-js/timbre.js          voice profiles, vowel formants, glottal source maths
-js/pitch-detector.js  microphone pitch estimation (YIN)
-js/metronome.js       click scheduling
-js/mix.js             rehearsal mix presets
-js/theme.js           canvas palette derived from the CSS tokens
-js/prefs.js           saved preferences
-js/exporters.js       WAV and MusicXML export
-tests/run-tests.js    unit tests for the pure logic
+public/index.html            markup and static structure
+public/css/styles.css        design tokens, layout, and component styles
+public/js/app.js             session state and coordination
+public/js/ui/                parts panel, transport, overlays, settings
+public/js/musicxml-parser.js MusicXML and .mxl reading
+public/js/notation-renderer.js  canvas notation and playback cursor
+public/js/audio-engine.js    scheduling and synthesis, live and offline
+public/js/timbre.js          voice profiles, vowel formants, glottal source maths
+public/js/pitch-detector.js  microphone pitch estimation (YIN)
+public/js/metronome.js       click scheduling
+public/js/mix.js             rehearsal mix presets
+public/js/theme.js           canvas palette derived from the CSS tokens
+public/js/prefs.js           saved preferences
+public/js/exporters.js       WAV and MusicXML export
+public/sample-pieces/        the bundled scores
+tests/run-tests.js           unit tests for the pure logic
+e2e/practice.spec.js         browser tests
+tools/serve.js               the local static server
+wrangler.jsonc               Cloudflare Worker and assets configuration
 ```
 
 ## Tests
