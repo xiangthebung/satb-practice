@@ -436,8 +436,9 @@ test.describe('the score view', () => {
     // Two voices on one staff routinely carry forced down stems. Opened out onto
     // a staff each, those stems hang three spaces under every notehead, and the
     // words used to be drawn straight through them. This is the score that shows
-    // it, so it is the one measured here.
-    await openSample(page, 'Smávinir');
+    // it, so it is the one measured here — the warm-up is generated with exactly
+    // that shape (see tools/make-warmup-sample.js) for this test's benefit.
+    await openSample(page, 'Warm-up');
 
     /**
      * Measure each part's lyric band off the painted canvas.

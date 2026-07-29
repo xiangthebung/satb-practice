@@ -4,7 +4,7 @@
  * and user pitch overlay with accuracy feedback.
  */
 
-import { getPartColor, pitchToMidi } from './utils.js';
+import { STANDARD_TUNING_HZ, getPartColor, pitchToMidi } from './utils.js';
 import { ensureContrast, readScoreTheme } from './theme.js';
 import {
   accidentalWidth,
@@ -269,15 +269,26 @@ function fitText(ctx, text, maxWidth) {
   return `${clipped}…`;
 }
 
+/** Sharp spellings, the same set the detector reports. */
+const CHROMATIC_SPELLINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
 /**
  * Convert detector output into a fractional MIDI value without losing cents.
+ *
+ * The tuning reference is a parameter because the guidance has to measure
+ * against the pitch the ensemble is actually singing at. Judging a choir at 442
+ * against 440 reports everyone eight cents sharp for the whole rehearsal.
+ *
  * @param {object} pitchData
+ * @param {number} [referenceHz] frequency of A4
  * @returns {number|null}
  */
-function getDetectedMidi(pitchData) {
+function getDetectedMidi(pitchData, referenceHz = STANDARD_TUNING_HZ) {
+  const reference = Number(referenceHz);
+  const anchor = Number.isFinite(reference) && reference > 0 ? reference : STANDARD_TUNING_HZ;
   const frequency = Number(pitchData?.frequency);
   if (frequency > 0) {
-    return 69 + 12 * Math.log2(frequency / 440);
+    return 69 + 12 * Math.log2(frequency / anchor);
   }
 
   const midi = Number(pitchData?.midi);
@@ -285,6 +296,22 @@ function getDetectedMidi(pitchData) {
     return midi + (Number(pitchData?.cents) || 0) / 100;
   }
   return null;
+}
+
+/**
+ * Name a MIDI number the way the detector would, so a reading with no written
+ * note beside it still lands on the right line or space.
+ * @param {number} midi
+ * @returns {{ step: string, octave: number }|null}
+ */
+function spellMidi(midi) {
+  if (!Number.isFinite(midi)) return null;
+  const rounded = Math.round(midi);
+  const index = ((rounded % 12) + 12) % 12;
+  return {
+    step: CHROMATIC_SPELLINGS[index].charAt(0),
+    octave: Math.floor(rounded / 12) - 1
+  };
 }
 
 /**
@@ -820,6 +847,12 @@ export class NotationRenderer {
     this.selectedPartId = null;
     this.isAutoScrollEnabled = true;
     this.focusSelectedPart = false;
+    // What the singer is singing along with, as opposed to what is printed.
+    // A microphone hears absolute pitch, so rehearsing a tone lower or tuning
+    // to 442 has to be taken back out of the reading before it is compared with
+    // the note on the page.
+    this.pitchTuningHz = STANDARD_TUNING_HZ;
+    this.pitchTransposeSemitones = 0;
     // Pitch feedback runs roughly 30 times per second while the microphone is
     // active. Keep a compact, score-time index so feedback does not have to
     // walk every measure and note for every analysis frame.
@@ -1471,6 +1504,51 @@ export class NotationRenderer {
   }
 
   /**
+   * Tell the overlay what the playback is sounding at.
+   *
+   * The score is drawn as printed, so a rehearsal transposition is undone on
+   * the way in rather than applied on the way out: the reading is moved back
+   * into written pitch and then compared with the written note. A singer
+   * following a playback pitched a tone lower is in tune with the rehearsal,
+   * and the guidance now agrees with them.
+   *
+   * @param {{ tuningHz?: number, transposeSemitones?: number }} reference
+   */
+  setPitchReference(reference = {}) {
+    const tuning = Number(reference.tuningHz);
+    const transpose = Number(reference.transposeSemitones);
+    const nextTuning = Number.isFinite(tuning) && tuning > 0 ? tuning : this.pitchTuningHz;
+    const nextTranspose = Number.isFinite(transpose)
+      ? Math.round(transpose)
+      : this.pitchTransposeSemitones;
+    if (nextTuning === this.pitchTuningHz && nextTranspose === this.pitchTransposeSemitones) {
+      return;
+    }
+
+    this.pitchTuningHz = nextTuning;
+    this.pitchTransposeSemitones = nextTranspose;
+    // Everything already drawn was judged against the old reference, so it
+    // would be read as history the singer never sang.
+    this.clearUserPitchTrail();
+    this.currentPitchSample = null;
+    this.requestRender();
+  }
+
+  /**
+   * Semitones between what the microphone hears and what the page shows, for
+   * the part the singer has chosen. The score's own transposition counts here
+   * as well as the rehearsal one: a transposing part writes one pitch and
+   * sounds another, and the singer is heard sounding.
+   *
+   * @param {object|null} part
+   * @returns {number}
+   */
+  getSoundingShift(part) {
+    const partShift = Number(part?.transpose?.semitones) || 0;
+    return this.pitchTransposeSemitones + partShift;
+  }
+
+  /**
    * Remove all saved marker positions.
    */
   clearUserPitchTrail() {
@@ -1568,7 +1646,12 @@ export class NotationRenderer {
     const selected = this.getSelectedPartContext();
     if (!selected || !pitchData?.noteName) return null;
 
-    const detectedMidi = getDetectedMidi(pitchData);
+    // The reading arrives as absolute pitch. Moving it into written pitch here
+    // means the target lookup, the staff position and the cents feedback below
+    // all keep working in the one coordinate system the page is drawn in.
+    const soundingMidi = getDetectedMidi(pitchData, this.pitchTuningHz);
+    const shift = this.getSoundingShift(selected.part);
+    const detectedMidi = Number.isFinite(soundingMidi) ? soundingMidi - shift : null;
     const target = this.findTargetNote(
       selected.part,
       beat,
@@ -1583,8 +1666,11 @@ export class NotationRenderer {
     const clef = normalizeClef(target?.note.clef) ||
       this.findClefAtBeat(selected.part, beat, partClef);
 
-    let step = String(pitchData.noteName).charAt(0).toUpperCase();
-    let octave = Number(pitchData.octave);
+    const heard = spellMidi(detectedMidi);
+    let step = heard
+      ? heard.step
+      : String(pitchData.noteName).charAt(0).toUpperCase();
+    let octave = heard ? heard.octave : Number(pitchData.octave);
     let centsFromTarget = null;
     let isRightNote = false;
 

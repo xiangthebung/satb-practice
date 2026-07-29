@@ -66,6 +66,20 @@
   --pitch-close: #b26a00;
   --pitch-off: #c9251c;
 
+  /* The light on the home screen: a cool wash, a warm one, and the ruled
+     staves underneath them. Kept as finished colours rather than hues plus a
+     strength, because the two appearances want different amounts of each. */
+  --wash-cool: rgba(0, 113, 227, 0.13);
+  --wash-warm: rgba(255, 149, 92, 0.12);
+  --wash-deep: rgba(124, 58, 237, 0.10);
+  --wash-lift: rgba(255, 255, 255, 0.6);
+  --wash-staff: rgba(0, 0, 0, 0.055);
+
+  /* Card accents, so a shelf of scores is not three of the same blue tile. */
+  --tint-a: #0071e3;
+  --tint-b: #7c3aed;
+  --tint-c: #c2410c;
+
   --transition: 180ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
@@ -110,6 +124,17 @@
     --pitch-correct: #30d158;
     --pitch-close: #ffd60a;
     --pitch-off: #ff6961;
+
+    /* Against black the wash has to be stronger to read as light at all. */
+    --wash-cool: rgba(10, 132, 255, 0.32);
+    --wash-warm: rgba(255, 138, 76, 0.18);
+    --wash-deep: rgba(126, 78, 255, 0.30);
+    --wash-lift: rgba(255, 255, 255, 0.07);
+    --wash-staff: rgba(255, 255, 255, 0.075);
+
+    --tint-a: #4a9eff;
+    --tint-b: #a78bfa;
+    --tint-c: #fb923c;
   }
 }
 
@@ -438,10 +463,73 @@ input[type="checkbox"] {
   flex-direction: column;
 }
 
+/* The home screen is the first impression, and a flat sheet of background
+   colour is a poor one. Two layers sit behind the content: washes of stage
+   light, and ruled staves drifting slowly upward like a score going past. Both
+   are decoration, so they are painted by pseudo-elements, take no pointer
+   events, and are gone the moment the practice screen replaces this one. */
 .home {
+  position: relative;
+  isolation: isolate;
   flex: 1;
   overflow-y: auto;
   padding: var(--space-6) var(--space-5) var(--space-7);
+}
+
+.home::before,
+.home::after {
+  content: "";
+  /* Fixed rather than absolute: the light stays where it is while the page
+     scrolls, which is what keeps it feeling like light on a room. */
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.home::before {
+  inset: 0;
+  background:
+    radial-gradient(46% 34% at 50% 4%, var(--wash-lift), transparent 70%),
+    radial-gradient(72% 58% at 4% -12%, var(--wash-cool), transparent 74%),
+    radial-gradient(64% 52% at 104% -2%, var(--wash-warm), transparent 74%),
+    radial-gradient(58% 46% at 98% 76%, var(--wash-cool), transparent 74%),
+    radial-gradient(100% 78% at 46% 118%, var(--wash-deep), transparent 76%);
+}
+
+/* Five lines, a gap, five lines: the page is ruled like manuscript paper. The
+   layer is taller than the frame so it can drift one whole stave and loop. */
+.home::after {
+  inset: -170px 0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 40px,
+    var(--wash-staff) 40px 41px,
+    transparent 41px 55px,
+    var(--wash-staff) 55px 56px,
+    transparent 56px 70px,
+    var(--wash-staff) 70px 71px,
+    transparent 71px 85px,
+    var(--wash-staff) 85px 86px,
+    transparent 86px 100px,
+    var(--wash-staff) 100px 101px,
+    transparent 101px 160px
+  );
+  /* Fade the ruling out towards the edges so it reads as texture rather than
+     as a grid drawn over the page. */
+  mask-image: radial-gradient(115% 95% at 50% 42%, #000 25%, transparent 80%);
+  -webkit-mask-image: radial-gradient(115% 95% at 50% 42%, #000 25%, transparent 80%);
+}
+
+/* One stave per 90 seconds: enough to feel alive, slow enough to read over. */
+@media (prefers-reduced-motion: no-preference) {
+  .home::after {
+    animation: staves-drift 90s linear infinite;
+  }
+}
+
+@keyframes staves-drift {
+  from { transform: translateY(0); }
+  to { transform: translateY(-160px); }
 }
 
 .home-inner {
@@ -523,6 +611,8 @@ input[type="checkbox"] {
   gap: var(--space-4);
 }
 
+/* Slightly translucent, so the light behind them shows through and the shelf
+   belongs to the page instead of being pasted on top of it. */
 .sample {
   display: flex;
   flex-direction: column;
@@ -531,14 +621,18 @@ input[type="checkbox"] {
   padding: var(--space-4);
   border: 1px solid var(--separator);
   border-radius: var(--radius-lg);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   box-shadow: var(--shadow-sm);
   text-align: left;
-  transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+  transition: transform var(--transition), box-shadow var(--transition),
+    border-color var(--transition), background var(--transition);
 }
 
 .sample:hover {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--separator));
+  background: var(--surface);
   box-shadow: var(--shadow-md);
   transform: translateY(-2px);
 }
@@ -561,11 +655,23 @@ input[type="checkbox"] {
   height: 40px;
   margin-bottom: var(--space-2);
   border-radius: var(--radius-md);
-  background: var(--accent-soft);
+  /* The tile takes its wash from its own colour, so one rule covers both
+     appearances and every accent below. */
+  background: color-mix(in srgb, currentColor 15%, transparent);
   color: var(--accent);
   font-family: Georgia, 'Times New Roman', serif;
   font-size: 22px;
   line-height: 1;
+  transition: transform var(--transition);
+}
+
+/* A shelf of scores reads better with a little variety in it. */
+.sample:nth-child(3n + 1) .sample-art { color: var(--tint-a); }
+.sample:nth-child(3n + 2) .sample-art { color: var(--tint-b); }
+.sample:nth-child(3n) .sample-art { color: var(--tint-c); }
+
+.sample:hover .sample-art {
+  transform: scale(1.06) rotate(-3deg);
 }
 
 .sample-title {
@@ -608,7 +714,9 @@ input[type="checkbox"] {
   padding: var(--space-5) var(--space-4);
   border: 1.5px dashed var(--separator-strong);
   border-radius: var(--radius-lg);
-  background: transparent;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   color: var(--text);
   text-align: center;
   transition: background var(--transition), border-color var(--transition);
@@ -617,7 +725,16 @@ input[type="checkbox"] {
 .dropzone:hover,
 .dropzone.is-drag-over {
   border-color: var(--accent);
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.dropzone-icon {
+  transition: transform var(--transition);
+}
+
+.dropzone:hover .dropzone-icon,
+.dropzone.is-drag-over .dropzone-icon {
+  transform: translateY(-2px);
 }
 
 .dropzone[aria-disabled="true"] {
@@ -1062,6 +1179,86 @@ input[type="checkbox"] {
   transform: translateX(18px);
 }
 
+/* --- Sliders ----------------------------------------------------------- */
+
+/* Sliders are drawn here rather than left to the browser's accent colour, so
+   the track, the fill and the thumb look the same in every browser and the same
+   in every part of the app. The filled length comes from a custom property the
+   owning module keeps in step with the value.
+   Every dimension is fixed, so nothing resizes as a value changes. */
+.slider {
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  border-radius: var(--radius-pill);
+  background:
+    linear-gradient(
+      to right,
+      var(--accent) var(--fill, 50%),
+      var(--separator-strong) var(--fill, 50%)
+    ) center / 100% 4px no-repeat;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 22px;
+  background: transparent;
+}
+
+.slider::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: #fff;
+  box-shadow: var(--shadow-sm), 0 0 0 1px var(--separator-strong);
+  appearance: none;
+  -webkit-appearance: none;
+  transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.slider:hover::-webkit-slider-thumb,
+.slider:active::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+/* The focus ring belongs on the thumb. Around the whole control it was a box
+   the width of the dialog, which read as an error state. */
+.slider:focus-visible {
+  outline: none;
+}
+
+.slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px var(--accent-ring);
+}
+
+.slider::-moz-range-track {
+  height: 22px;
+  border: 0;
+  background: transparent;
+}
+
+.slider::-moz-range-progress {
+  background: transparent;
+}
+
+.slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: #fff;
+  box-shadow: var(--shadow-sm), 0 0 0 1px var(--separator-strong);
+}
+
+.slider:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px var(--accent-ring);
+}
+
 /* =========================================================================
    Stage and score
    ========================================================================= */
@@ -1164,11 +1361,14 @@ input[type="checkbox"] {
 .pitch-pill[data-state="close"] { --pitch-color: var(--pitch-close); }
 .pitch-pill[data-state="off"] { --pitch-color: var(--pitch-off); }
 
+/* Wide enough for the longest guidance ("Sing higher"), so the pill keeps one
+   size and one position while the advice changes inside it. */
 .pitch-label {
-  min-width: 4.6em;
+  min-width: 6.6em;
   color: var(--pitch-color);
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
   transition: color var(--transition);
 }
 
@@ -1319,7 +1519,10 @@ input[type="checkbox"] {
   gap: 2px;
 }
 
+/* Both readouts hold their own width. Otherwise the tempo slider slid sideways
+   as 9 BPM became 10, and again when a piece passed ten minutes. */
 .time {
+  min-width: 7.4em;
   color: var(--text-muted);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
@@ -1333,12 +1536,14 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+/* The width is the only thing the transport decides; the look is shared with
+   every other slider in the app. */
 .tempo-range {
   width: clamp(70px, 12vw, 130px);
-  height: 20px;
 }
 
 .tempo-value {
+  min-width: 4.9em;
   color: var(--text-secondary);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
@@ -1651,6 +1856,9 @@ input[type="checkbox"] {
   box-shadow: var(--shadow-lg);
   color: inherit;
   overflow: auto;
+  /* Reserve the scrollbar so a dialog that grows past the viewport does not
+     narrow its own contents, moving every control sideways as it appears. */
+  scrollbar-gutter: stable;
 }
 
 .modal::backdrop {
@@ -1742,57 +1950,123 @@ input[type="checkbox"] {
 
 /* --- Settings ---------------------------------------------------------- */
 
+/* A sheet is a dialog long enough to scroll: its title, and its actions if it
+   has any, stay in place while the content moves under them. */
+.modal-sheet {
+  padding: 0;
+}
+
+.modal-sheet .modal-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0;
+  padding: var(--space-5) var(--space-5) var(--space-3);
+  border-bottom: 1px solid var(--separator);
+  background: var(--surface);
+}
+
+.modal-sheet .modal-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 0;
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  border-top: 1px solid var(--separator);
+  background: var(--surface);
+}
+
+.modal-settings {
+  width: min(680px, calc(100vw - 2 * var(--space-4)));
+}
+
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-5) var(--space-6);
+  grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
+  align-items: start;
+  gap: var(--space-5);
+  padding: var(--space-5);
 }
 
 .settings-group {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .settings-heading {
+  padding-left: 2px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* One card per group, with hairlines between its settings. Grouping is what
+   turns a long column of controls into four short, readable lists. */
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+}
+
+.settings-card > * {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--separator);
+}
+
+.settings-card > *:first-child {
+  border-top: 0;
 }
 
 .settings-label {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 13.5px;
 }
 
+/* The readout sits above the track rather than beside it.
+   A value beside the slider makes the track as wide as the text is short, so
+   "As written" and "2 semitones down" gave the transpose slider two different
+   lengths: the thumb moved out from under the finger mid-drag and the next
+   step of the drag landed somewhere else. Stacked, the track is always the
+   full width of the column and the text can say whatever it likes. */
 .settings-row {
   display: grid;
-  grid-template-columns: minmax(72px, auto) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
 }
 
-.settings-row input[type="range"] {
-  width: 100%;
+.settings-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  /* Holds the line open for rows whose readout is empty, so a row never
+     changes height when its value appears or clears. */
+  min-height: 16px;
 }
 
-.settings-row output {
-  min-width: 5.5em;
-  color: var(--text-muted);
+.settings-row .settings-value {
+  color: var(--text);
   font-size: 12.5px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: right;
+  white-space: nowrap;
 }
 
-/* A hint explains a setting whose effect is not obvious from its name. */
+/* A hint explains a setting whose effect is not obvious from its name. It sits
+   inside the setting it belongs to, so there is never a question of which
+   control it is talking about. */
 .settings-hint {
-  margin-top: -4px;
   color: var(--text-muted);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .settings-group .segmented-field {
@@ -1801,41 +2075,92 @@ input[type="checkbox"] {
   gap: var(--space-2);
 }
 
-.settings-group .switch-row {
-  padding: 0;
+/* Inside a card the group is the raised surface, so the segments sit on the
+   card colour and the chosen one is tinted rather than lifted. */
+.settings-card .segmented {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--separator);
+}
+
+.settings-card .segment {
+  padding: 5px 10px;
+  border-radius: 7px;
+  text-align: center;
+}
+
+.settings-card .segment:has(input:checked) {
+  background: var(--accent-soft);
+  box-shadow: none;
+  color: var(--accent);
 }
 
 .select {
-  min-height: 32px;
-  padding: 0 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 32px 0 10px;
   border: 1px solid var(--separator-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background-color: var(--surface);
+  /* A drawn chevron, because the platform one cannot be positioned and looks
+     different on every browser. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8a8f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 15px 15px;
   color: var(--text);
-  font-size: 13px;
+  font-size: 13.5px;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  transition: border-color var(--transition), background-color var(--transition);
 }
 
+.select:hover {
+  border-color: var(--accent);
+}
+
+/* Help is laid out like settings: a small heading, then one card of related
+   lines, so both sheets are read the same way. */
 .help-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: start;
   gap: var(--space-5);
+  padding: var(--space-5);
 }
 
 .help-grid h3 {
   margin-bottom: var(--space-2);
-  font-size: 13px;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  padding-left: 2px;
   color: var(--text-muted);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .help-list {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
   list-style: none;
   color: var(--text-secondary);
   font-size: 13.5px;
+}
+
+.help-list li {
+  padding: 9px 0;
+}
+
+.help-list li + li {
+  border-top: 1px solid var(--separator);
 }
 
 .help-list.keys li {
@@ -1845,7 +2170,7 @@ input[type="checkbox"] {
 }
 
 .modal-footnote {
-  margin-top: var(--space-5);
+  margin: 0 var(--space-5) var(--space-5);
   padding-top: var(--space-4);
   border-top: 1px solid var(--separator);
   color: var(--text-muted);

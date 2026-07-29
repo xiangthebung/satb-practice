@@ -88,10 +88,10 @@
               <span class="sample-composer">John Wilbye</span>
               <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
-            <button class="sample" type="button" data-sample-path="sample-pieces/Smavinir fagrir.musicxml">
+            <button class="sample" type="button" data-sample-path="sample-pieces/Warm-up in four parts.musicxml">
               <span class="sample-art" aria-hidden="true">♭</span>
-              <span class="sample-title">Smávinir fagrir</span>
-              <span class="sample-composer">Jóhannes Björnsson</span>
+              <span class="sample-title">Warm-up in four parts</span>
+              <span class="sample-composer">Eight bars, no words to learn</span>
               <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
             <button class="sample" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">
@@ -154,7 +154,7 @@
             <div id="mix-options" class="mix-options"></div>
             <div id="others-level-row" class="others-level" hidden>
               <label for="others-level">Other parts</label>
-              <input id="others-level" type="range" min="0" max="100" step="5" value="35">
+              <input id="others-level" class="slider" type="range" min="0" max="100" step="5" value="35">
               <output id="others-level-value" for="others-level">35%</output>
             </div>
           </fieldset>
@@ -207,7 +207,7 @@
         <span id="time-display" class="time" aria-hidden="true">0:00 / 0:00</span>
         <div class="tempo">
           <label class="visually-hidden" for="tempo">Tempo in beats per minute</label>
-          <input id="tempo" class="tempo-range" type="range" min="40" max="240" step="1" value="120">
+          <input id="tempo" class="tempo-range slider" type="range" min="40" max="240" step="1" value="120">
           <output id="tempo-value" class="tempo-value" for="tempo">120 BPM</output>
         </div>
       </div>
@@ -339,8 +339,8 @@
   </dialog>
 
   <!-- Settings -->
-  <dialog id="settings-dialog" class="modal" aria-labelledby="settings-dialog-title">
-    <div class="modal-card modal-card-wide">
+  <dialog id="settings-dialog" class="modal modal-settings" aria-labelledby="settings-dialog-title">
+    <div class="modal-card modal-card-wide modal-sheet">
       <div class="modal-head">
         <h2 id="settings-dialog-title">Settings</h2>
         <button id="settings-close" class="icon-btn" type="button" aria-label="Close settings">
@@ -354,119 +354,149 @@
         <section class="settings-group">
           <h3 class="settings-heading">Sound</h3>
 
-          <fieldset class="segmented-field">
-            <legend class="settings-label">Voices or tones</legend>
-            <div class="segmented">
-              <label class="segment">
-                <input type="radio" name="synth-mode" value="vocal" checked>
-                <span>Voices</span>
-              </label>
-              <label class="segment">
-                <input type="radio" name="synth-mode" value="oscillator">
-                <span>Tones</span>
-              </label>
+          <div class="settings-card">
+            <fieldset class="segmented-field">
+              <legend class="settings-label">Voices or tones</legend>
+              <div class="segmented">
+                <label class="segment">
+                  <input type="radio" name="synth-mode" value="vocal" checked>
+                  <span>Voices</span>
+                </label>
+                <label class="segment">
+                  <input type="radio" name="synth-mode" value="oscillator">
+                  <span>Tones</span>
+                </label>
+              </div>
+              <p class="settings-hint">Tones are steadier for checking an interval.</p>
+            </fieldset>
+
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="master-volume">Volume</label>
+                <output id="master-volume-value" class="settings-value" for="master-volume">100%</output>
+              </div>
+              <input id="master-volume" class="slider" type="range" min="0" max="100" step="1" value="100">
             </div>
-            <p class="settings-hint">Tones are steadier for checking an interval.</p>
-          </fieldset>
 
-          <div class="settings-row">
-            <label class="settings-label" for="master-volume">Volume</label>
-            <input id="master-volume" type="range" min="0" max="100" step="1" value="100">
-            <output id="master-volume-value" for="master-volume">100%</output>
-          </div>
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="room">Room</label>
+                <output id="room-value" class="settings-value" for="room">34%</output>
+              </div>
+              <input id="room" class="slider" type="range" min="0" max="100" step="1" value="34">
+            </div>
 
-          <div class="settings-row">
-            <label class="settings-label" for="room">Room</label>
-            <input id="room" type="range" min="0" max="100" step="1" value="34">
-            <output id="room-value" for="room">34%</output>
-          </div>
-
-          <div class="settings-row">
-            <label class="settings-label" for="tuning">Tuning</label>
-            <input id="tuning" type="range" min="415" max="450" step="1" value="440">
-            <output id="tuning-value" for="tuning">A = 440 Hz</output>
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="tuning">Tuning</label>
+                <output id="tuning-value" class="settings-value" for="tuning">A = 440 Hz</output>
+              </div>
+              <input id="tuning" class="slider" type="range" min="415" max="450" step="1" value="440">
+            </div>
           </div>
         </section>
 
         <section class="settings-group">
           <h3 class="settings-heading">Playback</h3>
 
-          <div class="settings-row">
-            <label class="settings-label" for="transpose">Transpose</label>
-            <input id="transpose" type="range" min="-12" max="12" step="1" value="0">
-            <output id="transpose-value" for="transpose">As written</output>
+          <div class="settings-card">
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="transpose">Transpose</label>
+                <output id="transpose-value" class="settings-value" for="transpose">As written</output>
+              </div>
+              <input id="transpose" class="slider" type="range" min="-12" max="12" step="1" value="0">
+              <p class="settings-hint">
+                Moves the sound only: the score stays as printed, and the
+                microphone guidance listens for the transposed pitch.
+              </p>
+            </div>
+
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="fermata">Fermata hold</label>
+                <output id="fermata-value" class="settings-value" for="fermata">2.0×</output>
+              </div>
+              <input id="fermata" class="slider" type="range" min="1" max="4" step="0.1" value="2">
+            </div>
+
+            <label class="switch-row" for="follow-dynamics">
+              <span class="switch-label">
+                Follow written dynamics
+                <span class="switch-hint">Off keeps one steady level while you learn</span>
+              </span>
+              <input type="checkbox" id="follow-dynamics" class="switch" role="switch" checked>
+            </label>
+
+            <label class="switch-row" for="play-repeats">
+              <span class="switch-label">
+                Play repeats
+                <span class="switch-hint">Off reads the page straight through</span>
+              </span>
+              <input type="checkbox" id="play-repeats" class="switch" role="switch" checked>
+            </label>
           </div>
-          <p class="settings-hint">Moves the sound only. The score stays as printed.</p>
-
-          <div class="settings-row">
-            <label class="settings-label" for="fermata">Fermata hold</label>
-            <input id="fermata" type="range" min="1" max="4" step="0.1" value="2">
-            <output id="fermata-value" for="fermata">2.0×</output>
-          </div>
-
-          <label class="switch-row" for="follow-dynamics">
-            <span class="switch-label">
-              Follow written dynamics
-              <span class="switch-hint">Off keeps one steady level while you learn</span>
-            </span>
-            <input type="checkbox" id="follow-dynamics" class="switch" role="switch" checked>
-          </label>
-
-          <label class="switch-row" for="play-repeats">
-            <span class="switch-label">
-              Play repeats
-              <span class="switch-hint">Off reads the page straight through</span>
-            </span>
-            <input type="checkbox" id="play-repeats" class="switch" role="switch" checked>
-          </label>
         </section>
 
         <section class="settings-group">
           <h3 class="settings-heading">Score</h3>
 
-          <label class="switch-row" for="show-lyrics">
-            <span class="switch-label">
-              Show the words
-              <span class="switch-hint">Under each stave, with hyphens and melismas</span>
-            </span>
-            <input type="checkbox" id="show-lyrics" class="switch" role="switch" checked>
-          </label>
+          <div class="settings-card">
+            <label class="switch-row" for="show-lyrics">
+              <span class="switch-label">
+                Show the words
+                <span class="switch-hint">Under each stave, with hyphens and melismas</span>
+              </span>
+              <input type="checkbox" id="show-lyrics" class="switch" role="switch" checked>
+            </label>
 
-          <div class="settings-row" id="verse-row" hidden>
-            <label class="settings-label" for="verse">Verse</label>
-            <select id="verse" class="select"></select>
-            <span></span>
+            <div class="settings-row" id="verse-row" hidden>
+              <div class="settings-row-head">
+                <label class="settings-label" for="verse">Verse</label>
+              </div>
+              <select id="verse" class="select"></select>
+            </div>
+
+            <label class="switch-row" for="show-time-signatures">
+              <span class="switch-label">
+                Show time signatures
+                <span class="switch-hint">And any change partway through</span>
+              </span>
+              <input type="checkbox" id="show-time-signatures" class="switch" role="switch" checked>
+            </label>
           </div>
-
-          <label class="switch-row" for="show-time-signatures">
-            <span class="switch-label">
-              Show time signatures
-              <span class="switch-hint">And any change partway through</span>
-            </span>
-            <input type="checkbox" id="show-time-signatures" class="switch" role="switch" checked>
-          </label>
         </section>
 
         <section class="settings-group">
           <h3 class="settings-heading">Metronome</h3>
 
-          <div class="settings-row">
-            <label class="settings-label" for="click-pattern">Click on</label>
-            <select id="click-pattern" class="select"></select>
-          </div>
+          <div class="settings-card">
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="click-pattern">Click on</label>
+              </div>
+              <select id="click-pattern" class="select"></select>
+            </div>
 
-          <div class="settings-row">
-            <label class="settings-label" for="click-volume">Click level</label>
-            <input id="click-volume" type="range" min="0" max="100" step="1" value="80">
-            <output id="click-volume-value" for="click-volume">80%</output>
-          </div>
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="click-volume">Click level</label>
+                <output id="click-volume-value" class="settings-value" for="click-volume">80%</output>
+              </div>
+              <input id="click-volume" class="slider" type="range" min="0" max="100" step="1" value="80">
+            </div>
 
-          <div class="settings-row">
-            <label class="settings-label" for="count-in">Count in</label>
-            <input id="count-in" type="range" min="0" max="4" step="1" value="0">
-            <output id="count-in-value" for="count-in">Off</output>
+            <div class="settings-row">
+              <div class="settings-row-head">
+                <label class="settings-label" for="count-in">Count in</label>
+                <output id="count-in-value" class="settings-value" for="count-in">Off</output>
+              </div>
+              <input id="count-in" class="slider" type="range" min="0" max="4" step="1" value="0">
+              <p class="settings-hint">
+                Counted in the bar you start from, so 6/8 counts six.
+              </p>
+            </div>
           </div>
-          <p class="settings-hint">Counted in the bar you start from, so 6/8 counts six.</p>
         </section>
       </div>
 
@@ -479,7 +509,7 @@
 
   <!-- Help -->
   <dialog id="help-dialog" class="modal" aria-labelledby="help-dialog-title">
-    <div class="modal-card modal-card-wide">
+    <div class="modal-card modal-card-wide modal-sheet">
       <div class="modal-head">
         <h2 id="help-dialog-title">Practising with Choir Practice</h2>
         <button id="help-close" class="icon-btn" type="button" aria-label="Close help">

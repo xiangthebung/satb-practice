@@ -34,6 +34,8 @@ import { SETTINGS_DEFAULTS, Settings } from './ui/settings.js';
 const TEMPO_MIN = 40;
 const TEMPO_MAX = 240;
 const TRANSPORT_UI_INTERVAL_MS = 50;
+/** How long a pitch control has to settle before playback is rebuilt. */
+const PITCH_REBUILD_DELAY_MS = 160;
 /** How long a manual pan holds the score still while playback continues. */
 const AUTO_SCROLL_PAUSE_MS = 3000;
 
@@ -93,6 +95,7 @@ class ChoirPracticeApp {
     this.lastTransportUiAt = -Infinity;
     this.pitchGuidePosition = 0;
     this.pitchAnnounceTimer = null;
+    this.pitchRebuildTimer = null;
 
     this.cacheElements();
     // Exposed on the instance so the interface modules stay independently
@@ -325,6 +328,8 @@ class ChoirPracticeApp {
     this.state.loop = false;
     this.state.metronome = false;
     this.isSeeking = false;
+    clearTimeout(this.pitchRebuildTimer);
+    this.pitchRebuildTimer = null;
     this.renderer?.destroy();
     this.renderer = null;
 
@@ -379,6 +384,7 @@ class ChoirPracticeApp {
     this.renderer.setData(this.state.parts, this.state.metadata);
     this.renderer.setSelectedPart(this.state.myPartId);
     this.renderer.setFocusSelectedPart(this.state.dimOthers);
+    this.applyPitchReference();
     this.observeScoreFrame();
 
     // A verse picker is only worth offering when the score has more than one.
@@ -915,6 +921,7 @@ class ChoirPracticeApp {
     this.audioEngine?.setTuning(this.state.tuning);
     // The guidance has to judge against the same reference the playback uses.
     this.pitchDetector?.setTuning(this.state.tuning);
+    this.applyPitchReference();
     this.rebuildPlaybackForPitchChange();
   }
 
@@ -922,7 +929,22 @@ class ChoirPracticeApp {
     this.state.transpose = Math.max(-12, Math.min(12, Math.round(Number(value) || 0)));
     writePref('transpose', this.state.transpose);
     this.audioEngine?.setTranspose(this.state.transpose);
+    this.applyPitchReference();
     this.rebuildPlaybackForPitchChange();
+  }
+
+  /**
+   * Tell the score overlay what the playback is sounding at.
+   *
+   * The microphone hears absolute pitch. Without this the guidance measures a
+   * singer following a transposed playback against the printed note and reports
+   * the whole rehearsal as out of tune.
+   */
+  applyPitchReference() {
+    this.renderer?.setPitchReference({
+      tuningHz: this.state.tuning,
+      transposeSemitones: this.state.transpose
+    });
   }
 
   /**
@@ -931,13 +953,21 @@ class ChoirPracticeApp {
    * Note frequencies are resolved when the schedule is built, so a change of
    * tuning or transposition needs the schedule again. Restarting from the
    * current position keeps the change audible immediately.
+   *
+   * Dragging a slider reports every step it passes through, and restarting the
+   * transport on each one stutters the playback the singer is listening to
+   * while they choose, so the rebuild waits for the gesture to settle.
    */
   rebuildPlaybackForPitchChange() {
     if (!this.audioEngine || !this.state.isPlaying) return;
-    const wasPlaying = true;
-    this.suspendTransport(wasPlaying);
-    this.audioEngine.seek(this.state.currentBeat);
-    this.resumeTransport(wasPlaying);
+    clearTimeout(this.pitchRebuildTimer);
+    this.pitchRebuildTimer = setTimeout(() => {
+      this.pitchRebuildTimer = null;
+      if (!this.audioEngine || !this.state.isPlaying) return;
+      this.suspendTransport(true);
+      this.audioEngine.seek(this.state.currentBeat);
+      this.resumeTransport(true);
+    }, PITCH_REBUILD_DELAY_MS);
   }
 
   setFollowDynamics(enabled) {
@@ -1351,6 +1381,9 @@ class ChoirPracticeApp {
   async startMicrophone() {
     const generation = ++this.micGeneration;
     const detector = new PitchDetector();
+    // The reference has to be in force before the first frame is analysed, not
+    // only after the tuning is next changed.
+    detector.setTuning(this.state.tuning);
     this.pitchDetector = detector;
     this.setMicState('connecting');
 

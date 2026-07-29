@@ -207,21 +207,61 @@ export function playbackBeatToScoreBeat(playbackBeat, holds = []) {
  * too quiet, or one path sticks out against another.
  *
  * The chain per note is: source RMS → formant trim → note peak → part volume
- * → master. Sources are RMS-normalized rather than peak-normalized so that
- * loudness stays even across the range instead of falling away in the bass.
+ * → ensemble trim → glue → limiter → ceiling → master. Sources are
+ * RMS-normalized rather than peak-normalized so that loudness stays even across
+ * the range instead of falling away in the bass.
+ *
+ * The peaks are set so that a whole choir at full volume lands a few decibels
+ * below full scale on its loudest chord. They used to be set for one part at a
+ * time, which left a four-part score summing to about +3 dBFS: every loud
+ * entry was pushed through the soft-clip ceiling and came out gritty.
  */
 const GLOTTAL_RMS = 0.30;      // RMS of one singer's raw glottal source
 const FORMANT_TRIM = 0.50;     // compensates the cascaded formant boosts
-const VOCAL_PEAK_GAIN = 0.55;  // envelope peak for a voice part
-const TONE_PEAK_GAIN = 0.38;   // envelope peak for the reference-tone mode
-const PIANO_PEAK_GAIN = 0.26;  // envelope peak for accompaniment staves
-const MASTER_LEVEL = 0.82;     // final output trim after the ceiling
+const VOCAL_PEAK_GAIN = 0.40;  // envelope peak for a voice part
+const TONE_PEAK_GAIN = 0.40;   // envelope peak for the reference-tone mode
+const PIANO_PEAK_GAIN = 0.27;  // envelope peak for accompaniment staves
+const MASTER_LEVEL = 0.95;     // final output trim after the ceiling
 const DEFAULT_PART_VOLUME = 0.8;
 
-/** Reverb send multiplier at 100% room. Wet:dry lands near 0.75 at the top. */
-const ROOM_WET_MAX = 2.5;
+/**
+ * Ceiling before the soft clipper, as a peak amplitude.
+ *
+ * The clipper is a fixed curve: it cannot turn a loud passage down, only bend
+ * it. A limiter in front of it means ordinary music never reaches the curve at
+ * all, and the curve is left doing what it is good at — catching the occasional
+ * transient that slips past a 2 ms attack.
+ */
+const LIMITER_CEILING = 0.67;
+
+/** Reverb send multiplier at 100% room. Wet:dry lands near 0.5 at the top. */
+const ROOM_WET_MAX = 1.8;
 /** Room amount 0..1, matching the default of the Room control. */
 const DEFAULT_ROOM_AMOUNT = 0.34;
+
+/**
+ * Trim that keeps a balance from adding level as it adds voices.
+ *
+ * Separate singers are incoherent, so they sum in power rather than in
+ * amplitude: dividing by the square root of the summed power holds a full choir
+ * at about the level of one section. It follows the balance rather than the
+ * number of staves, so "only my part" stays at full level and only a mix that
+ * is genuinely carrying several voices at once is trimmed.
+ *
+ * Mute and solo are deliberately left out. They are momentary, and a mix that
+ * grew louder every time a part was muted would be unusable.
+ *
+ * @param {Iterable<number>} levels intended part volumes, 0..1
+ * @returns {number} 0..1
+ */
+function ensembleTrimFor(levels) {
+  let power = 0;
+  for (const level of levels || []) {
+    const value = Math.max(0, Math.min(1, Number(level) || 0));
+    power += value * value;
+  }
+  return power > 1 ? 1 / Math.sqrt(power) : 1;
+}
 
 /** Relative detune positions for a section, scaled by SECTION_DETUNE_CENTS. */
 const SECTION_SPREAD = {
@@ -358,6 +398,9 @@ export class AudioEngine {
     this.tuningHz = STANDARD_TUNING_HZ;
     this.sectionSize = 3;             // singers synthesized per voice part
     this.roomAmount = DEFAULT_ROOM_AMOUNT;
+    // Set from the score once its parts are known. Held here rather than in the
+    // bus so an offline export builds its bus already trimmed.
+    this.ensembleTrim = 1;
 
     // A render target bundles the context, its output bus, per-part inputs and
     // the buffers/waves cached for it. Live playback and offline export each
@@ -609,18 +652,21 @@ export class AudioEngine {
    *
    * Signal flow:
    *   parts (dry) → rumble filter → glue compressor ┐
-   *   parts (send) → room convolver → wet level ────┤→ ceiling → master → out
+   *   parts (send) → room convolver → wet level ────┤→ limiter → ceiling → master → out
    *   metronome ────────────────────────────────────┘
    *
    * Reverb and the metronome deliberately bypass the compressor: a dense
    * reverb tail otherwise pumps the whole ensemble, and a click that hits the
-   * compressor ducks the voices on every beat.
+   * compressor ducks the voices on every beat. Nothing bypasses the limiter,
+   * because everything that reaches the output has to fit inside it.
    *
    * @param {BaseAudioContext} ctx
    */
   createOutputBus(ctx) {
     const dry = ctx.createGain();
-    dry.gain.value = 1;
+    // Both bus inputs carry the trim, so a part's share of the room is trimmed
+    // by exactly as much as its dry signal.
+    dry.gain.value = this.ensembleTrim;
 
     const rumble = ctx.createBiquadFilter();
     rumble.type = 'highpass';
@@ -635,7 +681,7 @@ export class AudioEngine {
     glue.release.value = 0.24;
 
     const send = ctx.createGain();
-    send.gain.value = 1;
+    send.gain.value = this.ensembleTrim;
 
     const convolver = ctx.createConvolver();
     convolver.normalize = false; // the impulse response is normalized already
@@ -649,6 +695,16 @@ export class AudioEngine {
 
     const sum = ctx.createGain();
     sum.gain.value = 1;
+
+    // A brick-wall safety limiter rather than a mix compressor: it is inaudible
+    // until something would have gone over, and then it turns that peak down
+    // instead of letting the curve below distort it.
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = 20 * Math.log10(LIMITER_CEILING);
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.08;
 
     const ceiling = ctx.createWaveShaper();
     ceiling.curve = buildSoftClipCurve();
@@ -664,7 +720,8 @@ export class AudioEngine {
     convolver.connect(wet);
     wet.connect(sum);
     click.connect(sum);
-    sum.connect(ceiling);
+    sum.connect(limiter);
+    limiter.connect(ceiling);
     ceiling.connect(master);
     master.connect(ctx.destination);
 
@@ -673,8 +730,9 @@ export class AudioEngine {
       send,
       wet,
       click,
+      limiter,
       master,
-      nodes: [dry, rumble, glue, send, convolver, wet, click, sum, ceiling, master]
+      nodes: [dry, rumble, glue, send, convolver, wet, click, sum, limiter, ceiling, master]
     };
   }
 
@@ -753,6 +811,23 @@ export class AudioEngine {
   }
 
   /**
+   * Recalculate the trim from the balance now in force.
+   *
+   * Both bus inputs move together, so a part's share of the room is trimmed by
+   * exactly as much as its dry signal, and they are ramped rather than stepped
+   * because the balance can change while the choir is singing.
+   */
+  applyEnsembleTrim() {
+    this.ensembleTrim = ensembleTrimFor(this.partVolumeLevels.values());
+
+    const bus = this.live.bus;
+    if (!bus || !this.audioContext) return;
+    const now = this.audioContext.currentTime;
+    bus.dry.gain.setTargetAtTime(this.ensembleTrim, now, 0.02);
+    bus.send.gain.setTargetAtTime(this.ensembleTrim, now, 0.02);
+  }
+
+  /**
    * Set the reverb amount.
    * @param {number} percent - 0 to 100
    */
@@ -795,6 +870,7 @@ export class AudioEngine {
         this.partMuted.set(part.id, false);
       }
     }
+    this.applyEnsembleTrim();
     this.buildPartChains(
       this.live,
       parts,
@@ -811,6 +887,8 @@ export class AudioEngine {
     const gainNode = this.live.partGains.get(partId);
     const normalizedVolume = Math.max(0, Math.min(1, volume / 100));
     this.partVolumeLevels.set(partId, normalizedVolume);
+    // The balance decides how much of the bus the parts are allowed to use.
+    this.applyEnsembleTrim();
     if (!gainNode || !this.audioContext) return;
     // A muted part keeps its stored level so unmuting restores it exactly.
     if (!this.partMuted.get(partId)) {
@@ -1387,9 +1465,9 @@ export class AudioEngine {
    * Turn a written loudness into a gain multiplier on the synthesis peak.
    *
    * The unmarked default maps to 1, so the levels this engine was tuned at stay
-   * exactly where they were, and the range is capped because the output bus
-   * would otherwise be pushed into its soft-clip ceiling by a marked fortissimo
-   * with an accent on top of it.
+   * exactly where they were, and the range is capped because a marked
+   * fortissimo with an accent on top of it would otherwise arrive at the bus
+   * half again as loud as the level everything else was balanced around.
    *
    * @param {number} velocity
    * @returns {number}
@@ -1397,7 +1475,7 @@ export class AudioEngine {
   normaliseVelocity(velocity) {
     const level = Number(velocity);
     if (!Number.isFinite(level) || level <= 0) return 1;
-    return Math.max(0.25, Math.min(1.75, level / DEFAULT_VELOCITY));
+    return Math.max(0.25, Math.min(1.5, level / DEFAULT_VELOCITY));
   }
 
   /**
@@ -1769,6 +1847,8 @@ export class AudioEngine {
     this.partMuted.clear();
     this.partIndex.clear();
     this.parts = [];
+    // No parts means no balance to trim for; the next score sets its own.
+    this.applyEnsembleTrim();
     this.schedule = [];
     this.scheduleIndex = 0;
     this.fermataHolds = [];

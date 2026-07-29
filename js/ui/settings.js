@@ -249,6 +249,26 @@ export class Settings {
 
     if (output) output.textContent = text;
     control?.setAttribute('aria-valuetext', text);
+    this.paintTrack(control);
+  }
+
+  /**
+   * Show how far along its range a slider sits, as a filled length of track.
+   *
+   * The stylesheet draws the track itself rather than relying on the browser's
+   * accent colour, which means the filled portion has to be told where to stop.
+   *
+   * @param {HTMLInputElement|null} control
+   */
+  paintTrack(control) {
+    if (!control || control.type !== 'range') return;
+    const min = Number(control.min);
+    const max = Number(control.max);
+    const value = Number(control.value);
+    const span = max - min;
+    const progress = span > 0 ? (value - min) / span : 0;
+    const percent = Math.max(0, Math.min(1, progress)) * 100;
+    control.style.setProperty('--fill', `${percent.toFixed(2)}%`);
   }
 
   /**
