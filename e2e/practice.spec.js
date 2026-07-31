@@ -11,7 +11,24 @@
  * panel and several transport controls behave differently at each size.
  */
 
+import { readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+
 import { expect, test } from '@playwright/test';
+
+/**
+ * The scores actually sitting in `public/sample-pieces/`.
+ *
+ * Counted rather than hardcoded. The home-screen assertion below used to say
+ * `toHaveCount(3)`, which meant adding a fourth sample failed a test that had no
+ * opinion about the fourth sample — and, worse, said nothing about the case that
+ * matters: a score shipped in the bundle that the home screen never offers.
+ * Reading the directory tests that instead.
+ */
+const BUNDLED_SAMPLES = readdirSync(
+  join(fileURLToPath(new URL('..', import.meta.url)), 'public', 'sample-pieces'),
+).filter(name => /\.(musicxml|xml|mxl)$/i.test(name));
 
 /** Collect page and console errors so a test can assert nothing went wrong. */
 function watchForErrors(page) {
@@ -63,7 +80,15 @@ test.describe('opening a score', () => {
     await page.goto('/index.html');
 
     await expect(page.getByRole('heading', { name: 'Practice your part' })).toBeVisible();
-    await expect(page.locator('.sample')).toHaveCount(3);
+    await expect(page.locator('.sample')).toHaveCount(BUNDLED_SAMPLES.length);
+    // Every bundled score is reachable from the home screen, and each card points at
+    // a file that is really there. Either half failing is a sample nobody can open.
+    const offered = await page.locator('.sample').evaluateAll(nodes =>
+      nodes.map(node => node.dataset.samplePath),
+    );
+    expect(offered.map(path => path.replace(/^sample-pieces\//, '')).sort()).toEqual(
+      [...BUNDLED_SAMPLES].sort(),
+    );
     await expect(page.locator('#transport')).toBeHidden();
 
     expect(problems).toEqual([]);
