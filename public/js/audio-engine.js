@@ -263,6 +263,33 @@ function ensembleTrimFor(levels) {
   return power > 1 ? 1 / Math.sqrt(power) : 1;
 }
 
+/**
+ * Trim that keeps a divided part from being louder than an undivided one.
+ *
+ * A section that sings a2 does not gain singers to do it. The same people split
+ * between the two notes, so the section stays the same size and gets thinner, not
+ * louder. Every note used to be scheduled as a complete section, which meant a
+ * divisi chord was two full sections stacked: measured on the Bauguess "Happy
+ * Birthday", where the soprano opens into thirds for the last two bars, a lone C5
+ * rendered at 0.211 RMS and C5+Eb5 at 0.256 — the three divisi chords came out the
+ * three loudest events in the part and were reported as sounding like a sudden forte.
+ *
+ * Same reasoning and same arithmetic as `sourceMerge` inside a note, which divides
+ * by the root of the singer count, and as `ensembleTrimFor` across the balance:
+ * separate voices are incoherent, so they sum in power, so the root of the count is
+ * what holds the total level steady.
+ *
+ * Voice parts only. Two keys on a piano really are louder than one, and
+ * `schedulePianoNote` is left alone for that reason.
+ *
+ * @param {number} onsetCount notes of this part sounding at this onset
+ * @returns {number} 0..1
+ */
+function divisiTrimFor(onsetCount) {
+  const notes = Math.max(1, Math.round(Number(onsetCount) || 1));
+  return 1 / Math.sqrt(notes);
+}
+
 /** Relative detune positions for a section, scaled by SECTION_DETUNE_CENTS. */
 const SECTION_SPREAD = {
   1: [0],
@@ -1233,6 +1260,7 @@ export class AudioEngine {
         const onsetEvents = byStart.get(key);
         event.onsetRank = onsetEvents.length;
         onsetEvents.push(event);
+        event.onsetCount = 1; // replaced below, once the group is complete
         event.legatoToNext = false;
         event.legatoFromPrevious = false;
         event.legatoNextEvent = null;
@@ -1241,6 +1269,13 @@ export class AudioEngine {
         event.vocalConnectFromPrevious = false;
         event.vocalNextEvent = null;
         event.vocalPreviousEvent = null;
+      }
+
+      /* How wide the part is at each onset. Known only once the group is closed,
+         which is why it is a second pass rather than a counter above. `divisiTrimFor`
+         turns it into the gain that keeps a divided section the size of a section. */
+      for (const onsetEvents of byStart.values()) {
+        for (const event of onsetEvents) event.onsetCount = onsetEvents.length;
       }
 
       // Resolve slur edges explicitly. A flat event list interleaves chord
@@ -1732,6 +1767,9 @@ export class AudioEngine {
         eventIndex,
         midi: event.midi,
         vowel: event.vowel || 'a',
+        /* How many notes this part sounds at this onset, so a divided section can be
+           held to the level of an undivided one. See `divisiTrimFor`. */
+        onsetCount: event.onsetCount || 1,
         playbackStartBeat,
         playbackEndBeat: playbackStartBeat + soundingBeats,
         playbackDurationBeats: soundingBeats,
@@ -2107,7 +2145,17 @@ export class AudioEngine {
     // Voices naturally gain weight towards the top of their range, and the
     // written dynamic scales that. A note under a hairpin also has a level to
     // arrive at, so the sustain can move instead of sitting flat.
-    const registerGain = VOCAL_PEAK_GAIN * (0.88 + 0.24 * register);
+    /* The register level, and then the same level divided by the width of the part at
+       this onset, so singing a2 thins the section instead of doubling it.
+       See `divisiTrimFor`.
+
+       Both are kept. A phrase is one continuous source across several notes and reuses
+       its register level for each of them, but divisi width is a property of the note,
+       not of the phrase: a line that divides in its third bar has to be trimmed from
+       that bar and not before it. So the untrimmed value is what the phrase carries,
+       and `continueVocalPhrase` applies each note's own trim to it. */
+    const registerBaseGain = VOCAL_PEAK_GAIN * (0.88 + 0.24 * register);
+    const registerGain = registerBaseGain * divisiTrimFor(timing.onsetCount);
     const peakGain = registerGain * dynamicLevel(articulation);
     const sustainEndGain = registerGain * dynamicEndLevel(articulation);
 
@@ -2328,6 +2376,9 @@ export class AudioEngine {
       // The level before the written dynamic is applied. Later notes in the same
       // phrase scale this by their own marking.
       registerGain,
+      // The same, before the divisi trim. Later notes apply their own, because a
+      // phrase can divide or come back together partway through.
+      registerBaseGain,
       envelopeStartTime: startTime,
       envelopeStartGain: 0,
       attackEndTime: startTime + attack,
@@ -2410,9 +2461,15 @@ export class AudioEngine {
     const releaseStart = Math.max(attackEnd, phraseEndTime - release);
     const dipEndTime = Math.min(startTime + 0.018, releaseStart - 0.035);
     const recoveryEndTime = Math.min(startTime + 0.065, releaseStart - 0.005);
-    // Each note in a phrase carries its own written dynamic, applied to the
-    // phrase's register level so the section stays balanced within itself.
-    const baseGain = Number.isFinite(node.registerGain) ? node.registerGain : node.peakGain;
+    /* Each note in a phrase carries its own written dynamic and its own divisi width,
+       both applied to the phrase's register level so the section stays balanced within
+       itself. The width has to be re-applied per note rather than inherited: a phrase
+       that opens into thirds partway through is two notes from there on and one note
+       before it, and the trim has to follow. */
+    const phraseBase = Number.isFinite(node.registerBaseGain)
+      ? node.registerBaseGain
+      : Number.isFinite(node.registerGain) ? node.registerGain : node.peakGain;
+    const baseGain = phraseBase * divisiTrimFor(timing.onsetCount);
     const notePeakGain = baseGain * dynamicLevel(articulation);
     const noteSustainEndGain = baseGain * dynamicEndLevel(articulation);
     const dipGain = notePeakGain * 0.82;
@@ -2545,7 +2602,10 @@ export class AudioEngine {
     const attack = Math.min(requestedAttack, safeDuration * 0.25);
     const release = Math.min(requestedRelease, safeDuration * 0.35);
     const releaseStart = Math.max(startTime + attack, noteEndTime - release);
-    const registerGain = TONE_PEAK_GAIN * (0.9 + 0.2 * register);
+    // Trimmed for divisi as the vocal path is: the tone mode stands in for the same
+    // voice parts, so a chord in one of them should not be louder than a single note.
+    const registerGain = TONE_PEAK_GAIN * (0.9 + 0.2 * register) *
+      divisiTrimFor(timing.onsetCount);
     const peakGain = registerGain * dynamicLevel(articulation);
     const sustainEndGain = registerGain * dynamicEndLevel(articulation);
 
