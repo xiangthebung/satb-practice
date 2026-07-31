@@ -207,6 +207,17 @@ class ChoirPracticeApp {
         throw new Error('That sample could not be loaded. Check your connection and try again.');
       }
       const blob = await response.blob();
+      // Some static hosts answer a missing asset with their index page and HTTP 200.
+      // Without this check the HTML reaches DOMParser and looks like damaged MusicXML,
+      // hiding the actual deployment problem from the singer.
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      const beginning = (await blob.slice(0, 512).text()).trimStart().toLowerCase();
+      if (contentType.includes('text/html') ||
+          beginning.startsWith('<!doctype html') || beginning.startsWith('<html')) {
+        throw new Error(
+          'That sample is missing from this deployment. The server returned a web page instead of MusicXML.'
+        );
+      }
       const fileName = path.split('/').pop();
       await this.readScore(new File([blob], fileName, { type: 'application/xml' }), generation);
     } catch (error) {

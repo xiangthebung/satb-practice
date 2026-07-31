@@ -264,23 +264,11 @@ function ensembleTrimFor(levels) {
 }
 
 /**
- * Trim that keeps a divided part from being louder than an undivided one.
+ * Equal-power trim for a divided reference-tone part.
  *
- * A section that sings a2 does not gain singers to do it. The same people split
- * between the two notes, so the section stays the same size and gets thinner, not
- * louder. Every note used to be scheduled as a complete section, which meant a
- * divisi chord was two full sections stacked: measured on the Bauguess "Happy
- * Birthday", where the soprano opens into thirds for the last two bars, a lone C5
- * rendered at 0.211 RMS and C5+Eb5 at 0.256 — the three divisi chords came out the
- * three loudest events in the part and were reported as sounding like a sudden forte.
- *
- * Same reasoning and same arithmetic as `sourceMerge` inside a note, which divides
- * by the root of the singer count, and as `ensembleTrimFor` across the balance:
- * separate voices are incoherent, so they sum in power, so the root of the count is
- * what holds the total level steady.
- *
- * Voice parts only. Two keys on a piano really are louder than one, and
- * `schedulePianoNote` is left alone for that reason.
+ * Separate oscillator pitches are effectively incoherent, so dividing by the square
+ * root of their count keeps a plain reference chord near the level of a single tone.
+ * Piano is deliberately excluded: two struck keys really are louder than one.
  *
  * @param {number} onsetCount notes of this part sounding at this onset
  * @returns {number} 0..1
@@ -288,6 +276,63 @@ function ensembleTrimFor(levels) {
 function divisiTrimFor(onsetCount) {
   const notes = Math.max(1, Math.round(Number(onsetCount) || 1));
   return 1 / Math.sqrt(notes);
+}
+
+/**
+ * Peak-safe trim for synthesized vocal divisi.
+ *
+ * Equal-power trim fixed the meter reading, but two full vocal tracts still produced
+ * denser, sharper peaks—most audibly on the three high soprano chords in the Bauguess
+ * "Happy Birthday"—and masked the single-note line after the divisi closed. Dividing
+ * by the number of heads keeps those correlated formants and glottal peaks inside the
+ * envelope of one section. Singer allocation below supplies the ensemble texture;
+ * this trim controls the composite level.
+ *
+ * @param {number} onsetCount notes of this part sounding at this onset
+ * @returns {number} 0..1
+ */
+function vocalDivisiTrimFor(onsetCount) {
+  const notes = Math.max(1, Math.round(Number(onsetCount) || 1));
+  return 1 / notes;
+}
+
+/**
+ * Share a section's synthetic singers among simultaneous heads instead of cloning the
+ * whole section for every pitch. Remainders go to lower-ranked heads, so a three-singer
+ * section dividing a2 becomes two singers plus one singer rather than six singers.
+ *
+ * @param {number} sectionSize total synthetic singers assigned to the part
+ * @param {number} onsetCount simultaneous heads in the part
+ * @param {number} onsetRank zero-based pitch rank at the onset
+ * @returns {number} singers to synthesize for this head
+ */
+function divisiSingerCountFor(sectionSize, onsetCount, onsetRank) {
+  const singers = Math.max(1, Math.min(4, Math.round(Number(sectionSize) || 1)));
+  const heads = Math.max(1, Math.round(Number(onsetCount) || 1));
+  if (heads === 1) return singers;
+  if (heads >= singers) return 1;
+
+  const rank = Math.max(0, Math.min(heads - 1, Math.round(Number(onsetRank) || 0)));
+  return Math.floor(singers / heads) + (rank < singers % heads ? 1 : 0);
+}
+
+/**
+ * Upper harmonic boundary for a vocal source.
+ *
+ * High notes need enough harmonics to retain their vowel, but two bright tracts at
+ * once reinforce the same upper formants and sound much harder than either one alone.
+ * Narrowing each divided branch by the root of the head count keeps the combined
+ * brightness close to the unison section without changing ordinary solo lines.
+ */
+function vocalCutoffFor(frequency, register, onsetCount, nyquist) {
+  const fundamental = Math.max(1, Number(frequency) || 1);
+  const position = Math.max(0, Math.min(1, Number(register) || 0));
+  const heads = Math.max(1, Math.round(Number(onsetCount) || 1));
+  const fullSectionCutoff = fundamental * (7 + 5 * position);
+  return Math.min(
+    Math.max(2200, Number(nyquist) * 0.9),
+    Math.max(2200, fullSectionCutoff / Math.sqrt(heads))
+  );
 }
 
 /** Relative detune positions for a section, scaled by SECTION_DETUNE_CENTS. */
@@ -1306,13 +1351,16 @@ export class AudioEngine {
       }
 
       // A singer does not restart their glottal source at every ordinary note.
-      // Connect contiguous notes into a vocal phrase unless either endpoint is
-      // marked staccato. Slurs still control the synthesized envelope, while
-      // this connection controls continuous vocal-source pitch transitions.
+      // Connect contiguous notes unless either endpoint is detached. A source has a
+      // fixed singer count, though, so a section opening into or closing from divisi
+      // is a real phrase boundary: each side then gets the right-sized section and
+      // the first unison note receives a clear new entry instead of being masked.
       for (const event of events) {
         if (event.staccato) continue;
         const endKey = (event.startBeat + event.durationBeats).toFixed(6);
-        const candidates = (byStart.get(endKey) || []).filter(next => !next.staccato);
+        const candidates = (byStart.get(endKey) || []).filter(next =>
+          !next.staccato && next.onsetCount === event.onsetCount
+        );
         if (!candidates.length) continue;
 
         const sameVoice = candidates.filter(next => next.voice === event.voice);
@@ -1767,9 +1815,11 @@ export class AudioEngine {
         eventIndex,
         midi: event.midi,
         vowel: event.vowel || 'a',
-        /* How many notes this part sounds at this onset, so a divided section can be
-           held to the level of an undivided one. See `divisiTrimFor`. */
+        /* How many notes this part sounds at this onset, and which head this is,
+           so a divided section can share both gain and singers instead of cloning
+           the complete section for every pitch. */
         onsetCount: event.onsetCount || 1,
+        onsetRank: event.onsetRank || 0,
         playbackStartBeat,
         playbackEndBeat: playbackStartBeat + soundingBeats,
         playbackDurationBeats: soundingBeats,
@@ -2146,8 +2196,8 @@ export class AudioEngine {
     // written dynamic scales that. A note under a hairpin also has a level to
     // arrive at, so the sustain can move instead of sitting flat.
     /* The register level, and then the same level divided by the width of the part at
-       this onset, so singing a2 thins the section instead of doubling it.
-       See `divisiTrimFor`.
+       this onset, so singing a2 thins the section instead of cloning it.
+       See `vocalDivisiTrimFor` and `divisiSingerCountFor`.
 
        Both are kept. A phrase is one continuous source across several notes and reuses
        its register level for each of them, but divisi width is a property of the note,
@@ -2155,7 +2205,7 @@ export class AudioEngine {
        that bar and not before it. So the untrimmed value is what the phrase carries,
        and `continueVocalPhrase` applies each note's own trim to it. */
     const registerBaseGain = VOCAL_PEAK_GAIN * (0.88 + 0.24 * register);
-    const registerGain = registerBaseGain * divisiTrimFor(timing.onsetCount);
+    const registerGain = registerBaseGain * vocalDivisiTrimFor(timing.onsetCount);
     const peakGain = registerGain * dynamicLevel(articulation);
     const sustainEndGain = registerGain * dynamicEndLevel(articulation);
 
@@ -2179,7 +2229,11 @@ export class AudioEngine {
     graph.push(driftDepth);
 
     /* --- the section ---------------------------------------------------- */
-    const singerCount = Math.max(1, Math.min(4, this.sectionSize));
+    const singerCount = divisiSingerCountFor(
+      this.sectionSize,
+      timing.onsetCount,
+      timing.onsetRank
+    );
     const spread = SECTION_SPREAD[singerCount] || SECTION_SPREAD[1];
     const harmonics = harmonicCountFor(frequency, ctx.sampleRate);
     const tilt = Math.max(0.85, profile.tilt - 0.18 * register);
@@ -2238,9 +2292,11 @@ export class AudioEngine {
     /* --- vocal tract ---------------------------------------------------- */
     const tiltFilter = ctx.createBiquadFilter();
     tiltFilter.type = 'lowpass';
-    tiltFilter.frequency.value = Math.min(
-      nyquist * 0.9,
-      Math.max(2200, frequency * (7 + 5 * register))
+    tiltFilter.frequency.value = vocalCutoffFor(
+      frequency,
+      register,
+      timing.onsetCount,
+      nyquist
     );
     tiltFilter.Q.value = 0.4;
 
@@ -2349,6 +2405,7 @@ export class AudioEngine {
       pitchParam: pitchSource.offset,
       noteGain,
       stopGain,
+      tiltFilter,
       formantFilters,
       voiceClass,
       vowel,
@@ -2469,7 +2526,7 @@ export class AudioEngine {
     const phraseBase = Number.isFinite(node.registerBaseGain)
       ? node.registerBaseGain
       : Number.isFinite(node.registerGain) ? node.registerGain : node.peakGain;
-    const baseGain = phraseBase * divisiTrimFor(timing.onsetCount);
+    const baseGain = phraseBase * vocalDivisiTrimFor(timing.onsetCount);
     const notePeakGain = baseGain * dynamicLevel(articulation);
     const noteSustainEndGain = baseGain * dynamicEndLevel(articulation);
     const dipGain = notePeakGain * 0.82;
@@ -2496,6 +2553,22 @@ export class AudioEngine {
     const vowel = timing.vowel || node.vowel || 'a';
     const formants = formantsFor(node.voiceClass, vowel, frequency);
     const morphEnd = Math.min(phraseEndTime - 0.01, startTime + 0.06);
+    if (node.tiltFilter) {
+      const profile = profileFor(node.voiceClass);
+      const register = registerPosition(Number(timing.midi), profile);
+      const cutoff = vocalCutoffFor(
+        frequency,
+        register,
+        timing.onsetCount,
+        this.target.ctx.sampleRate / 2
+      );
+      node.tiltFilter.frequency.cancelScheduledValues(startTime);
+      if (morphEnd > startTime + 0.005) {
+        node.tiltFilter.frequency.linearRampToValueAtTime(cutoff, morphEnd);
+      } else {
+        node.tiltFilter.frequency.setValueAtTime(cutoff, startTime);
+      }
+    }
     node.formantFilters?.forEach((filter, index) => {
       const formant = formants[index];
       if (!formant) return;

@@ -162,7 +162,7 @@ test('the sample with printed dynamics is recognised', () => {
 });
 
 test('an octave-transposing clef is preserved', () => {
-  const draw = parsedSamples.get('Draw On, Sweet Night.musicxml');
+  const draw = parsedSamples.get('draw-on-sweet-night.musicxml');
   assert(draw, 'expected the Wilbye sample to be present');
   const octaveClefs = draw.parts.filter(part => part.clef?.octaveChange === -1);
   assert(
