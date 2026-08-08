@@ -17,6 +17,26 @@ import { join } from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
+import { TWO_VOICES_ON_ONE_STAFF_XML } from './fixtures/two-voices-on-one-staff.js';
+
+/**
+ * Open a score that is not one of the shipped samples, through the app's own
+ * file input — the same path a singer uses for their own MusicXML.
+ */
+async function openFixture(page, xml, name = 'fixture.musicxml') {
+  await page.goto('/index.html');
+  await page.locator('#file-input').setInputFiles({
+    name,
+    mimeType: 'application/xml',
+    buffer: Buffer.from(xml, 'utf8'),
+  });
+  await expect(page.locator('#practice')).toBeVisible();
+  await expect(page.locator('#transport')).toBeVisible();
+  await expect
+    .poll(() => page.locator('#score-canvas').evaluate(canvas => canvas.width))
+    .toBeGreaterThan(0);
+}
+
 /**
  * The scores actually sitting in `public/sample-pieces/`.
  *
@@ -460,10 +480,11 @@ test.describe('the score view', () => {
   test('the words are painted clear of the notes above them', async ({ page }) => {
     // Two voices on one staff routinely carry forced down stems. Opened out onto
     // a staff each, those stems hang three spaces under every notehead, and the
-    // words used to be drawn straight through them. This is the score that shows
-    // it, so it is the one measured here — the warm-up is generated with exactly
-    // that shape (see tools/make-warmup-sample.js) for this test's benefit.
-    await openSample(page, 'Warm-up');
+    // words used to be drawn straight through them. This is the score shape that
+    // shows it, and it is a fixture rather than a shipped sample: the app offers
+    // four real pieces, and a harmony exercise existing only for this measurement
+    // does not need to be one of them. See e2e/fixtures/two-voices-on-one-staff.js.
+    await openFixture(page, TWO_VOICES_ON_ONE_STAFF_XML);
 
     /**
      * Measure each part's lyric band off the painted canvas.

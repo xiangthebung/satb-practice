@@ -1,31 +1,24 @@
 /**
- * Generate `sample-pieces/Warm-up in four parts.musicxml`.
+ * A score where two voices share a staff, built for the browser tests.
  *
- * Why this file exists.
+ * This is the awkward engraving case: two parts, each a compound "X / Y" label
+ * carrying two voices on one staff, with lyrics under both. Voices sharing a staff
+ * routinely carry forced down-stems, which hang three spaces below the notehead,
+ * and those stems used to be drawn straight through the words. One browser test
+ * measures the lyric band against the painted canvas to keep that fixed, and this
+ * is the shape it needs.
  *
- * The third bundled sample used to be a setting of "Smávinir fagrir". The score's
- * own `credit-words` name its composer as Jón Nordal, born 1926 — so the music is
- * comfortably inside copyright, and it could not ship with a public deployment.
- * (The home screen credited someone else entirely, which is how it went unnoticed.)
+ * It used to ship as a fourth bundled sample called "Warm-up in four parts", and
+ * it was removed from the app: it is a harmony exercise rather than a piece, and
+ * a rehearsal tool should offer music. Nothing about the test needed it to be
+ * *shipped*, only to exist — so it is a fixture now, loaded through the app's own
+ * file input, and the samples the app offers are four real pieces.
  *
- * Deleting it alone would have broken two things that were relying on it for real
- * reasons: `tests/parse-samples.js` asserts at least three bundled samples, and one
- * browser test measures lyric placement specifically on a score where two voices
- * share a staff, because that is the case where forced down-stems used to be drawn
- * straight through the words.
- *
- * So the replacement deliberately keeps that structure: two parts, each a compound
- * "X / Y" label carrying two voices on one staff, with lyrics under both. It is a
- * plain harmony exercise written for this purpose — root-position triads, one
- * syllable per half note — which means there is no third-party music and no
- * third-party engraving anywhere in the repository.
- *
- * Run with: node tools/make-warmup-sample.js
+ * The music is written for this repository — root-position triads, one syllable
+ * per half note — so no third-party music and no third-party engraving appears
+ * anywhere in it.
  */
 
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 const DIVISIONS = 4; // per quarter note, so a half note is 8
 const HALF = DIVISIONS * 2;
@@ -205,17 +198,17 @@ function renderPart({ id, clef, upperIndex, lowerIndex }) {
   return `<part id="${id}">\n${measures.join('\n')}\n</part>`;
 }
 
-const xml = `<?xml version="1.0" encoding="UTF-8"?>
+export const TWO_VOICES_ON_ONE_STAFF_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
 <score-partwise version="4.0">
   <work>
-    <work-title>Warm-up in four parts</work-title>
+    <work-title>Two voices on one staff</work-title>
   </work>
   <identification>
     <creator type="composer">Xiang Li</creator>
     <rights>Public domain. Written for this repository as a test and demo fixture.</rights>
     <encoding>
-      <software>tools/make-warmup-sample.js</software>
+      <software>e2e/fixtures/two-voices-on-one-staff.js</software>
       <encoding-description>Generated. Edit the script, not this file.</encoding-description>
     </encoding>
   </identification>
@@ -242,15 +235,3 @@ ${renderPart({
   .join('\n')}
 </score-partwise>
 `;
-
-// `fileURLToPath`, not `url.pathname`: this repository lives under a directory
-// with a space in its name, and `pathname` hands back `bing%20bong`.
-const target = join(
-  fileURLToPath(new URL('..', import.meta.url)),
-  'public',
-  'sample-pieces',
-  'Warm-up in four parts.musicxml',
-);
-
-writeFileSync(target, xml, 'utf8');
-console.log(`wrote ${target} (${(xml.length / 1024).toFixed(1)} kB, 8 bars, 4 voices on 2 staves)`);

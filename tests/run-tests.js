@@ -1183,6 +1183,87 @@ test('playback beats inside a hold map back to the fermata beat', () => {
   assert.equal(playbackBeatToScoreBeat(10, holds), 6);
 });
 
+/*
+ * A fermata over a note and a fermata over a rest are two different marks that
+ * happen to share a glyph, and the sound has to tell them apart.
+ *
+ * Every hold used to be a silence: the note sounded its written length and the
+ * score then waited out the hold with nothing in it. On the last bar of "Happy
+ * Birthday" that is a full second of silence between the final chord and the end
+ * of the piece, which is heard — correctly — as the sound being cut off. Measured
+ * on the offline render, the audio went quiet 1.05s before the playhead reached
+ * the final barline.
+ */
+test('a fermata over a note is sung, and one over a rest is waited', () => {
+  const [sung] = collectFermataHolds(fermataParts, 2);
+  assert.equal(sung.sustained, true, 'a fermata written over a note holds the note');
+
+  const restParts = [{
+    id: 'P1',
+    measures: [
+      makeMeasure(0, 4, [
+        { isRest: true, durationBeats: 4, startBeatInMeasure: 0, fermata: { type: 'upright' } }
+      ])
+    ]
+  }];
+  const [waited] = collectFermataHolds(restParts, 2);
+  assert.equal(waited.sustained, false, 'a fermata written over a rest holds the silence');
+});
+
+test('one part still singing makes the whole hold sung', () => {
+  // Soprano holds the chord; the bass has a rest under the same mark. The
+  // ensemble is not silent, so the hold is not a silence.
+  const mixed = [
+    {
+      id: 'P1',
+      measures: [makeMeasure(0, 4, [
+        { isRest: true, durationBeats: 4, startBeatInMeasure: 0, fermata: { type: 'upright' } }
+      ])]
+    },
+    {
+      id: 'P2',
+      measures: [makeMeasure(0, 4, [
+        { isRest: false, pitch: { step: 'C', alter: 0, octave: 4 }, durationBeats: 4, startBeatInMeasure: 0, fermata: { type: 'upright' } }
+      ])]
+    }
+  ];
+  const holds = collectFermataHolds(mixed, 2);
+  assert.equal(holds.length, 1, 'simultaneous marks collapse into one ensemble hold');
+  assert.equal(holds[0].sustained, true);
+});
+
+test('a note under a fermata sounds through the hold, and its neighbours do not', () => {
+  const timeline = buildPlaybackTimeline({
+    measures: [{ startBeat: 0, beats: 4 }, { startBeat: 4, beats: 4 }],
+    tempoMap: [{ beat: 0, bpm: 120 }],
+    fermataHolds: [{ scoreBeat: 4, extraBeats: 4, sustained: true }]
+  });
+
+  // The written bar is four beats; the hold adds four more on the playback axis.
+  assert.equal(timeline.endPlaybackBeat(0, 4), 4, 'the plain end is the written one');
+  assert.equal(
+    timeline.heldEndPlaybackBeat(0, 4),
+    8,
+    'a held note reaches the far side of the hold instead of stopping inside it'
+  );
+  // And the bar after it still starts where the hold leaves off.
+  assert.equal(timeline.onsetPlaybackBeat(0, 4), 8);
+});
+
+test('a waited hold is left silent even for a note that ends on it', () => {
+  const timeline = buildPlaybackTimeline({
+    measures: [{ startBeat: 0, beats: 4 }, { startBeat: 4, beats: 4 }],
+    tempoMap: [{ beat: 0, bpm: 120 }],
+    fermataHolds: [{ scoreBeat: 4, extraBeats: 4, sustained: false }]
+  });
+
+  assert.equal(
+    timeline.heldEndPlaybackBeat(0, 4),
+    4,
+    'a fermata over a rest or a barline still buys silence'
+  );
+});
+
 /* ============================================================== metronome */
 
 section('Metronome:');
