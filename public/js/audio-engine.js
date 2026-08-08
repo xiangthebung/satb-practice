@@ -135,21 +135,45 @@ export function beatToTime(beatPosition, bpm) {
 const FERMATA_DURATION_MULTIPLIER = 2;
 
 /**
+ * How long the room is allowed to go on ringing after the last note stops.
+ *
+ * The offline export has always allowed this, and live playback did not: the beat
+ * tracker reached the final beat and tore the whole graph down inside 20ms, which
+ * cut the reverb off square. Both paths use this now, so what you hear is what you
+ * export.
+ */
+const TAIL_SECONDS = 4;
+
+/**
  * Collect score-wide fermata holds. A fermata belongs to the whole ensemble,
  * so simultaneous marks collapse into one hold at the shared note/rest end.
+ *
+ * A hold also records whether it is *sung* or *waited*, because those are two
+ * different marks that happen to share a glyph. A fermata written over a note
+ * means hold that note: the chord goes on sounding, which is the whole gesture
+ * at the end of a piece. A fermata over a rest or a barline means hold the
+ * silence. Treating both as silence is what made "Happy Birthday" stop dead a
+ * second before the playhead reached the end — the final chord sounded its
+ * written half-note and the score then waited out the hold with nothing in it.
+ *
  * @param {Array} parts
  * @param {number} multiplier
- * @returns {Array<{scoreBeat: number, extraBeats: number}>}
+ * @returns {Array<{scoreBeat: number, extraBeats: number, sustained: boolean}>}
  */
 export function collectFermataHolds(parts, multiplier = FERMATA_DURATION_MULTIPLIER) {
   const byBeat = new Map();
   const extension = Math.max(0, multiplier - 1);
-  const addHold = (scoreBeat, extraBeats) => {
+  const addHold = (scoreBeat, extraBeats, sustained) => {
     const key = scoreBeat.toFixed(6);
     const existing = byBeat.get(key);
-    if (!existing || extraBeats > existing.extraBeats) {
-      byBeat.set(key, { scoreBeat, extraBeats });
+    if (!existing) {
+      byBeat.set(key, { scoreBeat, extraBeats, sustained });
+      return;
     }
+    // The longest mark at a beat sets the length; any sung mark makes the whole
+    // hold sung, because one part still singing is not a silence.
+    existing.extraBeats = Math.max(existing.extraBeats, extraBeats);
+    existing.sustained = existing.sustained || sustained;
   };
 
   for (const part of parts || []) {
@@ -158,18 +182,20 @@ export function collectFermataHolds(parts, multiplier = FERMATA_DURATION_MULTIPL
       for (const note of measure.notes || []) {
         if (!note.fermata || !(note.durationBeats > 0)) continue;
         const scoreBeat = measureStart + (Number(note.startBeatInMeasure) || 0) + note.durationBeats;
-        addHold(scoreBeat, note.durationBeats * extension);
+        // A fermata over a rest is still a rest: the ensemble waits.
+        addHold(scoreBeat, note.durationBeats * extension, !note.isRest);
       }
 
       // A barline fermata has no note duration. Hold it for one denominator
-      // beat (one quarter in 4/4, one eighth in 6/8) by default.
+      // beat (one quarter in 4/4, one eighth in 6/8) by default. Nothing is
+      // written under it, so it is always a waited hold.
       const denominator = Number(measure.timeSignature?.denominator) || 4;
       const boundaryHold = (4 / denominator) * extension;
       for (const fermata of measure.barlineFermatas || []) {
         const scoreBeat = fermata.location === 'left'
           ? measureStart
           : measureStart + (Number(measure.beats) || 0);
-        addHold(scoreBeat, boundaryHold);
+        addHold(scoreBeat, boundaryHold, false);
       }
     }
   }
@@ -493,6 +519,9 @@ export class AudioEngine {
     this.scheduleInterval = 25; // ms between scheduling passes
     this.startLead = 0.08;      // seconds before the first note sounds
     this.schedulerTimer = null;
+    /* Collects the voices left ringing after a performance ends by itself. See
+       `finishPlayback`; null whenever nothing is ringing out. */
+    this.tailTimer = null;
     this.onBeatUpdate = null;   // callback(currentBeat)
     this.onPlaybackEnd = null;  // callback when playback reaches the end
     this.onLoopEnd = null;      // callback when a loop range wants to repeat
@@ -1458,8 +1487,12 @@ export class AudioEngine {
         const scoreEnd = isFinalRange && ranges.length === 1
           ? event.startBeat + event.durationBeats
           : Math.min(event.startBeat + event.durationBeats, range.scoreEnd);
-        const endPlaybackBeat = timeline.endPlaybackBeat(range.index, scoreEnd) ??
-          startPlaybackBeat;
+        /* A note under a fermata sings through the hold; every other note stops
+           where it is written and lets a waited hold be silent. See
+           `heldEndPlaybackBeat`. */
+        const endPlaybackBeat = (event.fermata
+          ? timeline.heldEndPlaybackBeat(range.index, scoreEnd)
+          : timeline.endPlaybackBeat(range.index, scoreEnd)) ?? startPlaybackBeat;
 
         const occurrence = ranges.length > 1
           ? { ...event, occurrenceIndex: range.index }
@@ -1474,10 +1507,14 @@ export class AudioEngine {
             range.index,
             Math.max(range.scoreStart, occurrence.vocalPhraseStartBeat)
           );
-          const phraseEnd = timeline.endPlaybackBeat(
-            range.index,
-            Math.min(range.scoreEnd, occurrence.vocalPhraseEndBeat)
-          );
+          /* And the phrase around it, or the note is lengthened while the envelope
+             carrying it still closes at the written barline. A phrase is one
+             continuous source across several notes, so the hold has to be inside
+             its bounds too. */
+          const phraseEndBeat = Math.min(range.scoreEnd, occurrence.vocalPhraseEndBeat);
+          const phraseEnd = event.fermata
+            ? timeline.heldEndPlaybackBeat(range.index, phraseEndBeat)
+            : timeline.endPlaybackBeat(range.index, phraseEndBeat);
           occurrence.vocalPhraseId = ranges.length > 1
             ? `${occurrence.vocalPhraseKey}#${range.index}`
             : occurrence.vocalPhraseKey;
@@ -1705,6 +1742,14 @@ export class AudioEngine {
   play() {
     if (!this.audioContext) return;
 
+    /* A previous performance may still be ringing out — see `finishPlayback`. Its
+       tail is not this pass's music, so it is faded rather than left to overlap the
+       opening bar. */
+    if (this.tailTimer) {
+      this.clearTailTimer();
+      this.stopAllNodes();
+    }
+
     // Build the expanded timeline before calculating the transport reference.
     this.schedule = this.buildSchedule();
     this.schedule.sort((a, b) =>
@@ -1910,11 +1955,56 @@ export class AudioEngine {
     this.trackingFloorPlaybackBeat = 0;
     this.pauseTime = 0;
     this.pausePlaybackBeat = 0;
+    this.clearTailTimer();
     this.stopAllNodes();
     this.stopLookaheadScheduler();
     this.stopBeatTracking();
     if (this.onBeatUpdate) {
       this.onBeatUpdate(0);
+    }
+  }
+
+  /**
+   * Reach the end of the score, and let the room finish.
+   *
+   * The difference from `stop()` is one line — this does not tear the voices down —
+   * and it is the difference between a piece ending and a piece being switched off.
+   * The transport resets exactly as it always did, the scheduler and the beat clock
+   * stop, and the notes already scheduled keep the stop times they were given, so
+   * the final chord decays and the room rings out behind it.
+   *
+   * `stop()` is still what a *person* pressing stop gets: they want silence now, and
+   * a 20ms fade is the right answer to that. Nobody pressed anything here.
+   */
+  finishPlayback() {
+    this.isPlaying = false;
+    this.isPaused = false;
+    this.currentBeat = 0;
+    this.trackingFloorPlaybackBeat = 0;
+    this.pauseTime = 0;
+    this.pausePlaybackBeat = 0;
+    this.stopLookaheadScheduler();
+    this.stopBeatTracking();
+
+    /* The scheduler was doing the housekeeping, and it has just been stopped, so
+       the nodes left ringing need collecting once they are done. */
+    this.clearTailTimer();
+    this.tailTimer = setTimeout(() => {
+      this.tailTimer = null;
+      if (this.isPlaying) return;
+      this.stopAllNodes();
+    }, (TAIL_SECONDS + 0.5) * 1000);
+
+    if (this.onBeatUpdate) {
+      this.onBeatUpdate(0);
+    }
+  }
+
+  /** Cancel a pending tail cleanup. */
+  clearTailTimer() {
+    if (this.tailTimer) {
+      clearTimeout(this.tailTimer);
+      this.tailTimer = null;
     }
   }
 
@@ -3148,7 +3238,7 @@ export class AudioEngine {
       // End on the expanded timeline; during a fermata currentBeat intentionally
       // remains fixed at the marked score position.
       if (playbackBeat >= this.getTotalPlaybackBeats()) {
-        this.stop();
+        this.finishPlayback();
         if (this.onPlaybackEnd) {
           this.onPlaybackEnd();
         }
@@ -3283,9 +3373,9 @@ export class AudioEngine {
     );
 
     const lead = 0.05;
-    // Leave room for the final release plus the room decay.
-    const tailSeconds = 4;
-    const totalSeconds = lead + this.timeline.totalSeconds + tailSeconds;
+    // Leave room for the final release plus the room decay. The same allowance the
+    // live transport now gives itself, so an export and a performance end alike.
+    const totalSeconds = lead + this.timeline.totalSeconds + TAIL_SECONDS;
     const sampleRate = 44100;
     const offlineCtx = new OfflineAudioContext(
       2,

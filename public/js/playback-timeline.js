@@ -91,7 +91,7 @@ function buildSpans(scoreRanges, fermataHolds) {
     .sort((left, right) => left.scoreBeat - right.scoreBeat);
   let playback = 0;
 
-  const pushSpan = (rangeIndex, kind, scoreStart, length, scoreLength = length) => {
+  const pushSpan = (rangeIndex, kind, scoreStart, length, scoreLength = length, sustained = false) => {
     if (length <= EPSILON) return;
     spans.push({
       rangeIndex,
@@ -99,7 +99,11 @@ function buildSpans(scoreRanges, fermataHolds) {
       playbackStart: playback,
       playbackEnd: playback + length,
       scoreStart,
-      scoreEnd: scoreStart + scoreLength
+      scoreEnd: scoreStart + scoreLength,
+      /* Hold spans only. True when the mark was written over a note, so the notes
+         ending here go on sounding through it rather than the ensemble waiting in
+         silence. See `collectFermataHolds`. */
+      sustained
     });
     playback += length;
   };
@@ -120,7 +124,7 @@ function buildSpans(scoreRanges, fermataHolds) {
       const boundary = Math.min(range.scoreEnd, hold.scoreBeat);
       pushSpan(rangeIndex, 'music', cursor, boundary - cursor);
       cursor = Math.max(cursor, boundary);
-      pushSpan(rangeIndex, 'hold', cursor, Number(hold.extraBeats), 0);
+      pushSpan(rangeIndex, 'hold', cursor, Number(hold.extraBeats), 0, !!hold.sustained);
     }
 
     pushSpan(rangeIndex, 'music', cursor, range.scoreEnd - cursor);
@@ -279,7 +283,11 @@ export class PlaybackTimeline {
    * Where a note ending at a score beat stops, on one pass through the music.
    *
    * The mirror of `onsetPlaybackBeat`: a note that ends where a fermata is
-   * written ends before the hold, which is what makes the hold audible.
+   * written ends before the hold, which is what makes a *waited* hold audible —
+   * a fermata over a rest or a barline is silence you are supposed to hear.
+   *
+   * A note carrying its own fermata is the other mark and wants
+   * `heldEndPlaybackBeat` instead: it goes on sounding through the hold.
    *
    * @param {number} rangeIndex
    * @param {number} scoreBeat
@@ -295,6 +303,34 @@ export class PlaybackTimeline {
       fallback = playbackBeat;
     }
     return fallback;
+  }
+
+  /**
+   * Where a note *carrying a fermata* stops: the end of the hold it opens.
+   *
+   * "Hold this note" is what a fermata over a note means, and the sound has to
+   * do it. Ending such a note at its written length instead — which is what
+   * `endPlaybackBeat` does, correctly, for every other note — leaves the score
+   * waiting out the hold in silence. At the end of a piece that reads as the
+   * sound being cut off, because it is: the last chord of "Happy Birthday"
+   * stopped a full second before the playhead reached the final barline.
+   *
+   * Falls through to the plain end when the hold at this beat is a waited one,
+   * so a fermata over a rest still buys silence.
+   *
+   * @param {number} rangeIndex
+   * @param {number} scoreBeat
+   * @returns {number|null}
+   */
+  heldEndPlaybackBeat(rangeIndex, scoreBeat) {
+    const end = this.endPlaybackBeat(rangeIndex, scoreBeat);
+    if (end === null) return null;
+    for (const span of this.spans) {
+      if (span.kind !== 'hold' || !span.sustained) continue;
+      if (Math.abs(span.playbackStart - end) > EPSILON) continue;
+      return span.playbackEnd;
+    }
+    return end;
   }
 
   /**
