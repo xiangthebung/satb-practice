@@ -803,7 +803,10 @@ export class NotationRenderer {
       minNoteSpacing: 30, // minimum center-to-center gap for distinct onsets
       measurePadding: 18, // breathing room between notes and barlines
       marginLeft: 104,
-      marginTop: 44,
+      /* Room above the top stave for three things stacked: the ending brackets,
+         the measure numbers under them, and clearance between the two. It was 44
+         when nothing but the numbers lived up here. */
+      marginTop: 58,
       marginRight: 40,
       clefWidth: 56,
       measureBarWidth: 1.4,
@@ -1871,6 +1874,11 @@ export class NotationRenderer {
       viewportWidth: tileCssWidth,
       staticViewport: true
     });
+    this.drawEndingBrackets(tileCtx, {
+      scrollX: tileStart,
+      viewportWidth: tileCssWidth,
+      staticViewport: true
+    });
     tileCtx.restore();
 
     this.staticScoreTiles.set(tileIndex, {
@@ -1945,6 +1953,184 @@ export class NotationRenderer {
       )) continue;
       ctx.fillText(String(measure.number || index + 1), x, labelY);
     }
+    ctx.restore();
+  }
+
+  /**
+   * The barlines the score carries at a measure, taken across all the parts.
+   *
+   * Exporters do not always repeat a marking on every staff, so the parser takes
+   * the union in `collectScoreStructure` and that is what is read here — drawing
+   * from one part's measures would lose a repeat that was only written on the
+   * top staff.
+   *
+   * @param {number} measureIndex
+   * @returns {Array}
+   */
+  getBarlinesAt(measureIndex) {
+    return this.metadata?.measureStructure?.[measureIndex]?.barlines || [];
+  }
+
+  /**
+   * Repeat signs and heavy barlines.
+   *
+   * These were parsed, and performed — `repeats.js` expands them into the
+   * playback order and the audio jumps correctly — but never drawn. The result
+   * was a page of identical-looking barlines under a performance that repeated
+   * and skipped at points the singer could not see, which is worse than not
+   * supporting repeats at all: there was nothing to reconcile the ear against.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} yOffset staff top
+   * @param {number} scoreOrigin left edge of the scrolling music
+   * @param {{ scrollX: number, viewportWidth: number, staticViewport: boolean }} viewport
+   */
+  drawBarlineMarks(ctx, yOffset, scoreOrigin, viewport) {
+    const measures = this.horizontalLayout.measures;
+    if (!measures.length) return;
+    const { lineSpacing } = this.config;
+    const staffHeight = lineSpacing * 4;
+    const dotRadius = Math.max(1.6, lineSpacing * 0.16);
+
+    ctx.save();
+    ctx.strokeStyle = this.theme.barline;
+    ctx.fillStyle = this.theme.barline;
+
+    const heavy = (x) => {
+      ctx.lineWidth = 3.2;
+      ctx.beginPath();
+      ctx.moveTo(x, yOffset);
+      ctx.lineTo(x, yOffset + staffHeight);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    };
+    const thin = (x) => {
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, yOffset);
+      ctx.lineTo(Math.round(x) + 0.5, yOffset + staffHeight);
+      ctx.stroke();
+    };
+    const dots = (x) => {
+      for (const spaces of [1.5, 2.5]) {
+        ctx.beginPath();
+        ctx.arc(x, yOffset + spaces * lineSpacing, dotRadius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    for (let index = 0; index < measures.length; index++) {
+      const layout = measures[index];
+      for (const barline of this.getBarlinesAt(index)) {
+        const atStart = barline.location === 'left';
+        const x = scoreOrigin + (atStart ? layout.startX : layout.endX);
+        if (!isScoreElementVisible(
+          x,
+          viewport.scrollX,
+          viewport.viewportWidth,
+          scoreOrigin,
+          viewport.staticViewport
+        )) continue;
+
+        const direction = barline.repeat?.direction;
+        if (direction === 'forward') {
+          heavy(x + 1.6);
+          thin(x + 5.4);
+          dots(x + 11);
+        } else if (direction === 'backward') {
+          dots(x - 11);
+          thin(x - 5.4);
+          heavy(x - 1.6);
+        } else if (barline.style === 'light-heavy') {
+          thin(x - 5);
+          heavy(x - 1.6);
+        } else if (barline.style === 'light-light') {
+          thin(x - 4.5);
+          thin(x);
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Numbered ending brackets, drawn once above the top stave.
+   *
+   * Paired the way `repeats.js` pairs them when it decides which pass plays
+   * which bars, so the bracket a singer reads and the bars the app performs come
+   * from the same reading of the file. An ending whose `stop` is missing runs to
+   * the last bar rather than being dropped, which is what an unterminated ending
+   * means in practice.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {{ scrollX?: number, viewportWidth?: number, staticViewport?: boolean }} options
+   */
+  drawEndingBrackets(ctx, options = {}) {
+    const structure = this.metadata?.measureStructure;
+    const measures = this.horizontalLayout.measures;
+    if (!structure?.length || !measures.length) return;
+
+    const { marginLeft, clefWidth } = this.config;
+    const scoreOrigin = marginLeft + clefWidth;
+    const viewportScrollX = Number.isFinite(options.scrollX) ? options.scrollX : this.scrollX;
+    const viewportWidth = Number.isFinite(options.viewportWidth)
+      ? options.viewportWidth
+      : this.viewWidth;
+    const staticViewport = options.staticViewport === true;
+
+    // Above the measure numbers, which sit at staffTop - 20 with a ~10px font.
+    const lineY = Math.max(4, this.staffTop - 46);
+    const hookBottom = lineY + 9;
+
+    ctx.save();
+    ctx.strokeStyle = this.theme.barline;
+    ctx.fillStyle = this.theme.label;
+    ctx.lineWidth = 1.4;
+    ctx.font = `600 10px ${UI_FONT_STACK}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+
+    let open = null;
+    const close = (endIndex, closed) => {
+      if (!open) return;
+      const layout = measures[Math.max(0, Math.min(endIndex, measures.length - 1))];
+      const startX = scoreOrigin + open.startX;
+      const endX = scoreOrigin + layout.endX;
+      const label = open.label;
+      open = null;
+      if (endX <= startX) return;
+      if (!isScoreElementVisible(startX, viewportScrollX, viewportWidth, scoreOrigin, staticViewport) &&
+          !isScoreElementVisible(endX, viewportScrollX, viewportWidth, scoreOrigin, staticViewport)) {
+        return;
+      }
+      ctx.beginPath();
+      ctx.moveTo(startX, hookBottom);
+      ctx.lineTo(startX, lineY);
+      ctx.lineTo(endX, lineY);
+      // A "discontinue" ending has no closing hook: the music carries straight on.
+      if (closed) ctx.lineTo(endX, hookBottom);
+      ctx.stroke();
+      if (label) ctx.fillText(label, startX + 5, hookBottom - 1);
+    };
+
+    for (let index = 0; index < structure.length; index++) {
+      for (const barline of structure[index].barlines || []) {
+        const ending = barline.ending;
+        if (!ending) continue;
+        if (ending.type === 'start') {
+          if (open) close(index - 1, false);
+          open = {
+            startX: measures[Math.min(index, measures.length - 1)].startX,
+            label: ending.text ||
+              (ending.numbers?.length ? `${ending.numbers.join(', ')}.` : '')
+          };
+        } else if (ending.type === 'stop' || ending.type === 'discontinue') {
+          close(index, ending.type === 'stop');
+        }
+      }
+    }
+    // An ending left open runs to the end of the music.
+    if (open) close(structure.length - 1, false);
     ctx.restore();
   }
 
@@ -2076,6 +2262,11 @@ export class NotationRenderer {
       ctx.lineTo(finalBarX, yOffset + lineSpacing * 4);
       ctx.stroke();
     }
+    this.drawBarlineMarks(ctx, yOffset, scoreOrigin, {
+      scrollX: viewportScrollX,
+      viewportWidth,
+      staticViewport
+    });
 
     // Accidentals follow whichever key signature is printed at that point and
     // reset at every barline, the way engraved music does, instead of marking
