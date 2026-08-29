@@ -1160,6 +1160,21 @@ export function parseMusicXML(xmlString, xmlDoc) {
     throw new Error('This file could not be read as MusicXML. It may be damaged or in another format.');
   }
 
+  /* MusicXML has two document orders, and this reader only understands one of
+     them. `score-timewise` nests <part> inside <measure> rather than the other
+     way round, so `part[id]` still matches, `part-list` is still there, and every
+     guard below passes — the app opened the file, named the parts, drew the
+     clefs, and showed a score with no bars in it and no error. Saying so is the
+     whole fix: nothing in common use writes timewise, and Finale, Sibelius,
+     MuseScore, Dorico and every exporter that matters can save partwise. */
+  const root = doc.documentElement;
+  if (root && root.nodeName === 'score-timewise') {
+    throw new Error(
+      'This is a timewise MusicXML file, which this app cannot read. ' +
+      'Export it again as partwise MusicXML, which is what notation software writes by default.'
+    );
+  }
+
   // Extract metadata
   const metadata = {
     title: doc.querySelector('work work-title')?.textContent ||
@@ -1491,6 +1506,9 @@ function summariseFeatures(parts = [], metadata = {}) {
   };
 }
 
+/** Largest score this will attempt to open, in bytes. */
+const MAX_SCORE_BYTES = 32 * 1024 * 1024;
+
 /**
  * Read a file and parse it as MusicXML.
  * Handles both plain XML and detects MXL (compressed) files.
@@ -1498,6 +1516,18 @@ function summariseFeatures(parts = [], metadata = {}) {
  * @returns {Promise<{ parts: Array, metadata: object }>}
  */
 export async function parseFile(file) {
+  /* A limit, because there was none and the pipeline has no other guard: layout,
+     the audio schedule and the canvas width all grow with the score. 32 MB is far
+     larger than any real choral score — the largest bundled sample is 180 KB, and
+     a full oratorio vocal score is a few megabytes — so anything over it is a
+     wrong file rather than a big one, and freezing the tab is a worse answer than
+     saying so. */
+  if (file?.size > MAX_SCORE_BYTES) {
+    throw new Error(
+      `That file is ${Math.round(file.size / 1e6)} MB, which is too large to open. ` +
+      'MusicXML scores are normally under a megabyte.'
+    );
+  }
   const arrayBuffer = await file.arrayBuffer();
   const text = isMxlFile(arrayBuffer)
     ? await readMxl(arrayBuffer)
