@@ -39,12 +39,14 @@ import {
 import {
   analysePitchYin,
   classifyAccuracy,
+  describeMicrophoneFailure,
   PitchDetector
 } from '../public/js/pitch-detector.js';
 
 import {
   AudioEngine,
   articulationLengthFactor,
+  lyricForVerse,
   beatDuration,
   beatToTime,
   collectFermataHolds,
@@ -2928,6 +2930,205 @@ test('a negative resolved position is clamped to the bar start', () => {
   const events = [{ kind: 'direction', offset: -8, words: 'rit.' }];
   const { directions } = layoutMeasure(events, 1);
   assert.equal(directions[0].startBeatInMeasure, 0);
+});
+
+section('Verses - what the voices actually sing:');
+
+test('the chosen verse is the one whose syllable is sung', () => {
+  const note = {
+    lyric: { text: 'one' },
+    lyrics: [
+      { number: 1, text: 'one' },
+      { number: 2, text: 'two' },
+      { number: 3, text: 'three' }
+    ]
+  };
+  assert.equal(lyricForVerse(note, 1).text, 'one');
+  assert.equal(lyricForVerse(note, 3).text, 'three');
+});
+
+test('a single unnumbered verse is sung whatever the picker says', () => {
+  const note = { lyrics: [{ text: 'sing' }] };
+  assert.equal(lyricForVerse(note, 2).text, 'sing');
+});
+
+test('a note with no syllable in the chosen verse holds the vowel', () => {
+  const note = { lyrics: [{ number: 1, text: 'one' }, { number: 2, text: 'two' }] };
+  assert.equal(lyricForVerse(note, 4), null);
+});
+
+test('a note with no lyrics at all reports none', () => {
+  assert.equal(lyricForVerse({}, 1), null);
+  assert.equal(lyricForVerse(null, 1), null);
+});
+
+test('the engine builds a schedule against the chosen verse', () => {
+  const withVerses = (text1, text2) => ({
+    isRest: false,
+    pitch: { step: 'C', alter: 0, octave: 4 },
+    durationBeats: 1,
+    startBeatInMeasure: 0,
+    lyric: { text: text1 },
+    lyrics: [{ number: 1, text: text1 }, { number: 2, text: text2 }]
+  });
+
+  const engine = new AudioEngine();
+  engine.parts = [{ id: 'P1', measures: [makeMeasure(0, 4, [withVerses('lah', 'seen')])] }];
+  assert.equal(engine.buildSchedule()[0].vowel, 'a');
+
+  engine.setVerse(2);
+  assert.equal(engine.buildSchedule()[0].vowel, 'i');
+});
+
+section('The mixer - solo, mute and volume together:');
+
+/**
+ * A stand-in for the per-part gain node.
+ *
+ * The engine's audibility rules were correct in `getEffectivePartVolume` and
+ * wrong at the one place that wrote to the node: `setPartVolume` consulted mute
+ * and not solo, so moving any slider — or picking a rehearsal mix, which sets
+ * every part at once — put the other three voices back while their solo buttons
+ * still read as engaged. Asserting the stored level would not have caught it;
+ * only the value that reaches the node does.
+ */
+function stubGainNode() {
+  const node = {
+    gain: {
+      value: null,
+      setTargetAtTime(value) { node.gain.value = value; }
+    }
+  };
+  return node;
+}
+
+function engineWithParts(ids) {
+  const engine = new AudioEngine();
+  engine.audioContext = { currentTime: 0 };
+  for (const id of ids) engine.live.partGains.set(id, stubGainNode());
+  for (const id of ids) engine.setPartVolume(id, 100);
+  return engine;
+}
+
+const gainOf = (engine, id) => engine.live.partGains.get(id).gain.value;
+
+test('a soloed part is the only one the gain nodes let through', () => {
+  const engine = engineWithParts(['S', 'A', 'T', 'B']);
+  engine.setPartSoloed('S', true);
+  assert.equal(gainOf(engine, 'S'), 1);
+  assert.equal(gainOf(engine, 'A'), 0);
+});
+
+test('changing another part volume does not undo a solo', () => {
+  const engine = engineWithParts(['S', 'A', 'T', 'B']);
+  engine.setPartSoloed('S', true);
+  engine.setPartVolume('A', 80);
+  assert.equal(gainOf(engine, 'A'), 0, 'the alto came back while the soprano was soloed');
+  engine.clearSolo();
+  assert.equal(gainOf(engine, 'A'), 0.8, 'the level set during the solo was lost');
+});
+
+test('setting every part volume at once does not undo a solo', () => {
+  const engine = engineWithParts(['S', 'A', 'T', 'B']);
+  engine.setPartSoloed('T', true);
+  // What applyMix() does: one setPartVolume per part.
+  for (const id of ['S', 'A', 'T', 'B']) engine.setPartVolume(id, 60);
+  assert.deepEqual(
+    ['S', 'A', 'T', 'B'].map(id => gainOf(engine, id)),
+    [0, 0, 0.6, 0]
+  );
+});
+
+test('a muted part stays silent when its own volume is moved', () => {
+  const engine = engineWithParts(['S', 'A']);
+  engine.setPartMuted('A', true);
+  engine.setPartVolume('A', 70);
+  assert.equal(gainOf(engine, 'A'), 0);
+  engine.setPartMuted('A', false);
+  assert.equal(gainOf(engine, 'A'), 0.7, 'unmuting did not restore the stored level');
+});
+
+section('Microphone failures - saying which one it was:');
+
+test('a refused permission is reported as a permission problem', () => {
+  const message = describeMicrophoneFailure({ name: 'NotAllowedError' });
+  assert.match(message, /blocked/i);
+  assert.match(message, /browser settings/i);
+});
+
+test('a missing microphone is not reported as a permission problem', () => {
+  const message = describeMicrophoneFailure({ name: 'NotFoundError' });
+  assert.match(message, /No microphone was found/i);
+  assert.doesNotMatch(message, /blocked|browser settings/i);
+});
+
+test('an insecure page is told it needs HTTPS', () => {
+  const message = describeMicrophoneFailure({ name: 'SecurityError' });
+  assert.match(message, /HTTPS/);
+  assert.doesNotMatch(message, /blocked/i);
+});
+
+test('a microphone another app is holding says so', () => {
+  const message = describeMicrophoneFailure({ name: 'NotReadableError' });
+  assert.match(message, /another app/i);
+});
+
+test('every failure name gets its own sentence', () => {
+  const names = [
+    'NotAllowedError', 'NotFoundError', 'NotReadableError',
+    'OverconstrainedError', 'SecurityError', 'AbortError'
+  ];
+  const messages = names.map(name => describeMicrophoneFailure({ name }));
+  assert.equal(new Set(messages).size, names.length, 'two failures share a message');
+  // An unknown name still says something, and says something different.
+  const unknown = describeMicrophoneFailure({ name: 'SomethingElseError' });
+  assert.equal(messages.includes(unknown), false);
+  assert.match(unknown, /\S/);
+});
+
+section('Metronome - the click grid follows the metre:');
+
+test('the grid step comes from the bar the click is in', () => {
+  const metronome = new Metronome({ currentTime: 0 }, null);
+  metronome.setMeasureGrid([
+    { startBeat: 0, timeSignature: { numerator: 4, denominator: 4 } },
+    { startBeat: 4, timeSignature: { numerator: 4, denominator: 4 } },
+    // 6/8 is three quarter-note beats long.
+    { startBeat: 8, timeSignature: { numerator: 6, denominator: 8 } },
+    { startBeat: 11 }
+  ]);
+
+  assert.equal(metronome.timeSignatureAtScoreBeat(0).denominator, 4);
+  assert.equal(metronome.timeSignatureAtScoreBeat(7.9).denominator, 4);
+  assert.equal(metronome.timeSignatureAtScoreBeat(8).denominator, 8);
+  // A bar with no <time> of its own carries the last one forward.
+  assert.equal(metronome.timeSignatureAtScoreBeat(11).denominator, 8);
+  assert.equal(metronome.timeSignatureAtScoreBeat(11).numerator, 6);
+});
+
+test('the metre change changes the spacing, not just the accent', () => {
+  const metronome = new Metronome({ currentTime: 0 }, null);
+  metronome.setPattern('beat');
+  metronome.setMeasureGrid([
+    { startBeat: 0, timeSignature: { numerator: 4, denominator: 4 } },
+    { startBeat: 4, timeSignature: { numerator: 6, denominator: 8 } }
+  ]);
+
+  const before = clickGridStep(metronome.pattern, metronome.timeSignatureAtScoreBeat(2).denominator);
+  const after = clickGridStep(metronome.pattern, metronome.timeSignatureAtScoreBeat(4).denominator);
+  assert.equal(before, 1, 'a crotchet beat in 4/4');
+  assert.equal(after, 0.5, 'a quaver beat in 6/8');
+});
+
+test('a bar grid still gives the downbeats the accents did before', () => {
+  const metronome = new Metronome({ currentTime: 0 }, null);
+  metronome.setMeasureGrid([
+    { startBeat: 0 }, { startBeat: 1 }, { startBeat: 5 }, { startBeat: 9 }
+  ]);
+  assert.equal(metronome.isDownbeatAtScoreBeat(0, 0), true);
+  assert.equal(metronome.isDownbeatAtScoreBeat(1, 1), true);
+  assert.equal(metronome.isDownbeatAtScoreBeat(2, 2), false);
+  assert.equal(metronome.isDownbeatAtScoreBeat(5, 5), true);
 });
 
 /* ================================================================ summary */

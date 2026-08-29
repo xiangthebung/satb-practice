@@ -17,6 +17,7 @@ import { join } from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
+import { REPEAT_WITH_ENDINGS_XML } from './fixtures/repeat-with-endings.js';
 import { TWO_VOICES_ON_ONE_STAFF_XML } from './fixtures/two-voices-on-one-staff.js';
 
 /**
@@ -655,6 +656,243 @@ test.describe('the score view', () => {
   });
 });
 
+/**
+ * The parts panel, at both layouts.
+ *
+ * These exist because both of its layouts were wrong in the same way and neither
+ * was caught by anything: above 900px it could not be closed at all (no close
+ * button, no trigger, and a `close` listener that re-opened it), and below 900px
+ * it opened with `showModal()`, which put it over the score with a backdrop —
+ * measured at 860x640 it covered 83% of the score, made the play button
+ * unclickable, and stopped the space bar, because the app stands its keyboard
+ * handler down while a modal dialog is open. All three break the one thing the
+ * app is for: moving the balance while you listen.
+ *
+ * Everything here is a geometric or hit-test assertion rather than a class name,
+ * so a stylesheet change that reintroduces the overlap fails even if the markup
+ * is untouched.
+ */
+/**
+ * Repeats and endings, on the page as well as in the ear.
+ *
+ * `repeats.js` has always expanded a repeat into the performance order, and the
+ * audio has always jumped correctly. Nothing drew the signs, so a singer heard
+ * the music go back four bars at a barline that looked exactly like the other
+ * fifty. Both assertions below are differential — the same region of canvas is
+ * measured with the barline data present and with it removed — so they test that
+ * the marks are *painted from the score*, which a fixed pixel count would not.
+ */
+test.describe('repeats and endings', () => {
+  /**
+   * Remember a region of the canvas so it can be compared with itself later.
+   *
+   * Counting dark pixels does not work here: the score is drawn on an opaque
+   * paper fill, so every pixel in any region is already opaque and nearly every
+   * pixel is already near the paper colour. What distinguishes "painted" from
+   * "not painted" is that the region *changed*, so that is what is measured.
+   */
+  function rememberRegion(page, region) {
+    return page.evaluate(box => {
+      const canvas = document.querySelector('#score-canvas');
+      const ratio = canvas.width / canvas.getBoundingClientRect().width;
+      window.__region = {
+        x: Math.round(box.x * ratio),
+        y: Math.round(box.y * ratio),
+        width: Math.max(1, Math.round(box.width * ratio)),
+        height: Math.max(1, Math.round(box.height * ratio)),
+      };
+      const { x, y, width, height } = window.__region;
+      window.__before = canvas.getContext('2d').getImageData(x, y, width, height).data;
+    }, region);
+  }
+
+  /** How many pixels of the remembered region are now a different colour. */
+  function countChangedPixels(page) {
+    return page.evaluate(() => {
+      const canvas = document.querySelector('#score-canvas');
+      const { x, y, width, height } = window.__region;
+      const after = canvas.getContext('2d').getImageData(x, y, width, height).data;
+      const before = window.__before;
+      let changed = 0;
+      for (let at = 0; at < after.length; at += 4) {
+        if (Math.abs(after[at] - before[at]) > 12 ||
+            Math.abs(after[at + 1] - before[at + 1]) > 12 ||
+            Math.abs(after[at + 2] - before[at + 2]) > 12) changed++;
+      }
+      return changed;
+    });
+  }
+
+  /** Re-render with every barline marking stripped out of the parsed score. */
+  function stripBarlines(page) {
+    return page.evaluate(() => {
+      const renderer = window.choirPracticeApp.renderer;
+      for (const measure of renderer.metadata.measureStructure) measure.barlines = [];
+      renderer.invalidateStaticScore();
+      renderer.render();
+    });
+  }
+
+  test('the performance is longer than the page, and says so on the page', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openFixture(page, REPEAT_WITH_ENDINGS_XML, 'repeat.musicxml');
+
+    // Four bars of score, five bars of performance: 1, 2, 1, 3, 4.
+    const beats = await readState(page, `({
+      score: app.audioEngine.getTotalBeats(),
+      performance: app.audioEngine.getTotalPlaybackBeats()
+    })`);
+    expect(beats.score).toBe(16);
+    expect(beats.performance).toBe(20);
+
+    const geometry = await page.evaluate(() => {
+      const renderer = window.choirPracticeApp.renderer;
+      return { staffTop: renderer.staffTop, width: renderer.viewWidth };
+    });
+
+    // The volta brackets sit in the band above the top stave, where nothing else
+    // is ever drawn except the measure numbers lower down.
+    const bracketBand = {
+      x: 0,
+      y: Math.max(0, geometry.staffTop - 50),
+      width: geometry.width,
+      height: 18,
+    };
+    await rememberRegion(page, bracketBand);
+    await stripBarlines(page);
+    const changed = await countChangedPixels(page);
+
+    expect(changed, 'nothing above the stave is painted from the endings')
+      .toBeGreaterThan(200);
+
+    expect(problems).toEqual([]);
+  });
+
+  test('the repeat signs are painted on the staves', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openFixture(page, REPEAT_WITH_ENDINGS_XML, 'repeat.musicxml');
+
+    const staff = await page.evaluate(() => {
+      const renderer = window.choirPracticeApp.renderer;
+      return {
+        staffTop: renderer.staffTop,
+        lineSpacing: renderer.config.lineSpacing,
+        width: renderer.viewWidth,
+      };
+    });
+
+    /* A horizontal strip through the middle of the second stave space, where the
+       repeat dots sit. Staff lines fall on whole multiples of the line spacing,
+       so a strip at 1.5 spaces crosses no staff line and the dots are the only
+       thing that can put ink in it apart from a notehead. */
+    const dotStrip = {
+      x: 0,
+      y: staff.staffTop + staff.lineSpacing * 1.5 - 2,
+      width: staff.width,
+      height: 4,
+    };
+    await rememberRegion(page, dotStrip);
+    await stripBarlines(page);
+    const changed = await countChangedPixels(page);
+
+    expect(changed, 'no repeat dots are painted at the barlines').toBeGreaterThan(20);
+  });
+});
+
+test.describe('the parts panel', () => {
+  test('it closes and reopens, and closing gives the room to the score', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await page.setViewportSize({ width: 1280, height: 560 });
+    await openSample(page);
+
+    const trigger = page.locator('#parts-btn');
+    const panel = page.locator('#parts-panel');
+    await expect(panel).toBeVisible();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+
+    const wide = () => page.locator('#score-frame').evaluate(el => el.getBoundingClientRect().width);
+    const withPanel = await wide();
+
+    await trigger.click();
+    await expect(panel).toBeHidden();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    // The panel's track collapses rather than leaving a reserved gap.
+    expect(await wide()).toBeGreaterThan(withPanel + 200);
+
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    expect(Math.round(await wide())).toBe(Math.round(withPanel));
+
+    expect(problems).toEqual([]);
+  });
+
+  test('the close button inside the panel closes it', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openSample(page);
+
+    await page.locator('#parts-close').click();
+    await expect(page.locator('#parts-panel')).toBeHidden();
+    // Focus goes back to the control that can bring it back.
+    await expect(page.locator('#parts-btn')).toBeFocused();
+  });
+
+  for (const [width, height] of [[860, 640], [390, 844]]) {
+    test(`at ${width}x${height} the open panel does not cover the score`, async ({ page }) => {
+      const problems = watchForErrors(page);
+      await page.setViewportSize({ width, height });
+      await openSample(page);
+      await showParts(page);
+
+      const overlap = await page.evaluate(() => {
+        const panelEl = document.querySelector('#parts-panel');
+        const panel = panelEl.getBoundingClientRect();
+        const frame = document.querySelector('#score-frame').getBoundingClientRect();
+        const box = document.querySelector('#play-btn').getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return {
+          vertical: Math.max(0, Math.min(panel.bottom, frame.bottom) - Math.max(panel.top, frame.top)),
+          frameHeight: Math.round(frame.height),
+          modal: panelEl.matches(':modal'),
+          playReachable: Boolean(hit && hit.closest('#play-btn')),
+        };
+      });
+
+      expect(overlap.modal, 'the sheet is in the top layer again').toBe(false);
+      expect(overlap.vertical, 'the panel overlaps the score frame').toBe(0);
+      expect(overlap.frameHeight, 'the score has been squeezed to nothing').toBeGreaterThan(120);
+      expect(overlap.playReachable, 'the panel is covering the play button').toBe(true);
+
+      expect(problems).toEqual([]);
+    });
+  }
+
+  test('the space bar still plays while the panel is open', async ({ page }) => {
+    await page.setViewportSize({ width: 860, height: 640 });
+    await openSample(page);
+    await showParts(page);
+    await expect(page.locator('#parts-panel')).toBeVisible();
+
+    await page.locator('#stage').click({ position: { x: 4, y: 4 } });
+    await page.keyboard.press('Space');
+    await expect(page.locator('#play-btn')).toHaveAttribute('aria-label', 'Pause');
+    expect(await readState(page, 'app.state.isPlaying')).toBe(true);
+
+    await page.keyboard.press('Space');
+    await expect(page.locator('#play-btn')).toHaveAttribute('aria-label', 'Play');
+  });
+
+  test('Escape closes the panel', async ({ page }) => {
+    await page.setViewportSize({ width: 860, height: 640 });
+    await openSample(page);
+    await showParts(page);
+
+    await page.locator('#part-list input[name="my-part"]').first().focus();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#parts-panel')).toBeHidden();
+  });
+});
+
 test.describe('the rehearsal loop', () => {
   test('a bar range can be set and cleared', async ({ page }) => {
     const problems = watchForErrors(page);
@@ -763,6 +1001,45 @@ test.describe('accessibility basics', () => {
     });
 
     expect(ink).toBeGreaterThan(200);
+  });
+
+  test('stepping through the bars says what your part sings there', async ({ page }) => {
+    await openSample(page, 'Happy birthday');
+    await showParts(page);
+
+    /* A canvas tells a screen reader nothing, so the live region is the only
+       thing a singer reading by ear and keyboard has. It used to say "Bar 3" and
+       stop, which locates you without telling you anything about the music. */
+    await page.locator('#score-canvas').focus();
+    await page.keyboard.press('ArrowRight');
+    const spoken = await page.locator('#status-live').textContent();
+
+    expect(spoken).toMatch(/^Bar \d+/);
+    expect(spoken, 'the announcement names no pitch')
+      .toMatch(/[A-G](?: (?:double )?(?:sharp|flat))? -?\d|rest/);
+  });
+
+  test('every voice carries its name as well as its colour', async ({ page }) => {
+    await openSample(page);
+    await showParts(page);
+
+    /* The four parts are colour-coded, and green, orange and red are the classic
+       confusion set. Colour is never the only channel: the name is written in
+       the score's left gutter and on every panel row. This checks the second
+       half, because the first is a canvas. */
+    const rows = await page.locator('#part-list .part').evaluateAll(nodes =>
+      nodes.map(node => ({
+        name: node.querySelector('.part-name')?.textContent?.trim(),
+        color: node.style.getPropertyValue('--part-color'),
+      })),
+    );
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      expect(row.name, 'a part row is identified by colour alone').toBeTruthy();
+      expect(row.color).toMatch(/\S/);
+    }
+    // Distinct names, so the text channel actually distinguishes them.
+    expect(new Set(rows.map(row => row.name)).size).toBe(rows.length);
   });
 
   test('the score canvas names the piece and its parts', async ({ page }) => {
