@@ -96,6 +96,12 @@ export class Metronome {
     // instead of relying on a simple modulo counter which breaks on pickup
     // measures and time signature changes.
     this.measureStartBeats = null;
+    // Bar starts with the metre each one is in, so the click spacing can follow
+    // a change of metre rather than being fixed by the first bar of the score.
+    this.measureGrid = null;
+    // The score beat of the last click scheduled, which is what the next grid
+    // step is read from.
+    this.lastScoreBeat = 0;
   }
 
   /**
@@ -187,6 +193,52 @@ export class Metronome {
    */
   setMeasureStartBeats(startBeats) {
     this.measureStartBeats = startBeats && startBeats.length > 0 ? startBeats : null;
+    this.measureGrid = null;
+  }
+
+  /**
+   * Set the score's bar grid: where every bar starts and what metre it is in.
+   *
+   * Accents were already right through a metre change, because they come from
+   * the real measure starts above. The *spacing* was not: the whole piece was
+   * clicked at the denominator of its first bar, so a score that goes 4/4 to 6/8
+   * kept clicking crotchets against quavers, and the Eighths and Triplets
+   * subdivisions were measured against the wrong beat.
+   *
+   * @param {Array<{ startBeat: number, timeSignature?: { numerator: number, denominator: number } }>} measures
+   */
+  setMeasureGrid(measures) {
+    const grid = [];
+    let numerator = Number(this.timeSignature.numerator) || 4;
+    let denominator = Number(this.timeSignature.denominator) || 4;
+    for (const measure of measures || []) {
+      const startBeat = Number(measure?.startBeat);
+      if (!Number.isFinite(startBeat)) continue;
+      // A bar with no <time> of its own carries the last one forward, which is
+      // what MusicXML means by leaving it out.
+      if (measure.timeSignature) {
+        numerator = Number(measure.timeSignature.numerator) || numerator;
+        denominator = Number(measure.timeSignature.denominator) || denominator;
+      }
+      grid.push({ startBeat, numerator, denominator });
+    }
+    this.measureGrid = grid.length ? grid : null;
+    this.measureStartBeats = grid.length ? grid.map(entry => entry.startBeat) : null;
+  }
+
+  /**
+   * The metre in force at a score position.
+   * @param {number} scoreBeat
+   * @returns {{ numerator: number, denominator: number }}
+   */
+  timeSignatureAtScoreBeat(scoreBeat) {
+    if (!this.measureGrid) return this.timeSignature;
+    let current = this.measureGrid[0];
+    for (const entry of this.measureGrid) {
+      if (entry.startBeat > scoreBeat + 1e-3) break;
+      current = entry;
+    }
+    return current || this.timeSignature;
   }
 
   /**
@@ -239,11 +291,15 @@ export class Metronome {
         ? syncOptions.nextGridPosition
         : null;
       this.searchFrom = Math.max(0, Number(syncOptions.currentPlaybackBeat) || 0);
+      this.lastScoreBeat = Number.isFinite(syncOptions.currentScoreBeat)
+        ? Math.max(0, syncOptions.currentScoreBeat)
+        : this.searchFrom;
     } else {
       this.startTime = this.audioContext.currentTime;
       this.playbackBeatToSeconds = beat => beat * beatIntervalSeconds(this.tempo);
       this.nextGridPosition = null;
       this.searchFrom = 0;
+      this.lastScoreBeat = 0;
     }
 
     // The first click may fall exactly on the position the transport starts at.
@@ -311,17 +367,31 @@ export class Metronome {
     const scheduleAhead = () => {
       if (!this.isRunning) return;
 
-      const denominator = Number(this.timeSignature.denominator) || 4;
-      const numerator = Number(this.timeSignature.numerator) || 4;
-      const scoreBeatStep = 4 / denominator;
-      const gridStep = this.getGridStep();
       const barsOnly = this.pattern === 'bars';
       const currentTime = this.audioContext.currentTime;
       const scheduleUntil = currentTime + this.lookaheadTime;
 
       while (this.isRunning) {
+        /* The grid is re-read every click from the metre of the bar the last one
+           landed in, rather than once from the first bar of the score. Using the
+           previous click's bar rather than the next one's is not a shortcut: the
+           next position is not known until it has been searched for, and the
+           search needs a step. It is exact wherever a bar's length is a whole
+           number of the outgoing step — which is every metre change in ordinary
+           notation, because the outgoing step divides its own bar and bars abut.  */
+        const outgoing = this.timeSignatureAtScoreBeat(this.lastScoreBeat);
+        const denominator = Number(outgoing.denominator) || 4;
+        const gridStep = clickGridStep(this.pattern, denominator);
+
         const position = this.findNextClick(gridStep);
         if (!position) break; // past the end of the performance
+
+        // Beat numbering and the on/off-grid test belong to the bar the click
+        // actually falls in, which may already be the next metre.
+        const here = this.timeSignatureAtScoreBeat(position.scoreBeat);
+        const numerator = Number(here.numerator) || 4;
+        const scoreBeatStep = 4 / (Number(here.denominator) || 4);
+        this.lastScoreBeat = position.scoreBeat;
 
         const clickTime = this.startTime + this.playbackBeatToSeconds(position.playbackBeat);
         if (clickTime > scheduleUntil) break;
@@ -483,6 +553,7 @@ export class Metronome {
     this.stop();
     this.currentBeat = 0;
     this.searchFrom = 0;
+    this.lastScoreBeat = 0;
     this.searchInclusive = true;
     this.nextGridPosition = null;
   }
