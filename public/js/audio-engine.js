@@ -482,6 +482,32 @@ function disconnectAll(nodes) {
 /**
  * AudioEngine - schedules and synthesizes score playback.
  */
+/**
+ * The syllable a note carries in a given verse.
+ *
+ * Mirrors the renderer's `selectLyric`, including its rule that a score with one
+ * unnumbered verse shows that verse whatever the picker says — otherwise
+ * choosing verse two of a two-verse score would silence the vowels on any part
+ * whose lyrics are unnumbered.
+ *
+ * @param {object} note
+ * @param {number} verse 1-based
+ * @returns {{ text: string }|null}
+ */
+export function lyricForVerse(note, verse = 1) {
+  const lyrics = note?.lyrics;
+  if (Array.isArray(lyrics) && lyrics.length) {
+    const wanted = lyrics.find(lyric => Number(lyric.number) === verse);
+    const chosen = wanted || (lyrics.length === 1 ? lyrics[0] : null);
+    if (chosen && String(chosen.text || '').trim()) return chosen;
+    if (wanted || lyrics.length === 1) return null;
+    // A verse this note has no syllable for is a melisma or a rest in that
+    // verse, not a reason to fall back to verse one's word.
+    return null;
+  }
+  return note?.lyric || null;
+}
+
 export class AudioEngine {
   constructor() {
     this.audioContext = null;
@@ -492,6 +518,7 @@ export class AudioEngine {
     this.partMuted = new Map();       // partId -> boolean
     this.partSoloed = new Set();      // partIds currently soloed
     this.masterLevel = 1;             // overall output trim, 0-1
+    this.verse = 1;                   // which verse the sung vowels follow
     this.transposeSemitones = 0;      // singer's own transposition
     this.tuningHz = STANDARD_TUNING_HZ;
     this.sectionSize = 3;             // singers synthesized per voice part
@@ -812,7 +839,11 @@ export class AudioEngine {
     ceiling.oversample = '4x';
 
     const master = ctx.createGain();
-    master.gain.value = MASTER_LEVEL;
+    // `this.masterLevel` as well as the constant, so an offline render starts at
+    // the level the singer set. Only `setMasterVolume` used to apply it, and that
+    // only ever touched the live bus — so an exported WAV ignored the volume
+    // slider, which contradicted the promise that a WAV sounds like what you heard.
+    master.gain.value = MASTER_LEVEL * this.masterLevel;
 
     dry.connect(rumble);
     rumble.connect(glue);
@@ -849,11 +880,35 @@ export class AudioEngine {
       this.live.bus = this.createOutputBus(this.audioContext);
       // Kept for callers that reach for the master node directly.
       this.masterGain = this.live.bus.dry;
+      // iOS suspends the context when a call or another app takes the audio
+      // session, and the state can go back to 'interrupted' or 'suspended' long
+      // after the gesture that started it. Nothing else notices, so without this
+      // the transport goes on showing a pause button over silence.
+      this.audioContext.addEventListener?.('statechange', () => {
+        this.onContextStateChange?.(this.audioContext.state);
+      });
     }
-    if (resume && this.audioContext.state === 'suspended') {
-      await this.audioContext.resume();
+    // 'interrupted' is a Safari state, and it is neither 'running' nor
+    // 'suspended' — testing for 'running' rather than for 'suspended' is what
+    // makes this cover it.
+    if (resume && this.audioContext.state !== 'running') {
+      await this.audioContext.resume().catch(() => {});
     }
     return this.audioContext;
+  }
+
+  /**
+   * Whether the context is actually producing sound.
+   *
+   * `init()` used to return without re-reading the state, so a `resume()` that
+   * resolved without starting the clock — which is what a lost activation window
+   * or an iOS interruption looks like — left the app showing a pause button, a
+   * frozen cursor and no audio, with nothing said.
+   *
+   * @returns {boolean}
+   */
+  isRunning() {
+    return this.audioContext?.state === 'running';
   }
 
   /**
@@ -929,6 +984,24 @@ export class AudioEngine {
   }
 
   /**
+   * Which verse the synthesised voices sing.
+   *
+   * The score view has had a verse picker for a while and the audio did not
+   * follow it: `musicxml-parser` collapses every verse to `note.lyric` (verse
+   * one) and that is what chose the vowel, so picking verse three changed the
+   * page and left the choir singing verse one's vowels underneath it. Two
+   * features that are each visibly about verses disagreeing is worse than only
+   * having one of them.
+   *
+   * @param {number} verse 1-based
+   */
+  setVerse(verse) {
+    const wanted = Math.max(1, Math.round(Number(verse) || 1));
+    if (wanted === this.verse) return;
+    this.verse = wanted;
+  }
+
+  /**
    * Set the reverb amount.
    * @param {number} percent - 0 to 100
    */
@@ -991,10 +1064,17 @@ export class AudioEngine {
     // The balance decides how much of the bus the parts are allowed to use.
     this.applyEnsembleTrim();
     if (!gainNode || !this.audioContext) return;
-    // A muted part keeps its stored level so unmuting restores it exactly.
-    if (!this.partMuted.get(partId)) {
-      gainNode.gain.setTargetAtTime(normalizedVolume, this.audioContext.currentTime, 0.015);
-    }
+    // Through getEffectivePartVolume rather than writing the level straight to
+    // the node, because that is the one place that knows what mute and solo mean.
+    // This used to check mute only, which meant moving any slider — or choosing a
+    // rehearsal mix, which sets every part's volume at once — put the other three
+    // voices back while their solo buttons still read as engaged. A muted part
+    // keeps its stored level either way, so unmuting restores it exactly.
+    gainNode.gain.setTargetAtTime(
+      this.getEffectivePartVolume(partId),
+      this.audioContext.currentTime,
+      0.015
+    );
   }
 
   /**
@@ -1227,7 +1307,7 @@ export class AudioEngine {
       for (const measure of part.measures) {
         const measureStart = measure.startBeat || 0;
         for (const note of measure.notes) {
-          const lyricText = note.lyric?.text;
+          const lyricText = lyricForVerse(note, this.verse)?.text;
           if (lyricText && String(lyricText).trim()) {
             currentVowel = vowelFromSyllable(lyricText, currentVowel);
           }
