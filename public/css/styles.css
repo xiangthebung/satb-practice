@@ -771,7 +771,11 @@ input[type="checkbox"] {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  /* The panel track is sized by its own content rather than by a fixed 300px,
+     so closing the panel (which sets `display: none` on it) collapses the track
+     to nothing without anything having to remember to change the template. A
+     fixed track would keep reserving its width around a hidden element. */
+  grid-template-columns: auto minmax(0, 1fr);
   /* A bounded row keeps the scrolling score from stretching the layout. */
   grid-template-rows: minmax(0, 1fr);
 }
@@ -779,10 +783,16 @@ input[type="checkbox"] {
 /* --- Parts panel ------------------------------------------------------- */
 
 .parts-panel {
+  /* Placed explicitly, because closing it removes it from the grid entirely.
+     Left to auto-placement the score would then slide into the panel's track
+     and be sized by it, which is a subtle way of not actually reclaiming the
+     space. */
+  grid-column: 1;
+  grid-row: 1;
   position: static;
   display: flex;
   flex-direction: column;
-  width: auto;
+  width: 300px;
   max-width: none;
   max-height: none;
   height: 100%;
@@ -811,8 +821,13 @@ input[type="checkbox"] {
   font-size: 17px;
 }
 
+/* The panel closes at every width. It used to be permanent above 900px — no
+   close button, no trigger, and a `close` handler that re-opened it — which
+   meant a 300px column of mixer sat beside the score whatever the window was,
+   and on a short screen the score got a band 286px tall while most of the panel
+   itself was below its own scroll fold. */
 .panel-close {
-  display: none;
+  display: inline-flex;
 }
 
 .panel-scroll {
@@ -1264,6 +1279,8 @@ input[type="checkbox"] {
    ========================================================================= */
 
 .stage {
+  grid-column: 2;
+  grid-row: 1;
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -1604,9 +1621,6 @@ input[type="checkbox"] {
   transform: scale(1.6);
 }
 
-.panel-trigger {
-  display: none;
-}
 
 /* =========================================================================
    Popovers, dialogs, toasts
@@ -2241,18 +2255,29 @@ input[type="checkbox"] {
    ========================================================================= */
 
 @media (max-width: 1000px) {
-  .practice {
-    grid-template-columns: 264px minmax(0, 1fr);
+  .parts-panel {
+    width: 264px;
   }
 }
 
-/* Tablet and phone: the parts panel becomes a sheet over the score. */
+/* Tablet and phone: the panel moves under the score as a sheet that takes its
+   own row, rather than covering the score from the top layer.
+
+   It used to be `showModal()`, which put it above everything with a backdrop:
+   at 860x640 that hid 83% of the score, made the transport unclickable, and —
+   because the keyboard handler bails while a modal is open — stopped the space
+   bar playing. All three are fatal to the one thing the app is for, which is
+   hearing your line against the others *while* you move the balance. As a grid
+   row it pushes the score up instead, and everything stays live. */
 @media (max-width: 899px) {
   .practice {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .stage {
+    grid-column: 1;
+    grid-row: 1;
     padding: 0;
   }
 
@@ -2272,28 +2297,22 @@ input[type="checkbox"] {
     transform: translateX(50%);
   }
 
-  .panel-trigger {
-    display: inline-flex;
-  }
-
   .parts-panel {
-    position: fixed;
-    inset: auto 0 0 0;
-    width: 100%;
+    grid-column: 1;
+    grid-row: 2;
+    position: static;
+    width: auto;
     height: auto;
-    max-height: min(78dvh, 620px);
+    /* Capped so a usable band of score is always left above it. 46dvh keeps
+       roughly half the frame in view on a phone; 360px stops it looming on a
+       short landscape window. */
+    max-height: min(46dvh, 360px);
     border: 0;
     border-top: 1px solid var(--separator);
+    border-right: 0;
     border-radius: var(--radius-xl) var(--radius-xl) 0 0;
     box-shadow: var(--shadow-lg);
-    padding-bottom: env(safe-area-inset-bottom);
     animation: sheet-in 240ms cubic-bezier(0.32, 0.72, 0, 1);
-  }
-
-  .parts-panel::backdrop {
-    background: rgba(0, 0, 0, 0.35);
-    backdrop-filter: blur(3px);
-    -webkit-backdrop-filter: blur(3px);
   }
 
   .parts-panel .panel-head {
@@ -2311,10 +2330,6 @@ input[type="checkbox"] {
     border-radius: var(--radius-pill);
     background: var(--separator-strong);
     transform: translateX(-50%);
-  }
-
-  .panel-close {
-    display: inline-flex;
   }
 
   .part-rename {

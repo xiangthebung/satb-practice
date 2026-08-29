@@ -132,6 +132,34 @@ export function frequencyToNote(frequency, referenceHz = A4_FREQUENCY) {
 }
 
 /**
+ * Say a written pitch the way a singer would say it out loud.
+ *
+ * For the live region, which had only the bar number in it: someone reading the
+ * score through a screen reader could step through the bars and be told nothing
+ * about the music in them. Uses the score's own spelling rather than a
+ * frequency, so an F sharp is read as F sharp and not as G flat.
+ *
+ * @param {string} step diatonic letter
+ * @param {number} alter semitone alteration, -2..2
+ * @param {number} octave
+ * @returns {string} for example "F sharp 4"
+ */
+export function describePitch(step, alter = 0, octave = 4) {
+  const letter = String(step || '').toUpperCase();
+  // C is 0, so this has to test for absence rather than for falsiness.
+  if (STEP_SEMITONES[letter] === undefined) return '';
+  const shift = Math.round(Number(alter) || 0);
+  const accidental = ({
+    2: ' double sharp',
+    1: ' sharp',
+    0: '',
+    '-1': ' flat',
+    '-2': ' double flat'
+  })[shift] ?? '';
+  return `${letter}${accidental} ${octave}`;
+}
+
+/**
  * Colour constants for voice parts.
  * Supports standard SATB plus numbered subdivisions.
  */

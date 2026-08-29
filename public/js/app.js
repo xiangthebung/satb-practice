@@ -7,8 +7,9 @@
  */
 
 import { parseFile, detectVoiceType } from './musicxml-parser.js';
+import { describePitch } from './utils.js';
 import { NotationRenderer } from './notation-renderer.js';
-import { AudioEngine } from './audio-engine.js';
+import { AudioEngine, lyricForVerse } from './audio-engine.js';
 import { PitchDetector } from './pitch-detector.js';
 import { Metronome, isClickPattern } from './metronome.js';
 import { readScoreTheme, watchColorScheme } from './theme.js';
@@ -283,6 +284,30 @@ class ChoirPracticeApp {
     this.overlays.announce(
       `${this.getScoreTitle(result, file.name)} is open with ${result.parts.length} parts. Press space to play.`
     );
+    this.reportUnperformed(result.metadata);
+  }
+
+  /**
+   * Say out loud what is written on the page but will not be played.
+   *
+   * The parser has always worked this out — `summariseFeatures` builds an
+   * `unperformed` list precisely "so the app can tell a singer when something
+   * written on the page is not reflected in playback instead of quietly ignoring
+   * it" — and then nothing read it, so the app quietly ignored it anyway. A
+   * singer whose score says *D.C. al Fine* and hears it played straight through
+   * has no way to tell whether the app skipped the jump or they misread the page.
+   *
+   * @param {object} metadata
+   */
+  reportUnperformed(metadata) {
+    const unperformed = metadata?.features?.unperformed || [];
+    if (!unperformed.length) return;
+    const list = unperformed.length === 1
+      ? unperformed[0]
+      : `${unperformed.slice(0, -1).join(', ')} and ${unperformed[unperformed.length - 1]}`;
+    const message = `This score has ${list}, which playback does not follow. The notes are all there.`;
+    this.overlays.toast(message, { duration: 9000 });
+    this.overlays.announce(message);
   }
 
   getScoreTitle(result, fileName) {
@@ -628,7 +653,7 @@ class ChoirPracticeApp {
       onToggleLoop: () => this.toggleLoop(),
       onToggleMetronome: () => this.toggleMetronome(),
       onToggleMic: () => this.toggleMicrophone(),
-      onOpenParts: () => this.partsPanel.openSheet(),
+      onOpenParts: () => this.partsPanel.toggle(),
       onTempoPreview: bpm => this.previewTempo(bpm),
       onTempoCommit: bpm => this.setTempo(bpm),
       // The fields are the source of truth for this path, so nothing is written
@@ -671,6 +696,7 @@ class ChoirPracticeApp {
       this.audioEngine.onBeatUpdate = beat => this.handleBeatUpdate(beat);
       this.audioEngine.onPlaybackEnd = () => this.handlePlaybackEnd();
       this.audioEngine.onLoopEnd = () => this.handleLoopEnd();
+      this.audioEngine.onContextStateChange = state => this.handleAudioContextState(state);
     }
 
     if (!this.metronome) {
@@ -698,6 +724,7 @@ class ChoirPracticeApp {
     this.audioEngine.setFollowDynamics(this.state.followDynamics);
     this.audioEngine.setCountInBars(this.state.countInBars);
     this.audioEngine.setFermataMultiplier(this.state.fermata);
+    this.audioEngine.setVerse(this.state.verse);
     this.audioEngine.setParts(this.state.parts);
     // The structure has to land before the tempo: the rehearsal tempo is a scale
     // on the score's own tempo map, so the map must be known first.
@@ -725,11 +752,9 @@ class ChoirPracticeApp {
         firstMeasure.timeSignature.denominator
       );
     }
-    // Real measure starts keep accents correct through pickup bars and
-    // time-signature changes.
-    this.metronome.setMeasureStartBeats(
-      (this.state.parts[0]?.measures || []).map(measure => measure.startBeat)
-    );
+    // Real bar starts *with their metre*: accents follow pickup bars and metre
+    // changes, and so does the spacing between clicks.
+    this.metronome.setMeasureGrid(this.state.parts[0]?.measures || []);
   }
 
   handleBeatUpdate(beat) {
@@ -792,6 +817,26 @@ class ChoirPracticeApp {
     }
   }
 
+  /**
+   * The browser suspended the audio clock while a performance was running.
+   *
+   * On iOS this is a phone call or another app taking the audio session; on any
+   * platform it can be the tab being discarded and restored. The transport would
+   * otherwise keep showing a pause button over silence, which reads as the app
+   * being broken rather than as the browser having stopped it.
+   *
+   * @param {string} state
+   */
+  handleAudioContextState(state) {
+    if (state === 'running' || !this.state.isPlaying) return;
+    this.state.isPlaying = false;
+    this.audioEngine?.pause();
+    if (this.state.metronome) this.metronome?.stop();
+    this.transport.setPlaying(false);
+    this.updateTransportPosition();
+    this.overlays.toast('The browser paused the sound. Press play to carry on.');
+  }
+
   async startOrPausePlayback() {
     await this.initAudioEngine();
     this.autoScrollResumesAt = 0;
@@ -803,6 +848,18 @@ class ChoirPracticeApp {
       this.transport.setPlaying(false);
       this.overlays.announce('Paused');
     } else {
+      // A context that did not start has to be reported, not played into. This
+      // is the autoplay-policy case: the activation window was spent elsewhere,
+      // `resume()` resolved without starting the clock, and every note would be
+      // scheduled against a frozen time with the pause button showing.
+      if (!this.audioEngine.isRunning()) {
+        this.overlays.toast(
+          'The browser is holding sound back. Click anywhere on the page, then press play.',
+          { type: 'error' }
+        );
+        this.transport.setPlaying(false);
+        return;
+      }
       this.state.isPlaying = true;
       if (this.renderer) this.renderer.isAutoScrollEnabled = true;
       this.audioEngine.setTempo(this.state.tempo);
@@ -833,8 +890,13 @@ class ChoirPracticeApp {
 
     const startPlaybackBeat = this.audioEngine.getPlaybackBeat(this.state.currentBeat);
     const secondsPerBeat = this.audioEngine.timeline.secondsPerBeatAt(startPlaybackBeat);
-    const firstMeasure = this.state.parts[0]?.measures?.[0];
-    const denominator = Number(firstMeasure?.timeSignature?.denominator) || 4;
+    // The metre of the bar being counted into, not of the first bar of the score.
+    // `getCountInBeats` already measures the right bar, so taking the numerator
+    // and denominator from bar one meant a count-in that was the correct length
+    // but clicked at the wrong spacing and accented in the wrong place as soon as
+    // the singer started from after a metre change.
+    const measure = this.getMeasureAtBeat(this.state.currentBeat);
+    const denominator = Number(measure?.timeSignature?.denominator) || 4;
     const clickInterval = secondsPerBeat * (4 / denominator);
     const clicks = clickInterval > 0 ? Math.round(beats / (4 / denominator)) : 0;
 
@@ -842,8 +904,27 @@ class ChoirPracticeApp {
       startTime: this.audioEngine.getStartTime(),
       clicks,
       interval: clickInterval,
-      beatsPerBar: Number(firstMeasure?.timeSignature?.numerator) || 4
+      beatsPerBar: Number(measure?.timeSignature?.numerator) || 4
     });
+  }
+
+  /**
+   * The bar a score position falls in, with its metre carried forward from the
+   * last bar that declared one.
+   * @param {number} scoreBeat
+   * @returns {object|null}
+   */
+  getMeasureAtBeat(scoreBeat) {
+    const measures = this.state.parts[0]?.measures || [];
+    let found = null;
+    let timeSignature = null;
+    for (const measure of measures) {
+      if (measure.timeSignature) timeSignature = measure.timeSignature;
+      if (measure.startBeat > scoreBeat + 1e-3) break;
+      found = measure;
+    }
+    if (!found) return null;
+    return found.timeSignature ? found : { ...found, timeSignature };
   }
 
   startMetronome() {
@@ -853,6 +934,7 @@ class ChoirPracticeApp {
     this.metronome.start({
       startTime: this.audioEngine.getStartTime(),
       currentPlaybackBeat: this.audioEngine.getCurrentPlaybackBeat(),
+      currentScoreBeat: this.state.currentBeat,
       nextGridPosition: (after, step, options) =>
         this.audioEngine.timeline.nextGridPosition(after, step, options),
       playbackBeatToSeconds: beat => this.audioEngine.playbackBeatToSeconds(beat)
@@ -1048,6 +1130,9 @@ class ChoirPracticeApp {
     this.state.verse = Math.max(1, Math.round(Number(verse) || 1));
     writePref('verse', this.state.verse);
     this.renderer?.setVerse(this.state.verse);
+    // The sung vowels follow the verse on the page.
+    this.audioEngine?.setVerse(this.state.verse);
+    this.rebuildPlaybackForPitchChange();
     this.overlays.announce(`Showing verse ${this.state.verse}`);
   }
 
@@ -1347,7 +1432,34 @@ class ChoirPracticeApp {
 
   announceBar() {
     const label = this.getBarLabel();
-    if (label) this.overlays.announce(label.charAt(0).toUpperCase() + label.slice(1));
+    if (!label) return;
+    const spoken = label.charAt(0).toUpperCase() + label.slice(1);
+    const note = this.describeNoteUnderCursor();
+    this.overlays.announce(note ? `${spoken}, ${note}` : spoken);
+  }
+
+  /**
+   * What the singer's own part has at the cursor, in words.
+   *
+   * The score is a canvas, so a screen reader gets nothing from it beyond the
+   * label. Stepping through the bars used to announce "Bar 3" and stop there,
+   * which tells somebody where they are and nothing about what is written. The
+   * note is read from the score's own spelling, so an F sharp is announced as an
+   * F sharp rather than as a G flat.
+   *
+   * @returns {string}
+   */
+  describeNoteUnderCursor() {
+    if (!this.renderer) return '';
+    const part = this.state.parts.find(candidate => candidate.id === this.state.myPartId);
+    if (!part) return '';
+    const target = this.renderer.findTargetNote(part, this.state.currentBeat, null);
+    const pitch = target?.note?.pitch;
+    if (!pitch) return 'rest';
+    const spoken = describePitch(pitch.step, pitch.alter, pitch.octave);
+    if (!spoken) return '';
+    const syllable = lyricForVerse(target.note, this.state.verse)?.text;
+    return syllable ? `${spoken}, "${String(syllable).trim()}"` : spoken;
   }
 
   updateTransportPosition({ throttle = false } = {}) {
@@ -1414,12 +1526,14 @@ class ChoirPracticeApp {
       if (this.pitchPill) this.pitchPill.hidden = false;
       this.overlays.announce('Microphone on. Pitch guidance is listening.');
     } else {
+      // The detector says why. Repeating one message for every failure sent
+      // people with no microphone to a permissions screen that could not help.
+      const reason = detector.failureReason ||
+        'The microphone could not be started. Try turning the guidance on again.';
       this.pitchDetector = null;
       this.setMicState('error');
-      this.overlays.toast(
-        'Microphone access was blocked. Allow it in your browser settings to use pitch guidance.',
-        { type: 'error' }
-      );
+      this.overlays.toast(reason, { type: 'error' });
+      this.overlays.announce(reason);
     }
   }
 
@@ -1585,9 +1699,10 @@ class ChoirPracticeApp {
     } catch (error) {
       // :modal is unsupported; fall back to what the modules know.
     }
-    return this.overlays.isDialogOpen() ||
-      this.partsPanel.isSheetOpen() ||
-      this.settings.isOpen();
+    // The parts panel is deliberately not in this list. It is a non-modal panel
+    // that sits beside or under the score, and the whole point of it is that you
+    // can hold it open and still press space.
+    return this.overlays.isDialogOpen() || this.settings.isOpen();
   }
 
   handleKeydown(event) {

@@ -3,16 +3,40 @@
  * the score is displayed.
  *
  * On wide screens the panel is a column beside the score. On narrow screens the
- * same markup becomes a modal bottom sheet, which keeps one implementation and
- * one set of behaviours for both layouts.
+ * same markup becomes a bottom sheet under it. One implementation, one set of
+ * behaviours, and in both layouts it is a plain non-modal `<dialog open>` that
+ * takes its own grid track — so it can be closed, and while it is open the
+ * score, the transport and the keyboard all still work.
+ *
+ * It was not always. The sheet used to be `showModal()`, which put it in the top
+ * layer over the score with a backdrop: measured at 860x640 it covered 83% of the
+ * score, made the play button unclickable, and stopped the space bar because the
+ * app's keyboard handler stands down while a modal dialog is open. Above 900px
+ * the panel had the opposite problem — no close button, no trigger, and a `close`
+ * listener that re-opened it — so a 300px column of mixer was permanent, and on a
+ * short window the score got a 286px band while most of the panel sat below its
+ * own scroll fold. Both are the same mistake: treating the mixer as something you
+ * visit instead of something you hold open while you sing.
  */
 
 import { getPartColor } from '../utils.js';
 import { getPartLabel } from '../notation-renderer.js';
 import { MIX_PRESETS } from '../mix.js';
 import { ensureContrast, readScoreTheme } from '../theme.js';
+import { readBoolPref, writeBoolPref } from '../prefs.js';
 
 const SHEET_QUERY = '(max-width: 899px)';
+
+/**
+ * Whether the panel is open, on wide screens only.
+ *
+ * Not remembered for the sheet layout. A phone has little enough score showing
+ * that starting with the mixer over half of it is the wrong first impression,
+ * and someone who wants it has one button to press. The wide-screen state is
+ * worth keeping, because that is where closing it is a considered choice about
+ * how much room the score gets.
+ */
+const PANEL_OPEN_PREF = 'parts-panel-open';
 
 /** Coerce a stored volume into a usable 0-100 percentage. */
 function clampVolume(value) {
@@ -71,24 +95,39 @@ export class PartsPanel {
     this.dimSwitch = document.getElementById('dim-others');
     this.coach = document.getElementById('coach');
     this.closeButton = document.getElementById('parts-close');
+    this.trigger = document.getElementById('parts-btn');
     this.rows = new Map();
-    this.isModal = false;
     this.visible = false;
 
     this.sheetQuery = window.matchMedia(SHEET_QUERY);
-    this.sheetQuery.addEventListener('change', () => this.syncLayout());
+    this.expanded = this.defaultExpanded();
+    this.sheetQuery.addEventListener('change', () => {
+      // Crossing the breakpoint is a change of layout, not of intent, so the
+      // state goes back to what that layout starts at rather than carrying a
+      // wide-screen choice onto a phone.
+      this.expanded = this.defaultExpanded();
+      this.syncLayout();
+    });
 
     // The transport owns the button that opens this panel, so it is bound once
     // there and routed through the app.
     this.closeButton?.addEventListener('click', () => this.close());
-    this.panel?.addEventListener('close', () => {
-      this.isModal = false;
-      // The panel is permanent on wide screens; re-open it after a stray close.
-      if (this.visible && !this.sheetQuery.matches) this.syncLayout();
+    // A non-modal <dialog> gets no Escape handling of its own.
+    this.panel?.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      this.close();
     });
 
     this.renderMixOptions();
     this.bindGlobalControls();
+    this.syncTrigger();
+  }
+
+  /** How the panel starts in the current layout. */
+  defaultExpanded() {
+    if (this.sheetQuery.matches) return false;
+    return readBoolPref(PANEL_OPEN_PREF, true);
   }
 
   bindGlobalControls() {
@@ -110,7 +149,7 @@ export class PartsPanel {
 
   /* ----------------------------------------------------------------- layout */
 
-  /** Show the panel: inline beside the score, or as a sheet on demand. */
+  /** A score is open: the panel may now show. */
   show() {
     this.visible = true;
     this.syncLayout();
@@ -119,56 +158,69 @@ export class PartsPanel {
   /** Hide the panel entirely, for example when returning to the home screen. */
   hide() {
     this.visible = false;
-    this.closeDialog();
+    this.syncLayout();
+  }
+
+  /** True while the panel is showing. */
+  isOpen() {
+    return Boolean(this.visible && this.expanded && this.panel?.open);
   }
 
   syncLayout() {
     if (!this.panel) return;
-    if (!this.visible) {
-      this.closeDialog();
-      return;
-    }
-
-    if (this.sheetQuery.matches) {
-      // Narrow screens open the sheet only when asked for.
-      if (!this.isModal) this.closeDialog();
-      return;
-    }
-
-    if (this.isModal) this.closeDialog();
-    this.panel.open = true;
+    const shouldOpen = this.visible && this.expanded;
+    // `open` rather than `showModal()`: a modal dialog is in the top layer, so it
+    // would sit over the score whatever the stylesheet asks for, and would take
+    // the keyboard away from the transport.
+    if (this.panel.open !== shouldOpen) this.panel.open = shouldOpen;
+    this.syncTrigger();
   }
 
-  openSheet() {
-    if (!this.panel || !this.visible) return;
-    if (!this.sheetQuery.matches) {
-      this.panel.open = true;
-      this.panel.querySelector('input, button')?.focus();
-      return;
-    }
-    this.closeDialog();
-    if (typeof this.panel.showModal === 'function') {
-      this.panel.showModal();
-      this.isModal = true;
-    } else {
-      this.panel.open = true;
-    }
+  syncTrigger() {
+    if (!this.trigger) return;
+    const open = this.isOpen();
+    this.trigger.setAttribute('aria-expanded', String(open));
+    const label = open ? 'Hide parts and mix' : 'Parts and mix';
+    this.trigger.setAttribute('aria-label', label);
+    this.trigger.title = label;
+  }
+
+  /** Open the panel, moving focus into it when it was closed. */
+  open() {
+    this.setExpanded(true, { focus: true });
   }
 
   close() {
-    if (this.sheetQuery.matches) this.closeDialog();
+    this.setExpanded(false, { focus: true });
   }
 
-  /** True while the panel covers the score as a modal sheet. */
-  isSheetOpen() {
-    return Boolean(this.panel?.open && this.isModal);
+  /** The transport button: one control that both opens and closes the panel. */
+  toggle() {
+    this.setExpanded(!this.expanded, { focus: true });
   }
 
-  closeDialog() {
-    if (!this.panel) return;
-    if (this.panel.open && typeof this.panel.close === 'function') this.panel.close();
-    else this.panel.open = false;
-    this.isModal = false;
+  /**
+   * @param {boolean} expanded
+   * @param {{ focus?: boolean }} [options] move focus with the change
+   */
+  setExpanded(expanded, { focus = false } = {}) {
+    const next = Boolean(expanded);
+    if (!this.visible) {
+      this.expanded = next;
+      this.syncLayout();
+      return;
+    }
+    const changed = this.expanded !== next;
+    this.expanded = next;
+    if (!this.sheetQuery.matches) writeBoolPref(PANEL_OPEN_PREF, next);
+    this.syncLayout();
+    if (!changed || !focus) return;
+    // In the sheet layout the panel is placed below the score by `grid-row`, so
+    // its position in the DOM is ahead of where it appears. Moving focus into it
+    // on open and back to the trigger on close keeps the two orders agreeing for
+    // anyone driving this from the keyboard.
+    if (next) this.panel?.querySelector('input, button')?.focus();
+    else this.trigger?.focus();
   }
 
   /* ------------------------------------------------------------------ parts */
