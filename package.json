@@ -11,8 +11,9 @@
   "scripts": {
     "test": "node tests/run-tests.js",
     "test:static": "node tests/check-static.js",
+    "test:docs": "node tests/check-docs.js",
     "test:parser": "node tests/parse-samples.js",
-    "check": "npm run lint && npm run test:static && npm test && npm run test:parser",
+    "check": "npm run lint && npm run test:static && npm run test:docs && npm test && npm run test:parser",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "serve": "node tools/serve.js",

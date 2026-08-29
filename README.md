@@ -7,23 +7,73 @@ no accounts, no uploads, no build step.
 ## Features
 
 - **Scores** — uncompressed `.musicxml` / `.xml` and compressed `.mxl` files,
-  opened from the file picker or by drag and drop. Four sample pieces are
+  opened from the file picker or by drag and drop. Three sample pieces are
   included; see [Bundled scores](#bundled-scores).
 - **Your part** — pick the voice you sing; the app remembers it and selects the
   matching part in the next score you open.
 - **Balance** — four rehearsal mixes (mostly your part, only your part, everyone
-  but you, everyone) plus per-part volume and mute.
+  but you, everyone) plus per-part volume, mute and solo. The panel opens beside
+  the score on a wide window and under it on a narrow one, and closes either way,
+  so you can move a fader while the music is playing.
 - **Playback** — synthesised voices or plain tones, tempo from 40 to 240 BPM,
-  room reverb, fermata hold length, looping, and a metronome that accents real
-  barlines (including pickup bars and time-signature changes). Each voice part
-  is rendered as a section of singers, and sung vowels follow the lyrics.
-- **Score view** — scrolling notation with the playhead pinned in view, key
-  signatures, beams, ties, slurs, tuplets and fermatas; click to jump, drag to
-  scrub, scroll sideways to read ahead.
+  room reverb, fermata hold length, looping, and a metronome whose accents *and*
+  spacing follow the score's own bars, including pickup bars and a change of
+  metre partway through. Each voice part is rendered as a section of singers, and
+  the sung vowels follow the words of whichever verse is on screen.
+- **Score view** — scrolling notation with the playhead pinned in view; click to
+  jump, drag to scrub, scroll sideways to read ahead. What it draws and what it
+  plays are set out in [Notation coverage](#notation-coverage), because those two
+  lists are not the same.
 - **Microphone guidance** — optional pitch feedback against the written note,
   shown as a calm left/right indicator plus a trail on your stave.
 - **Export** — a WAV of the current mix, or MusicXML with your tempo and part
   names written back in.
+
+## Notation coverage
+
+Real scores contain more than any one tool reads, and the expensive failure is
+not an unsupported marking — it is an unsupported marking that disappears
+silently, so the ear and the page disagree and you cannot tell which is wrong.
+This is what the app actually does with each one. *Drawn* means it appears on the
+canvas; *played* means it changes what you hear.
+
+| | drawn | played |
+| --- | :---: | :---: |
+| Notes, rests, chords, dotted values | yes | yes |
+| Ties, including across a barline | yes | yes |
+| Slurs | yes | yes (as legato) |
+| Beams and tuplets, bracketed or not | yes | yes |
+| Key signatures, and changes mid-score | yes | n/a |
+| Time signatures, and changes mid-score | yes | yes |
+| Pickup bars | yes | yes |
+| Clefs: treble, bass, alto, tenor, octave-down treble | yes | yes |
+| Accidentals, including double sharps and flats | yes | yes |
+| Lyrics: several verses, hyphens, melismas | yes | yes (chooses the vowel) |
+| Divisi — two or more voices on one staff | yes | yes |
+| Transposing parts | written pitch | sounding pitch |
+| Fermatas, on notes and on barlines | yes | yes (hold is adjustable) |
+| Repeat barlines, including `times` | yes | yes |
+| First and second endings | yes | yes |
+| Final and double barlines | yes | n/a |
+| Dynamics and hairpins | **no** | yes |
+| Articulations: staccato, accent, tenuto, marcato | **no** | yes |
+| Tempo marks and mid-score tempo changes | **no** | yes |
+| Grace notes | yes | **no** |
+| Ornaments: trill, mordent, turn | **no** | **no** |
+| D.C., D.S., Coda, Fine | **no** | **no** |
+
+When a score contains something in the last two rows, the app says so in a
+message as it opens, rather than performing it straight through and leaving you
+to work out why the recording and the page disagree.
+
+Not read at all: non-traditional key signatures (`<key-step>`), unmetred music
+(`senza-misura`), common and cut time symbols (drawn as `4/4` and `2/2`),
+multi-measure rests, system and page breaks from `<print>`, unpitched and
+percussion notes, and cue notes — a cue note is sung at full size. A mid-score
+clef change repositions the notes correctly but prints no new clef. Only the
+first `<transpose>` in a part is honoured. `score-timewise` documents are
+rejected with a message asking for a partwise export, which is what notation
+software writes by default.
 
 ## Bundled scores
 
@@ -36,13 +86,18 @@ them — easiest first. All three are music.
 | Draw on, sweet night | SSAATB | 70 bars | John Wilbye, 1609. Imitative six-part counterpoint. |
 | Quick! We have but a second | SATB | 104 bars | C. V. Stanford. Fast, and in shifting compound metre. |
 
-There was a fourth, "Warm-up in four parts" — eight bars of I–IV–V–I written for
-this repository. It is gone from the app. It existed to give one browser test a
-score where two voices share a staff, which is the case where forced down-stems
-used to be drawn through the words, and that is a reason for the *shape* to exist,
-not a reason to offer a singer a harmony exercise. The shape is now a test fixture
-in `e2e/fixtures/two-voices-on-one-staff.js`, loaded through the app's own file
-input, and the samples are three real pieces.
+None of the three has a repeat in it, which is how the repeat signs came to be
+performed and never drawn. The browser tests carry two scores of their own for
+the shapes no sample has:
+
+- `e2e/fixtures/repeat-with-endings.js` — a repeat with first and second endings.
+- `e2e/fixtures/two-voices-on-one-staff.js` — two voices sharing a staff, which is
+  where forced down-stems used to be drawn through the words. This shipped as a
+  fourth sample called "Warm-up in four parts" and was removed: it is a harmony
+  exercise rather than a piece, and a rehearsal tool should offer music.
+
+Both are loaded through the app's own file input, the same path a singer's own
+file takes.
 
 "Happy Birthday" is generated, so the music can be edited rather than re-engraved:
 
@@ -76,6 +131,10 @@ directory works too, as long as it is pointed at `public/`:
 python3 -m http.server 8000 --directory public
 ```
 
+Microphone guidance needs a secure context, which `http://localhost` counts as.
+Opening the same server over a LAN address will not offer the microphone at all,
+and the app says so rather than blaming your permissions.
+
 ## Deploying
 
 The site is a Cloudflare Worker with static assets, configured in
@@ -92,6 +151,14 @@ production branch publishes to `satb-practice.xiangli3625.workers.dev`; every ot
 branch gets a preview build. Keep that setting and this repository's default branch
 pointing at the same branch, or the site quietly stops tracking the code — that is
 exactly how the deployed site came to be sixteen commits behind.
+
+This has now gone wrong twice, so it is worth knowing how to check rather than
+how to remember: open the live site and compare the scores on its home screen
+with the files in `public/sample-pieces/`. That list changes often enough to be a
+reliable tell, and it needs no dashboard access. If the live site offers a score
+this repository does not have, the site is not tracking this branch, and no
+amount of pushing will change that — the fix is the production-branch setting
+above, or the Workers Builds integration having been disconnected.
 
 Cloudflare deploys on push without waiting for the suites above, so a red build can
 still reach the site. Gating it means moving the deploy into
@@ -121,12 +188,29 @@ the repository root.
 | <kbd>Home</kbd> | Back to the start |
 | <kbd>M</kbd> | Metronome |
 | <kbd>R</kbd> | Loop |
+| <kbd>[</kbd> <kbd>]</kbd> | Loop from or to here |
+| <kbd>\\</kbd> | Loop the whole score |
+| <kbd>,</kbd> | Settings |
 | <kbd>?</kbd> | Help |
+
+Every control is reachable by tab, in reading order, and the score canvas is one
+of the stops. Moving a bar at a time announces the bar number and what your own
+part sings there — "Bar 12, F sharp 4" — because a canvas tells a screen reader
+nothing on its own. The four voices are colour-coded, and every place that uses
+the colour also carries the part's name in text: in the left gutter of the score,
+and on each row of the parts panel.
 
 ## Privacy
 
-Scores never leave the device. When microphone guidance is on, audio is analysed
-in the page and is never recorded, stored, or sent anywhere.
+Scores never leave the device: they are read with `File.arrayBuffer()` and parsed
+in the page. The three bundled samples are fetched from the same origin that
+serves the app, and nothing else is requested over the network. When microphone
+guidance is on, audio is analysed in the page by `public/js/pitch-detector.js` and
+is never recorded, stored, or sent anywhere; turning it off stops the media
+tracks, so the browser's recording indicator goes out. Preferences — your voice
+part, tempo, mix and the rest — are kept in `localStorage` on your own device.
+There is no analytics, no telemetry and no third-party script anywhere in
+`public/`.
 
 ## Project layout
 
@@ -152,6 +236,8 @@ public/js/prefs.js           saved preferences
 public/js/exporters.js       WAV and MusicXML export
 public/sample-pieces/        the bundled scores
 tests/run-tests.js           unit tests for the pure logic
+tests/check-static.js        markup, module graph and call-site wiring
+tests/check-docs.js          this README against the code it describes
 e2e/practice.spec.js         browser tests
 tools/serve.js               the local static server
 wrangler.jsonc               Cloudflare Worker and assets configuration
@@ -160,13 +246,28 @@ wrangler.jsonc               Cloudflare Worker and assets configuration
 ## Tests
 
 ```sh
-node tests/run-tests.js
+npm run check      # lint, wiring, docs, unit tests, parser against real scores
+npm run e2e        # browser tests; npm run e2e:install once, first
+npm run verify     # both
 ```
 
-The suite covers the parts that can be reasoned about without a browser: pitch
-and note maths, measure layout, mix presets, key signatures and accidentals,
-archive reading, and the formatting helpers.
+`npm test` runs the unit suite alone. It covers the parts that can be reasoned
+about without a browser: pitch and note maths, measure layout, mix presets, key
+signatures and accidentals, archive reading, the rules that decide what a solo or
+a mute lets through, and the formatting helpers.
 
-Before a release, also check in the browsers you support: playback and seeking,
-the metronome, WAV export, microphone permission (allowed and blocked), keyboard-
-only navigation, a phone-sized viewport, and both light and dark appearance.
+`npm run test:docs` reads this file and fails if it has drifted from the code —
+if the keyboard table and the key handler disagree, if a bundled score is not
+offered on the home screen, if a path in the layout above does not exist, or if a
+command named here is not in `package.json`. It exists because every one of those
+had gone stale at least once.
+
+The browser suite drives the real app in two viewports and asserts geometry
+rather than class names where the geometry is the point: that the parts panel
+never covers the score, that the repeat signs are painted from the score's own
+barlines, and that the words are painted clear of the notes above them.
+
+What no suite here checks, and what still wants a person: how the synthesised
+voices actually sound, whether the microphone guidance tracks a real voice in a
+real room, and how any of it behaves in Safari or Firefox. Nothing in this
+repository has been run in either.
