@@ -235,6 +235,46 @@ export function classifyAccuracy(cents) {
 }
 
 /**
+ * Turn a `getUserMedia` rejection into something a singer can act on.
+ *
+ * Every one of these used to produce the same sentence — "Microphone access was
+ * blocked. Allow it in your browser settings" — which is only true for one of
+ * them. Told that, someone with no microphone at all goes and looks at a
+ * permissions list that already says "allow", and someone on plain HTTP never
+ * finds out that the browser will not offer the microphone at all until the page
+ * is served over HTTPS.
+ *
+ * Pure, and exported, so the mapping is unit-testable without a browser or a
+ * device. The names are `DOMException.name` values from the getUserMedia spec,
+ * plus the two legacy spellings Chrome and Firefox both emitted for years.
+ *
+ * @param {unknown} error
+ * @returns {string} a sentence to show the singer
+ */
+export function describeMicrophoneFailure(error) {
+  switch (error?.name) {
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+      return 'Microphone access was blocked. Allow it in your browser settings to use pitch guidance.';
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return 'No microphone was found. Connect one, then turn the guidance on again.';
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'The microphone is being used by another app. Close it, then try again.';
+    case 'OverconstrainedError':
+    case 'ConstraintNotSatisfiedError':
+      return 'This microphone cannot record in the format the guidance needs.';
+    case 'SecurityError':
+      return 'Pitch guidance needs a secure connection. Open this page over HTTPS, or on localhost.';
+    case 'AbortError':
+      return 'The microphone stopped responding. Try turning the guidance on again.';
+    default:
+      return 'The microphone could not be started. Try turning the guidance on again.';
+  }
+}
+
+/**
  * PitchDetector class - manages microphone input and real-time pitch detection.
  */
 export class PitchDetector {
@@ -297,10 +337,23 @@ export class PitchDetector {
 
   /**
    * Request microphone access and set up the audio graph.
+   *
+   * On failure, `failureReason` holds a sentence saying what actually went
+   * wrong. It used to say "access was blocked" whatever happened, which is a lie
+   * to anyone whose laptop has no microphone, or who opened the page over plain
+   * HTTP on their own network — both of which send the singer to a permissions
+   * screen that will not help them.
+   *
    * @returns {Promise<boolean>} true if microphone was successfully accessed
    */
   async start() {
+    this.failureReason = null;
     try {
+      if (!globalThis.navigator?.mediaDevices?.getUserMedia) {
+        // Missing rather than refused: the API is only exposed in a secure
+        // context, so this is nearly always plain HTTP on a LAN address.
+        throw new DOMException('getUserMedia is unavailable', 'SecurityError');
+      }
       // Request mic permission first, before creating the AudioContext.
       // Some browsers require this ordering.
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -365,7 +418,7 @@ export class PitchDetector {
       return true;
     } catch (err) {
       // A refused or unavailable microphone is a user choice, not a fault.
-      console.warn('Microphone unavailable:', err?.name || err);
+      this.failureReason = describeMicrophoneFailure(err);
       this.stop();
       return false;
     }
