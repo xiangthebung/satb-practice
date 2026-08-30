@@ -262,6 +262,50 @@ test.describe('parts and mix', () => {
     expect(problems).toEqual([]);
   });
 
+  test('the shortcuts still work once you have chosen your part', async ({ page }) => {
+    // Choosing a part is the first thing anybody does, and it leaves focus on a
+    // radio. Every shortcut the help sheet advertises used to stop working at
+    // that moment -- silently, so the app simply appeared not to respond. The
+    // arrows and Home belong to the radio group and still do; everything else
+    // does not and now falls through.
+    const problems = watchForErrors(page);
+    await openSample(page);
+    await showParts(page);
+
+    const chosen = page.locator('#part-list .part input[name="my-part"]').nth(1);
+    await chosen.check();
+    await expect(chosen).toBeFocused();
+
+    const metronomeBefore = await readState(page, 'app.state.metronome');
+    await page.keyboard.press('m');
+    expect(
+      await readState(page, 'app.state.metronome'),
+      'M did not reach the metronome from a focused part radio'
+    ).toBe(!metronomeBefore);
+
+    await page.keyboard.press('Space');
+    await expect(page.locator('#play-btn')).toHaveAttribute('aria-label', 'Pause');
+    await page.keyboard.press('Space');
+    await expect(page.locator('#play-btn')).toHaveAttribute('aria-label', 'Play');
+
+    // And `?` opens the sheet that makes the promise, which was itself swallowed.
+    await page.keyboard.press('?');
+    await expect(page.locator('#help-dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    // The keys the radio group genuinely owns are still the radio group's: an
+    // arrow moves the choice, it does not seek a bar.
+    await chosen.focus();
+    const barBefore = await readState(page, 'app.renderer.currentBeat');
+    await page.keyboard.press('ArrowRight');
+    expect(
+      await readState(page, 'app.renderer.currentBeat'),
+      'the arrow keys stopped belonging to the radio group'
+    ).toBe(barBefore);
+
+    expect(problems).toEqual([]);
+  });
+
   test('solo isolates a part and can be cleared', async ({ page }) => {
     const problems = watchForErrors(page);
     await openSample(page);

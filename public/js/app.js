@@ -1710,11 +1710,42 @@ class ChoirPracticeApp {
 
     const target = event.target;
     const tag = target?.tagName;
-    const isSlider = tag === 'INPUT' && target.type === 'range';
-    // Form controls keep their own keys, including slider arrows. A slider does
-    // nothing with space, so play/pause still works from there.
+    const type = tag === 'INPUT' ? target.type : '';
+
+    /*
+     * Form controls keep their own keys -- but only the ones they actually use.
+     *
+     * This used to hand a focused `<input>` every key on the board, and the bill
+     * for that arrived immediately after the most common action in the app.
+     * Choosing your part leaves focus on a radio; touching a balance fader leaves
+     * it on a slider. From either, nine of the ten shortcuts the help sheet
+     * advertises silently stopped working -- space would not play, `M` would not
+     * click, `[` and `]` would not mark a loop, `,` would not open settings, and
+     * `?` would not open the sheet that had just promised all of them. Nothing
+     * said so. You pressed the key and the app did nothing.
+     *
+     * A radio and a slider do use the arrows, Home and End; those genuinely
+     * belong to the control and are still its. Everything else -- letters and
+     * punctuation -- means nothing to either, so it falls through to the
+     * transport, where it always belonged.
+     *
+     * Space is the interesting one. A checkbox, a file button and a submit button
+     * all do something with it, so they keep it. A slider does not, which this
+     * file already knew. Neither does a radio, in practice: arrows move selection
+     * as well as focus in a radio group, so the focused radio is the chosen one
+     * and space on it re-chooses what is already chosen. Reserving it there
+     * bought nothing and cost play/pause.
+     *
+     * Typed-into fields are a different case and still swallow everything, since
+     * every one of these shortcuts is also a character somebody might mean to
+     * type. The loop-range boxes are `type="number"`, so this is not theoretical.
+     */
     if (tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
-    if (tag === 'INPUT' && !(isSlider && event.code === 'Space')) return;
+    if (tag === 'INPUT' && TYPED_INTO_TYPES.has(type)) return;
+    if (tag === 'INPUT') {
+      if (CONTROL_OWNED_KEYS.has(event.code)) return;
+      if (event.code === 'Space' && SPACE_OWNED_TYPES.has(type)) return;
+    }
 
     if (event.key === '?') {
       if (this.isModalOpen() && !this.overlays.isHelpOpen()) return;
@@ -1775,6 +1806,21 @@ class ChoirPracticeApp {
     }
   }
 }
+
+/** Field types where every keystroke is a character the person meant to type. */
+const TYPED_INTO_TYPES = new Set([
+  'text', 'search', 'email', 'number', 'url', 'password', 'tel',
+  'date', 'time', 'month', 'week', 'datetime-local',
+]);
+
+/** Types that do something with space themselves, and must keep it. */
+const SPACE_OWNED_TYPES = new Set(['checkbox', 'file', 'submit', 'button', 'reset']);
+
+/** Keys a radio or a slider uses itself, and must keep. */
+const CONTROL_OWNED_KEYS = new Set([
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'Home', 'End', 'PageUp', 'PageDown',
+]);
 
 document.addEventListener('DOMContentLoaded', () => {
   window.choirPracticeApp = new ChoirPracticeApp();
