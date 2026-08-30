@@ -235,11 +235,13 @@ public/js/theme.js           canvas palette derived from the CSS tokens
 public/js/prefs.js           saved preferences
 public/js/exporters.js       WAV and MusicXML export
 public/sample-pieces/        the bundled scores
+public/og.png                the link-preview card
 tests/run-tests.js           unit tests for the pure logic
 tests/check-static.js        markup, module graph and call-site wiring
 tests/check-docs.js          this README against the code it describes
 e2e/practice.spec.js         browser tests
 tools/serve.js               the local static server
+tools/og-shot.js             redraws the link-preview card from the running app
 wrangler.jsonc               Cloudflare Worker and assets configuration
 ```
 
@@ -271,3 +273,27 @@ What no suite here checks, and what still wants a person: how the synthesised
 voices actually sound, whether the microphone guidance tracks a real voice in a
 real room, and how any of it behaves in Safari or Firefox. Nothing in this
 repository has been run in either.
+
+## The link preview
+
+`public/index.html` carries Open Graph and Twitter card tags, so pasting a link
+to this app into a chat shows a title, a sentence and a picture rather than a
+bare URL. The sentence is the same one as the meta description: one claim about
+the app, in one place, so there is only one thing to keep true.
+
+The picture is `public/og.png`, and it is a photograph rather than a drawing.
+`npm run og` opens *Draw on, sweet night* in a real browser, chooses a part the
+way a singer does, moves off the opening bars where most of the voices are still
+resting, and lays that frame into the titled card. It needs the app being served:
+
+```sh
+node tools/serve.js 8199   # one terminal
+npm run og                 # another
+```
+
+Re-run it after a change to the notation, the parts panel or the palette. A card
+that no longer looks like the app is worse than no card, because it is the first
+thing anybody sees. Two things it cannot check itself: the card is set in the
+platform's own UI typeface, so it will not be pixel-identical from a different
+machine, and whether the sentence in the tags is still true of the app is a
+question for a person.

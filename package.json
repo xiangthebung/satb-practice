@@ -17,6 +17,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "serve": "node tools/serve.js",
+    "og": "node tools/og-shot.js",
     "e2e": "playwright test",
     "e2e:install": "playwright install --with-deps chromium",
     "verify": "npm run check && npm run e2e"

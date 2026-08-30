@@ -8,6 +8,36 @@
   <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
   <title>Choir Practice</title>
+
+  <!--
+    The link preview: what Slack, iMessage and LinkedIn show when somebody pastes
+    a link here. Without these they show a bare URL, which is what this app had
+    until now.
+
+    The description is the same sentence as the meta description above, on
+    purpose. Two descriptions of one app are two things to keep true, and the
+    second one always rots first.
+
+    og.png is redrawn by `npm run og` from a real sample score in a real browser,
+    so it changes when the app does. The URLs are absolute because a crawler has
+    no base to resolve a relative one against; tests/check-static.js skips
+    absolute references when it checks that every asset named here exists.
+  -->
+  <link rel="canonical" href="https://satb-practice.xiangli3625.workers.dev/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Choir Practice">
+  <meta property="og:title" content="Choir Practice">
+  <meta property="og:description" content="Practice your choir part in the browser: open a MusicXML score, balance the voices, and sing along with playback, a metronome, and microphone pitch guidance.">
+  <meta property="og:url" content="https://satb-practice.xiangli3625.workers.dev/">
+  <meta property="og:image" content="https://satb-practice.xiangli3625.workers.dev/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="A six-part madrigal open in the app, with the second soprano line chosen and held at full volume while the other five parts sit at 35%.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Choir Practice">
+  <meta name="twitter:description" content="Practice your choir part in the browser: open a MusicXML score, balance the voices, and sing along with playback, a metronome, and microphone pitch guidance.">
+  <meta name="twitter:image" content="https://satb-practice.xiangli3625.workers.dev/og.png">
+
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='%230071e3' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5.5l10-2V16'/%3E%3Ccircle cx='6.5' cy='18' r='2.5'/%3E%3Ccircle cx='16.5' cy='16' r='2.5'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/styles.css">
 </head>
