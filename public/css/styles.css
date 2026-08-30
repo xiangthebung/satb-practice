@@ -1990,6 +1990,27 @@ input[type="checkbox"] {
   background: var(--surface);
 }
 
+/* The dialog is the scroller; the head and actions float over it. So anything
+   the browser scrolls into view — a control reached by Tab, or one an automated
+   check is about to click — can be scrolled to an edge and land *underneath* one
+   of those two bars. Under the head it is merely invisible. Under the actions
+   bar it is also unclickable, because that bar takes the pointer, and a click
+   aimed at what is behind it silently hits the bar instead.
+
+   Scroll padding is how the scroller is told those strips are not usable space.
+   Measured at 412px wide the head is 75px and the actions bar 71px; 88px is
+   those plus slack, because both grow with the system font — which is exactly
+   how this went unnoticed, since the font that made the dialog tall enough to
+   matter was the CI runner's and not the author's.
+
+   Only sheets need it: an ordinary dialog has no sticky furniture to hide
+   behind. `the settings dialog never scrolls a control under its own furniture`
+   in e2e/practice.spec.js measures both bars and fails if this stops clearing
+   them. */
+.modal:has(> .modal-sheet) {
+  scroll-padding-block: 88px;
+}
+
 .modal-settings {
   width: min(680px, calc(100vw - 2 * var(--space-4)));
 }

@@ -87,6 +87,27 @@ async function showParts(page) {
   await expect(list).toBeVisible();
 }
 
+/**
+ * Flip one of the settings switches by its row.
+ *
+ * Not `locator('#show-lyrics').uncheck()`, which aims at the 44x26 input. The
+ * settings dialog scrolls under a sticky head and a sticky actions bar, and a
+ * point computed against a 26px-tall target inside a scroller is a point that
+ * stops being right the moment anything above it changes height. That is what
+ * made this suite red on CI for three weeks and green on the author's machine
+ * the whole time: the runner's system font is wider, the rows wrap, the switch
+ * sits somewhere else, and the click landed on the label or on the actions bar.
+ *
+ * The row is the honest target anyway. It is a `<label for>` spanning the full
+ * width of the dialog, so it is what a person taps.
+ */
+async function setSwitch(page, id, on) {
+  const input = page.locator(`#${id}`);
+  if ((await input.isChecked()) === on) return;
+  await page.locator(`label.switch-row[for="${id}"]`).click();
+  await expect(input).toBeChecked({ checked: on });
+}
+
 /** Read a value out of the running app. */
 function readState(page, path) {
   return page.evaluate(
@@ -329,6 +350,62 @@ test.describe('settings', () => {
     expect(problems).toEqual([]);
   });
 
+  test('the settings dialog never scrolls a control under its own furniture', async ({ page }) => {
+    // The dialog is the scroller and its head and actions bar are sticky, so
+    // every scroll-into-view — the browser's, when Tab reaches a control near
+    // the edge, and an automated check's, before it clicks — can put the thing
+    // it was aiming for underneath one of those two strips. Under the head the
+    // control is invisible. Under the actions bar it is also unclickable: that
+    // bar takes the pointer, so the click lands on "Restore defaults" instead
+    // of on what the person could see a moment ago.
+    //
+    // `scroll-padding-block` in styles.css is the only thing preventing that.
+    // This test exists because its value has to stay ahead of two bars that
+    // grow with the system font, and nothing else would notice if it stopped.
+    const problems = watchForErrors(page);
+    await openSample(page);
+    await page.locator('#settings-btn').click();
+
+    const dialog = page.locator('#settings-dialog');
+    await expect(dialog).toBeVisible();
+
+    const bars = await dialog.evaluate(element => {
+      const styles = getComputedStyle(element);
+      return {
+        head: element.querySelector('.modal-head').getBoundingClientRect().height,
+        actions: element.querySelector('.modal-actions').getBoundingClientRect().height,
+        padTop: parseFloat(styles.scrollPaddingBlockStart),
+        padBottom: parseFloat(styles.scrollPaddingBlockEnd),
+        scrolls: element.scrollHeight > element.clientHeight
+      };
+    });
+
+    // If the dialog stops scrolling there is nothing to hide behind and the
+    // rest of this proves nothing, so say so rather than passing quietly.
+    expect(bars.scrolls, 'the settings dialog no longer scrolls').toBe(true);
+    expect(bars.padTop, 'scroll padding no longer clears the sticky head')
+      .toBeGreaterThanOrEqual(bars.head);
+    expect(bars.padBottom, 'scroll padding no longer clears the sticky actions bar')
+      .toBeGreaterThanOrEqual(bars.actions);
+
+    // And the property those numbers exist for: scroll each switch to the
+    // bottom edge, the worst case, and check the pointer still reaches it.
+    for (const id of ['show-lyrics', 'show-time-signatures', 'follow-dynamics', 'play-repeats']) {
+      const reachable = await page.evaluate(async controlId => {
+        const input = document.getElementById(controlId);
+        input.scrollIntoView({ block: 'end', behavior: 'instant' });
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const box = input.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return { ok: hit === input || input.contains(hit) || hit?.contains(input), hit: hit?.className ?? null };
+      }, id);
+      expect(reachable.ok, `#${id} scrolled under ${reachable.hit}`).toBe(true);
+    }
+
+    await page.locator('#settings-done').click();
+    expect(problems).toEqual([]);
+  });
+
   test('transposing changes the sounding pitch but not the score', async ({ page }) => {
     const problems = watchForErrors(page);
     await openSample(page);
@@ -456,12 +533,12 @@ test.describe('the score view', () => {
     await expect(toggle).toBeChecked();
     const withWords = await countInk(page);
 
-    await toggle.uncheck();
+    await setSwitch(page, 'show-lyrics', false);
     expect(await readState(page, 'app.renderer.showLyrics')).toBe(false);
     const withoutWords = await countInk(page);
     expect(withoutWords).toBeLessThan(withWords);
 
-    await toggle.check();
+    await setSwitch(page, 'show-lyrics', true);
     expect(await countInk(page)).toBeGreaterThan(withoutWords);
 
     expect(problems).toEqual([]);
@@ -470,7 +547,7 @@ test.describe('the score view', () => {
   test('hiding the words is remembered across a reload', async ({ page }) => {
     await openSample(page);
     await page.locator('#settings-btn').click();
-    await page.locator('#show-lyrics').uncheck();
+    await setSwitch(page, 'show-lyrics', false);
 
     await openSample(page);
     expect(await readState(page, 'app.renderer.showLyrics')).toBe(false);
@@ -555,7 +632,7 @@ test.describe('the score view', () => {
     // Now take the notes on their own. Anything left in a lyric band is ink the
     // words would have been drawn on top of.
     await page.locator('#settings-btn').click();
-    await page.locator('#show-lyrics').uncheck();
+    await setSwitch(page, 'show-lyrics', false);
     await page.locator('#settings-done').click();
 
     const bands = withWords.map(row => ({ bandTop: row.bandTop, bandBottom: row.bandBottom }));
