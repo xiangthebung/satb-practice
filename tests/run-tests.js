@@ -86,8 +86,24 @@ import {
   getPartLabel,
   getStaffPositionForClef,
   isScoreElementVisible,
-  NotationRenderer
+  NotationRenderer,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  clampZoom,
+  pickCourtesyIndex
 } from '../public/js/notation-renderer.js';
+
+import {
+  buildShareHash,
+  describeShare,
+  findPartBySlug,
+  parseShareHash,
+  voiceSlug
+} from '../public/js/share-link.js';
+
+import { describeResume, isResumeRecord } from '../public/js/resume-store.js';
+
+import { formatBarReadout, formatTempoReadout } from '../public/js/ui/transport.js';
 
 import {
   layoutMeasure,
@@ -3129,6 +3145,315 @@ test('a bar grid still gives the downbeats the accents did before', () => {
   assert.equal(metronome.isDownbeatAtScoreBeat(1, 1), true);
   assert.equal(metronome.isDownbeatAtScoreBeat(2, 2), false);
   assert.equal(metronome.isDownbeatAtScoreBeat(5, 5), true);
+});
+
+/* ================================================ deep links and resume */
+
+section('Deep links - the practice state in the hash:');
+
+test('a full state round-trips through the hash', () => {
+  const hash = buildShareHash({
+    sample: 'quick',
+    part: 'alto',
+    loop: { fromBar: 13, toBar: 16 },
+    tempo: 90,
+    zoom: 1.25,
+    mix: 'only-mine'
+  });
+  assert.equal(hash, 'sample=quick&part=alto&loop=13-16&tempo=90&zoom=1.25&mix=only-mine');
+  assert.deepEqual(parseShareHash(`#${hash}`), {
+    sample: 'quick',
+    part: 'alto',
+    loop: { fromBar: 13, toBar: 16 },
+    tempo: 90,
+    zoom: 1.25,
+    mix: 'only-mine',
+    isEmpty: false
+  });
+});
+
+test('the default zoom and empty fields stay out of the link', () => {
+  assert.equal(buildShareHash({ sample: 'quick', zoom: 1 }), 'sample=quick');
+  assert.equal(buildShareHash({}), '');
+  assert.equal(parseShareHash('').isEmpty, true);
+  assert.equal(parseShareHash('#').isEmpty, true);
+});
+
+test('a reversed loop is put the right way round', () => {
+  assert.equal(buildShareHash({ loop: { fromBar: 16, toBar: 13 } }), 'loop=13-16');
+  assert.deepEqual(parseShareHash('loop=9-4').loop, { fromBar: 4, toBar: 9 });
+});
+
+test('mistyped values are dropped or clamped, never fatal', () => {
+  const parsed = parseShareHash('#sample=quick&tempo=fast&loop=abc&zoom=9&part=');
+  assert.equal(parsed.sample, 'quick');
+  assert.equal(parsed.tempo, null);
+  assert.equal(parsed.loop, null);
+  assert.equal(parsed.zoom, 2.5);
+  assert.equal(parsed.part, null);
+  assert.equal(parseShareHash('tempo=999').tempo, 240);
+  assert.equal(parseShareHash('tempo=3').tempo, 40);
+});
+
+test('voice types become link-safe slugs', () => {
+  assert.equal(voiceSlug('Soprano 1'), 'soprano-1');
+  assert.equal(voiceSlug('  Mezzo-Soprano '), 'mezzo-soprano');
+  assert.equal(voiceSlug(''), '');
+});
+
+test('a part is found by its voice type, then by its name, then by its id', () => {
+  const parts = [
+    { id: 'P1', name: 'Cantus', voiceType: 'soprano' },
+    { id: 'P2', name: 'Bassus', voiceType: '' }
+  ];
+  assert.equal(findPartBySlug(parts, 'soprano').id, 'P1');
+  assert.equal(findPartBySlug(parts, 'bassus').id, 'P2');
+  assert.equal(findPartBySlug(parts, 'P2').id, 'P2');
+  assert.equal(findPartBySlug(parts, 'tenor'), null);
+});
+
+test('a copied link is described in words', () => {
+  assert.equal(
+    describeShare({ title: 'Quick!', partName: 'Alto', loop: { fromBar: 13, toBar: 16 }, tempo: 90 }),
+    'Quick!: Alto, bars 13 to 16, 90 BPM'
+  );
+  assert.equal(describeShare({ title: 'Quick!', loop: { fromBar: 4, toBar: 4 } }), 'Quick!: bar 4');
+  assert.equal(describeShare({}), 'the whole score');
+});
+
+section('Resume - where you left off:');
+
+test('only a record that can be opened again is offered', () => {
+  assert.equal(isResumeRecord(null), false);
+  assert.equal(isResumeRecord({ kind: 'sample', fileName: 'a.musicxml', title: 'A' }), false);
+  assert.equal(
+    isResumeRecord({ kind: 'sample', fileName: 'a.musicxml', title: 'A', samplePath: 'sample-pieces/a.musicxml' }),
+    true
+  );
+  assert.equal(isResumeRecord({ kind: 'file', fileName: 'a.musicxml', title: 'A' }), false);
+  assert.equal(isResumeRecord({ kind: 'file', fileName: 'a.musicxml', title: 'A', file: {} }), true);
+});
+
+test('the card says the score, the bar, the part and the tempo', () => {
+  const record = {
+    kind: 'sample',
+    samplePath: 'x',
+    fileName: 'x',
+    title: 'Quick! We have but a second',
+    bar: 14,
+    partName: 'Alto',
+    tempo: 90
+  };
+  assert.deepEqual(describeResume(record), {
+    label: 'Continue: Quick! We have but a second, bar 14',
+    detail: 'Alto · 90 BPM'
+  });
+  assert.equal(describeResume({ ...record, bar: 1 }).label, 'Continue: Quick! We have but a second');
+  assert.match(describeResume({ ...record, kind: 'file', file: {} }).detail, /your own file/);
+});
+
+section('Transport readouts:');
+
+test('the tempo readout says the BPM and the share of the written tempo', () => {
+  assert.equal(formatTempoReadout(85, 85), '85 BPM · 100%');
+  assert.equal(formatTempoReadout(60, 85), '60 BPM · 71%');
+  assert.equal(formatTempoReadout(120, 0), '120 BPM');
+});
+
+test('the bar readout counts bars out of the total', () => {
+  assert.equal(formatBarReadout(14, 26), 'bar 14 / 26');
+  assert.equal(formatBarReadout(3, 0), 'bar 3');
+  assert.equal(formatBarReadout(0, 26), '');
+});
+
+/* ====================================== zoom, courtesy signatures, words */
+
+section('Score view - zoom, courtesy signatures and the room words need:');
+
+test('zoom is clamped to the range the view supports', () => {
+  assert.equal(clampZoom(1), 1);
+  assert.equal(clampZoom(0.1), MIN_ZOOM);
+  assert.equal(clampZoom(9), MAX_ZOOM);
+  assert.equal(clampZoom('x'), 1);
+  assert.equal(clampZoom(1.2345), 1.23);
+});
+
+test('the gutter takes over a signature change once it reaches the left edge', () => {
+  // Marks at 300 and 600 view pixels; the gutter's edge is at 100.
+  assert.equal(pickCourtesyIndex([-Infinity, 300, 600], 100), 0);
+  assert.equal(pickCourtesyIndex([-Infinity, 50, 600], 100), 1);
+  assert.equal(pickCourtesyIndex([-Infinity, -200, 20], 100), 2);
+  assert.equal(pickCourtesyIndex([-Infinity], 100), 0);
+});
+
+test('wide syllables push their notes apart, and the last one stays inside its bar', () => {
+  const note = (beat, text) => ({
+    startBeatInMeasure: beat,
+    durationBeats: 0.5,
+    type: 'eighth',
+    pitch: { step: 'C', octave: 4 },
+    lyrics: [{ number: 1, text, syllabic: 'single' }]
+  });
+  const parts = [{
+    id: 'S',
+    measures: [{
+      number: 1,
+      beats: 2,
+      notes: [note(0, 'meets'), note(0.5, 'thine'), note(1, 'eye'), note(1.5, 'now')]
+    }]
+  }];
+  const options = { noteWidth: 42, minNoteSpacing: 30, measurePadding: 18 };
+  const plain = buildHorizontalScoreLayout(parts, options);
+  const worded = buildHorizontalScoreLayout(parts, { ...options, lyricWidth: () => 80 });
+  const smallestGap = layout => {
+    const positions = [0, 0.5, 1, 1.5].map(beat => layout.measures[0].positionsByBeat.get(beat));
+    return Math.min(...positions.slice(1).map((x, index) => x - positions[index]));
+  };
+  assert.equal(smallestGap(plain), 30);
+  assert.equal(smallestGap(worded), 80);
+  const last = worded.measures[0].positionsByBeat.get(1.5);
+  assert(worded.measures[0].width >= last + 40, 'the last word runs under the barline');
+  assert(worded.totalWidth > plain.totalWidth);
+});
+
+test('the ruler and its loop handles are found by a point on the canvas', () => {
+  // A canvas that draws nothing and measures every word at twenty pixels.
+  const noop = () => {};
+  const ctx = new Proxy({}, {
+    get: (target, key) => {
+      if (key === 'measureText') return () => ({ width: 20 });
+      return key in target ? target[key] : noop;
+    },
+    set: (target, key, value) => {
+      target[key] = value;
+      return true;
+    }
+  });
+  const canvas = { getContext: () => ctx, parentElement: null, style: {} };
+  const hadDocument = typeof globalThis.document !== 'undefined';
+  if (!hadDocument) {
+    globalThis.document = { createElement: () => ({ getContext: () => ctx, width: 0, height: 0 }) };
+  }
+  try {
+    const renderer = new NotationRenderer(canvas);
+    const bar = (number, start) => ({
+      number,
+      startBeat: start,
+      beats: 4,
+      notes: [{ startBeatInMeasure: 0, durationBeats: 4, type: 'whole', pitch: { step: 'C', octave: 4 } }]
+    });
+    const parts = [{ id: 'S', name: 'Soprano', voiceType: 'soprano', measures: [bar(1, 0), bar(2, 4), bar(3, 8)] }];
+    renderer.setData(parts, {
+      measureStructure: [
+        { number: 1, startBeat: 0, beats: 4 },
+        { number: 2, startBeat: 4, beats: 4 },
+        { number: 3, startBeat: 8, beats: 4 }
+      ]
+    });
+
+    const origin = renderer.config.marginLeft + renderer.config.clefWidth;
+    const ruler = renderer.getRulerBounds();
+    const rulerY = (ruler.top + ruler.bottom) / 2;
+    const second = renderer.horizontalLayout.measures[1];
+
+    assert.equal(renderer.hitTest(origin - 10, rulerY).zone, 'gutter');
+    const onRuler = renderer.hitTest(origin + second.startX + 5, rulerY);
+    assert.equal(onRuler.zone, 'ruler');
+    assert.equal(onRuler.measureIndex, 1);
+    assert.equal(renderer.hitTest(origin + second.startX + 5, ruler.bottom + 60).zone, 'score');
+
+    renderer.setLoopRange({ fromBar: 2, toBar: 3 });
+    const band = renderer.getLoopBandX();
+    assert.equal(band.startX, origin + second.startX);
+    assert.equal(band.endX, origin + renderer.horizontalLayout.measures[2].endX);
+    assert.equal(renderer.hitTest(band.startX + 3, rulerY).edge, 'start');
+    assert.equal(renderer.hitTest(band.endX - 3, rulerY).edge, 'end');
+    assert.equal(renderer.hitTest(band.startX + 3, ruler.bottom + 60).edge, null);
+
+    renderer.setLoopRange(null);
+    assert.equal(renderer.getLoopBandX(), null);
+  } finally {
+    if (!hadDocument) delete globalThis.document;
+  }
+});
+
+/* ============================================== count-in and background */
+
+section('Metronome - the count-in:');
+
+/** Enough of an AudioContext for a click to be scheduled and silenced. */
+function fakeAudioContext() {
+  const param = () => ({
+    value: 0,
+    setValueAtTime() {},
+    linearRampToValueAtTime() {},
+    exponentialRampToValueAtTime() {},
+    cancelScheduledValues() {}
+  });
+  const node = (extra = {}) => ({ connect() {}, disconnect() {}, start() {}, stop() {}, ...extra });
+  return {
+    currentTime: 0,
+    sampleRate: 48000,
+    createGain: () => node({ gain: param() }),
+    createOscillator: () => node({ type: 'sine', frequency: param() }),
+    createBufferSource: () => node({ buffer: null }),
+    createBiquadFilter: () => node({ type: '', frequency: param(), Q: param() }),
+    createBuffer: (channels, length) => ({ getChannelData: () => new Float32Array(length) })
+  };
+}
+
+test('a count-in is kept apart from the running click, so starting the metronome does not silence it', () => {
+  const metronome = new Metronome(fakeAudioContext(), {});
+  const counts = [];
+  metronome.onCountIn = (...args) => counts.push(args);
+  metronome.playCountIn({ startTime: 5, clicks: 4, interval: 0.5, beatsPerBar: 4 });
+
+  assert.equal(metronome.countInClicks.size, 4);
+  assert.equal(metronome.scheduledClicks.size, 0, 'count-in clicks are not running clicks');
+  assert.equal(metronome.countInTimers.size, 5, 'four beats and the moment the music starts');
+
+  metronome.stop();
+  assert.equal(metronome.countInClicks.size, 4, 'stop() must leave the count-in alone');
+
+  metronome.cancelCountIn();
+  assert.equal(metronome.countInClicks.size, 0);
+  assert.equal(metronome.countInTimers.size, 0);
+  assert.deepEqual(counts, [], 'a cancelled count never reports a beat');
+});
+
+test('the scheduling window can be widened for a hidden tab', () => {
+  const metronome = new Metronome(fakeAudioContext(), {});
+  metronome.setLookahead(2.5, 250);
+  assert.equal(metronome.lookaheadTime, 2.5);
+  assert.equal(metronome.scheduleIntervalMs, 250);
+});
+
+section('Audio engine - a hidden tab and the count-in:');
+
+test('backgrounding widens the scheduling window and coming back narrows it', () => {
+  const engine = new AudioEngine();
+  assert.equal(engine.isBackgrounded, false);
+  engine.setBackgrounded(true);
+  assert(engine.lookaheadTime >= 1.5, 'the window must outlast a once-a-second timer');
+  assert(engine.scheduleInterval >= 100);
+  engine.setBackgrounded(false);
+  assert.equal(engine.lookaheadTime, 0.1);
+  assert.equal(engine.scheduleInterval, 25);
+});
+
+test('a count-in counts the whole bar of a pickup, in the metre of that bar', () => {
+  const engine = new AudioEngine();
+  engine.setCountInBars(1);
+  engine.setScoreStructure({
+    tempoMap: [],
+    measureStructure: [
+      { number: 1, startBeat: 0, beats: 1, timeSignature: { numerator: 3, denominator: 4 } },
+      { number: 2, startBeat: 1, beats: 3, timeSignature: { numerator: 3, denominator: 4 } }
+    ]
+  });
+  assert.equal(engine.getCountInBeats(), 3, 'three counts into a one-beat upbeat in 3/4');
+  engine.setCountInBars(2);
+  assert.equal(engine.getCountInBeats(), 6);
 });
 
 /* ================================================================ summary */

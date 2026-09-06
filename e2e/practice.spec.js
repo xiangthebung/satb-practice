@@ -64,7 +64,9 @@ function watchForErrors(page) {
 /** Open a bundled sample and wait for the practice screen. */
 async function openSample(page, name = 'Draw on, sweet night') {
   await page.goto('/index.html');
-  await page.getByRole('button', { name: new RegExp(name, 'i') }).click();
+  // The sample card, not the "Continue" card that names the same score once it
+  // has been opened before.
+  await page.locator('button.sample', { hasText: new RegExp(name, 'i') }).click();
   await expect(page.locator('#practice')).toBeVisible();
   await expect(page.locator('#transport')).toBeVisible();
 
@@ -229,7 +231,8 @@ test.describe('the transport', () => {
     await page.locator('#tempo').fill('72');
     await page.locator('#tempo').dispatchEvent('change');
 
-    await expect(page.locator('#tempo-value')).toHaveText('72 BPM');
+    // The readout also says how the tempo compares with the score's own.
+    await expect(page.locator('#tempo-value')).toHaveText(/^72 BPM · \d+%$/);
     expect(await readState(page, 'app.state.tempo')).toBe(72);
   });
 
@@ -382,7 +385,7 @@ test.describe('settings', () => {
 
     for (const id of [
       '#master-volume', '#room', '#tuning', '#transpose', '#fermata',
-      '#follow-dynamics', '#play-repeats', '#click-pattern', '#click-volume', '#count-in',
+      '#follow-dynamics', '#play-repeats', '#click-pattern', '#click-volume', '#count-in-bars',
       '#show-lyrics', '#show-time-signatures', '#verse'
     ]) {
       await expect(dialog.locator(id)).toBeAttached();
@@ -532,8 +535,8 @@ test.describe('settings', () => {
     await openSample(page);
     await page.locator('#settings-btn').click();
 
-    await page.locator('#count-in').fill('2');
-    await page.locator('#count-in').dispatchEvent('input');
+    await page.locator('#count-in-bars').fill('2');
+    await page.locator('#count-in-bars').dispatchEvent('input');
     await expect(page.locator('#count-in-value')).toHaveText('2 bars');
 
     expect(await readState(page, 'app.audioEngine.getCountInBeats()')).toBeGreaterThan(0);
@@ -1066,6 +1069,507 @@ test.describe('the rehearsal loop', () => {
     await page.locator('#loop-range-btn').click();
     await expect(page.locator('#loop-from')).not.toHaveValue('');
     await expect(page.locator('#loop-to')).not.toHaveValue('');
+  });
+});
+
+test.describe('rehearsing a passage', () => {
+  test('dragging along the bar ruler sets a loop, shows it on the score and turns looping on', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await openSample(page, 'Happy birthday');
+
+    // From the middle of the first bar to the middle of the last bar that is
+    // on screen, which on a phone is only a bar or two along.
+    const drag = await page.evaluate(() => {
+      const renderer = window.choirPracticeApp.renderer;
+      const box = document.querySelector('#score-canvas').getBoundingClientRect();
+      const scale = renderer.scale;
+      const origin = renderer.config.marginLeft + renderer.config.clefWidth;
+      const ruler = renderer.getRulerBounds();
+      const measures = renderer.horizontalLayout.measures;
+      const middle = index => box.left +
+        (origin + measures[index].startX + measures[index].width / 2 - renderer.scrollX) * scale;
+      let last = 0;
+      for (let index = 1; index < measures.length; index++) {
+        if (middle(index) < box.right - 12) last = index;
+      }
+      return {
+        y: box.top + ((ruler.top + ruler.bottom) / 2) * scale,
+        from: middle(0),
+        to: middle(last),
+        fromBar: measures[0].number,
+        toBar: measures[last].number
+      };
+    });
+    expect(drag.toBar).toBeGreaterThan(drag.fromBar);
+
+    await page.mouse.move(drag.from, drag.y);
+    await page.mouse.down();
+    await page.mouse.move(drag.from + 12, drag.y, { steps: 3 });
+    await page.mouse.move(drag.to, drag.y, { steps: 8 });
+    await page.mouse.up();
+
+    const loop = await readState(page, `({
+      range: app.state.loopRange && [app.state.loopRange.fromBar, app.state.loopRange.toBar],
+      on: app.state.loop,
+      band: app.renderer.getLoopBandX(),
+      engine: app.audioEngine.getLoopRange()
+    })`);
+    expect(loop.range).toEqual([drag.fromBar, drag.toBar]);
+    expect(loop.on, 'marking a range must turn looping on').toBe(true);
+    expect(loop.band).not.toBeNull();
+    expect(loop.engine.end).toBeGreaterThan(loop.engine.start);
+    await expect(page.locator('#loop-btn')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#loop-range-badge')).toBeVisible();
+    await expect(page.locator('#loop-range-summary')).toHaveText(`Bars ${drag.fromBar} to ${drag.toBar}`);
+
+    // The band is painted: the ruler strip inside the range is no longer paper.
+    const painted = await page.evaluate(() => {
+      const renderer = window.choirPracticeApp.renderer;
+      const canvas = document.querySelector('#score-canvas');
+      const ratio = canvas.width / canvas.getBoundingClientRect().width;
+      const band = renderer.getLoopBandX();
+      const ruler = renderer.getRulerBounds();
+      const x = Math.round((band.startX + 6 - renderer.scrollX) * renderer.scale * ratio);
+      const y = Math.round((ruler.top + 3) * renderer.scale * ratio);
+      const [r, g, b] = canvas.getContext('2d').getImageData(x, y, 1, 1).data;
+      return { r, g, b };
+    });
+    expect(painted.r === painted.g && painted.g === painted.b, 'the loop band is not tinted').toBe(false);
+
+    // A tap on the ruler is a seek, not a range.
+    await page.mouse.click(drag.from, drag.y);
+    expect(await readState(page, 'app.state.loopRange.fromBar')).toBe(drag.fromBar);
+    await expect(page.locator('#bar-display')).toHaveText(new RegExp(`^bar ${drag.fromBar} `));
+
+    expect(problems).toEqual([]);
+  });
+
+  test('the tempo readout shows the share of the written tempo, takes a typed tempo and resets on double-click', async ({ page }) => {
+    await openSample(page, 'Happy birthday');
+    const readout = page.locator('#tempo-value');
+    await expect(readout).toHaveText('85 BPM · 100%');
+
+    await readout.click();
+    const entry = page.locator('#tempo-entry');
+    await expect(entry).toBeVisible();
+    await entry.fill('60');
+    await entry.press('Enter');
+    await expect(readout).toHaveText('60 BPM · 71%');
+    expect(await readState(page, 'app.state.tempo')).toBe(60);
+
+    await readout.dblclick();
+    await expect(readout).toHaveText('85 BPM · 100%');
+    expect(await readState(page, 'app.state.tempo')).toBe(85);
+  });
+
+  test('the count-in is one bar by default, counted over the score, and stops with the music', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await openSample(page, 'Happy birthday');
+    await page.locator('#settings-btn').click();
+    await expect(page.locator('#count-in-value')).toHaveText('1 bar');
+    await page.locator('#settings-done').click();
+
+    await page.locator('#play-btn').click();
+    const overlay = page.locator('#count-in');
+    await expect(overlay).toBeVisible();
+    // A whole bar of 3/4, even though the score opens with a one-beat pickup.
+    await expect(overlay.locator('.count-in-beat')).toHaveCount(3);
+    await expect(overlay.locator('.count-in-beat.is-now')).toHaveCount(1, { timeout: 5000 });
+
+    await page.locator('#play-btn').click();
+    await expect(overlay).toBeHidden();
+
+    // And from the middle of the score, which is where a count-in is needed
+    // most and where it used to be timed against a start twenty seconds gone.
+    await page.locator('#next-bar').click();
+    await page.locator('#next-bar').click();
+    await page.locator('#next-bar').click();
+    await expect(page.locator('#bar-display')).toHaveText(/^bar 4 /);
+    await page.locator('#play-btn').click();
+    await expect(overlay).toBeVisible();
+    await expect(overlay.locator('.count-in-beat.is-now')).toHaveCount(1, { timeout: 5000 });
+    await page.locator('#play-btn').click();
+    await expect(overlay).toBeHidden();
+    expect(problems).toEqual([]);
+  });
+
+  test('the gutter shows the metre in force at the left edge, and never beside its own inline copy', async ({ page }) => {
+    await openSample(page, 'Quick! We have but a second');
+    // 9/8, then 12/8 at bar 12 and back to 9/8 at bar 13.
+    const indices = await page.evaluate(() => {
+      const app = window.choirPracticeApp;
+      const renderer = app.renderer;
+      const part = app.state.parts[0];
+      const at = number => {
+        renderer.setScrollX(renderer.getMeasureLayoutByNumber(number).startX);
+        return renderer.getCourtesyIndices(part, null).timeIndex;
+      };
+      const times = renderer.partAttributes.get(part.id).times
+        .map(time => `${time.numerator}/${time.denominator}@${time.measureIndex + 1}`);
+      return { times, atStart: at(1), atTwelve: at(12), atThirteen: at(13) };
+    });
+    expect(indices.times.slice(0, 3)).toEqual(['9/8@1', '12/8@12', '9/8@13']);
+    expect(indices.atStart).toBe(0);
+    expect(indices.atTwelve).toBe(1);
+    expect(indices.atThirteen).toBe(2);
+  });
+
+  test('syllables are given the room their words need', async ({ page }) => {
+    await openSample(page, 'Quick! We have but a second');
+    const overlaps = await page.evaluate(() => {
+      const app = window.choirPracticeApp;
+      const renderer = app.renderer;
+      const ctx = document.createElement('canvas').getContext('2d');
+      const { lineSpacing, lyricSize } = renderer.config;
+      ctx.font = `${Math.max(8, Math.round(lineSpacing * lyricSize))}px ` +
+        'Georgia, "Iowan Old Style", "Times New Roman", serif';
+      const found = [];
+      for (const part of app.state.parts) {
+        const entries = [];
+        part.measures.forEach((measure, index) => {
+          for (const note of measure.notes) {
+            const lyric = renderer.selectLyric(note);
+            if (!lyric || note.isGrace) continue;
+            entries.push({
+              x: renderer.horizontalLayout.getNoteX(measure, index, note.startBeatInMeasure, note),
+              text: lyric.text,
+              width: ctx.measureText(lyric.text).width
+            });
+          }
+        });
+        entries.sort((left, right) => left.x - right.x);
+        for (let index = 1; index < entries.length; index++) {
+          const previous = entries[index - 1];
+          const next = entries[index];
+          if (next.x === previous.x) continue;
+          const gap = (next.x - next.width / 2) - (previous.x + previous.width / 2);
+          if (gap < 0) found.push(`${part.name}: "${previous.text}" runs into "${next.text}" by ${(-gap).toFixed(1)}px`);
+        }
+      }
+      return found;
+    });
+    expect(overlaps).toEqual([]);
+  });
+
+  test('the parts panel transposes a semitone at a time, in step with the settings slider', async ({ page }) => {
+    await openSample(page);
+    await showParts(page);
+
+    await page.locator('#transpose-up').click();
+    await expect(page.locator('#transpose-readout')).toHaveText('1 semitone up');
+    expect(await readState(page, 'app.state.transpose')).toBe(1);
+    expect(await readState(page, 'app.audioEngine.transposeSemitones')).toBe(1);
+
+    await page.locator('#transpose-down').click();
+    await page.locator('#transpose-down').click();
+    await expect(page.locator('#transpose-readout')).toHaveText('1 semitone down');
+
+    await page.locator('#settings-btn').click();
+    await expect(page.locator('#transpose')).toHaveValue('-1');
+  });
+
+  test('a hidden tab widens the scheduling window and coming back narrows it', async ({ page }) => {
+    await openSample(page, 'Happy birthday');
+    await page.locator('#play-btn').click();
+
+    const setVisibility = state => page.evaluate(value => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, state);
+
+    await setVisibility('hidden');
+    expect(await readState(page, 'app.audioEngine.lookaheadTime')).toBeGreaterThanOrEqual(1.5);
+    expect(await readState(page, 'app.metronome.lookaheadTime')).toBeGreaterThanOrEqual(1.5);
+
+    await setVisibility('visible');
+    expect(await readState(page, 'app.audioEngine.lookaheadTime')).toBe(0.1);
+    expect(await readState(page, 'app.state.isPlaying')).toBe(true);
+    await page.locator('#play-btn').click();
+  });
+});
+
+test.describe('the score view', () => {
+  test('only my stave hides the others and enlarges yours', async ({ page }) => {
+    await openSample(page);
+    await showParts(page);
+
+    await setSwitch(page, 'only-mine', true);
+    const solo = await readState(page, `({
+      visible: app.renderer.visibleStaffCount,
+      scale: app.renderer.scale,
+      parts: app.state.parts.length
+    })`);
+    expect(solo.parts).toBeGreaterThan(1);
+    expect(solo.visible).toBe(1);
+    expect(solo.scale).toBeGreaterThan(1);
+
+    await setSwitch(page, 'only-mine', false);
+    expect(await readState(page, 'app.renderer.visibleStaffCount')).toBe(solo.parts);
+    expect(await readState(page, 'app.renderer.scale')).toBe(1);
+  });
+
+  test('the zoom buttons and keys change the scale, and fit brings every stave into view', async ({ page }) => {
+    await openSample(page);
+
+    await page.locator('#zoom-in').click();
+    await expect(page.locator('#zoom-level')).toHaveText('115%');
+    expect(await readState(page, 'app.renderer.scale')).toBeCloseTo(1.15, 2);
+
+    await page.locator('#zoom-out').click();
+    await page.locator('#zoom-out').click();
+    await expect(page.locator('#zoom-level')).toHaveText('87%');
+
+    await page.locator('#zoom-level').click();
+    const fit = await page.evaluate(() => ({
+      canvas: document.querySelector('#score-canvas').getBoundingClientRect().height,
+      frame: document.querySelector('#score-frame').clientHeight,
+      zoom: window.choirPracticeApp.state.zoom,
+      staves: window.choirPracticeApp.state.parts.length
+    }));
+    expect(fit.staves).toBe(6);
+    if (fit.zoom > 0.5) {
+      expect(fit.canvas, 'fit left the score taller than its frame').toBeLessThanOrEqual(fit.frame + 1);
+    }
+
+    await page.locator('#stage').click({ position: { x: 4, y: 4 } });
+    await page.keyboard.press('=');
+    expect(await readState(page, 'app.state.zoom')).toBeCloseTo(fit.zoom * 1.15, 1);
+    await page.keyboard.press('-');
+    expect(await readState(page, 'app.state.zoom')).toBeCloseTo(fit.zoom, 1);
+  });
+});
+
+test.describe('deep links', () => {
+  test('the address bar mirrors the passage, and the link opens it again', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await openSample(page, 'Quick! We have but a second');
+    await showParts(page);
+    await page.locator('#part-list .part input[name="my-part"]').nth(1).check();
+
+    await page.locator('#loop-range-btn').click();
+    await page.locator('#loop-from').fill('13');
+    await page.locator('#loop-to').fill('16');
+    await page.locator('#loop-to').blur();
+    await page.keyboard.press('Escape');
+
+    await page.locator('#tempo-value').click();
+    await page.locator('#tempo-entry').fill('90');
+    await page.locator('#tempo-entry').press('Enter');
+
+    await expect.poll(() => page.evaluate(() => window.location.hash))
+      .toBe('#sample=quick&part=alto&loop=13-16&tempo=90&mix=mostly-mine');
+
+    const link = await page.evaluate(() => window.choirPracticeApp.buildShareLink());
+    // A fresh load, not a fragment navigation within the page that is open.
+    await page.goto('about:blank');
+    await page.goto(link);
+    await expect(page.locator('#practice')).toBeVisible();
+    await expect.poll(() => readState(page, 'app.state.loopRange && app.state.loopRange.fromBar')).toBe(13);
+
+    const restored = await readState(page, `({
+      part: app.state.parts.find(part => part.id === app.state.myPartId).voiceType,
+      to: app.state.loopRange.toBar,
+      tempo: app.state.tempo,
+      loop: app.state.loop
+    })`);
+    expect(restored).toEqual({ part: 'alto', to: 16, tempo: 90, loop: true });
+    await expect(page.locator('#bar-display')).toHaveText(/^bar 13 /);
+    await expect(page.locator('#tempo-value')).toHaveText('90 BPM · 60%');
+
+    expect(problems).toEqual([]);
+  });
+
+  test('the share button copies the link', async ({ page }) => {
+    await openSample(page, 'Happy birthday');
+    await page.locator('#share-btn').click();
+    await expect(page.locator('.toast')).toContainText(/Link copied/);
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toContain('#sample=birthday');
+    expect(copied).toContain('part=soprano');
+  });
+});
+
+test.describe('coming back', () => {
+  test('the home screen offers the last score at the bar it was left at', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await openSample(page, 'Happy birthday');
+    await page.locator('#next-bar').click();
+    await page.locator('#next-bar').click();
+    await expect(page.locator('#bar-display')).toHaveText(/^bar 3 /);
+
+    await page.locator('#home-btn').click();
+    const card = page.locator('#continue');
+    await expect(card).toBeVisible();
+    await expect(page.locator('#continue-label')).toHaveText('Continue: Happy Birthday, bar 3');
+    await expect(page.locator('#continue-detail')).toContainText('Soprano');
+
+    // It survives a reload, which is the point of it.
+    await page.reload();
+    await expect(card).toBeVisible();
+    await page.locator('#continue-btn').click();
+    await expect(page.locator('#practice')).toBeVisible();
+    await expect(page.locator('#bar-display')).toHaveText(/^bar 3 /);
+
+    await page.locator('#home-btn').click();
+    await expect(card).toBeVisible();
+    await page.locator('#continue-forget').click();
+    await expect(card).toBeHidden();
+    await page.reload();
+    await expect(page.locator('#home')).toBeVisible();
+    await page.waitForTimeout(300);
+    await expect(card).toBeHidden();
+
+    expect(problems).toEqual([]);
+  });
+
+  test('your own file comes back too', async ({ page }) => {
+    await openFixture(page, REPEAT_WITH_ENDINGS_XML, 'repeat.musicxml');
+    await page.locator('#home-btn').click();
+    await expect(page.locator('#continue-label')).toContainText('Continue:');
+    await expect(page.locator('#continue-detail')).toContainText('your own file');
+
+    await page.reload();
+    await page.locator('#continue-btn').click();
+    await expect(page.locator('#practice')).toBeVisible();
+    expect(await readState(page, 'app.state.fileName')).toBe('repeat.musicxml');
+  });
+});
+
+test.describe('a phone', () => {
+  test('a long title does not push the transport off the screen', async ({ page }) => {
+    const problems = watchForErrors(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSample(page, 'Quick! We have but a second');
+
+    const fit = await page.evaluate(() => {
+      const within = id => {
+        const box = document.getElementById(id).getBoundingClientRect();
+        return box.width > 0 && box.left >= -0.5 && box.right <= window.innerWidth + 0.5;
+      };
+      return {
+        pageWidth: document.documentElement.scrollWidth,
+        viewport: window.innerWidth,
+        settings: within('settings-btn'),
+        mic: within('mic-btn'),
+        exportButton: within('export-btn'),
+        share: within('share-btn'),
+        previous: within('prev-bar'),
+        next: within('next-bar')
+      };
+    });
+    // Held to the width this test set, not to `innerWidth`: a phone's layout
+    // viewport quietly grows to fit whatever overflows, so a 406px page in a
+    // 406px viewport once read as a pass.
+    expect(fit.pageWidth, 'the page is wider than the phone').toBeLessThanOrEqual(390);
+    expect(fit.viewport, 'the layout viewport grew past the phone').toBe(390);
+    expect(fit).toMatchObject({
+      settings: true, mic: true, exportButton: true, share: true, previous: true, next: true
+    });
+    await expect(page.locator('#score-name')).toHaveText('Quick! We have but a second');
+    await expect(page.locator('#score-composer')).toHaveText('C. V. Stanford');
+    expect(problems).toEqual([]);
+  });
+
+  test('the parts sheet is compact: presets on top, one line per part', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSample(page, 'Quick! We have but a second');
+    await showParts(page);
+
+    const layout = await page.evaluate(() => {
+      const presets = document.querySelector('#mix-options').getBoundingClientRect();
+      const rows = [...document.querySelectorAll('#part-list .part')].map(row => row.getBoundingClientRect());
+      const sheet = document.querySelector('#parts-panel').getBoundingClientRect();
+      return {
+        presetsTop: presets.top,
+        firstRowTop: rows[0].top,
+        rowHeights: rows.map(row => row.height),
+        sheetHeight: sheet.height,
+        viewport: window.innerHeight
+      };
+    });
+    expect(layout.presetsTop, 'the presets are not above the parts').toBeLessThan(layout.firstRowTop);
+    for (const height of layout.rowHeights) expect(height, 'a part row is more than one line').toBeLessThan(56);
+    expect(layout.sheetHeight).toBeLessThanOrEqual(layout.viewport * 0.5);
+  });
+
+  test('on its side, the sheet becomes a column beside the score', async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await openSample(page, 'Happy birthday');
+    await showParts(page);
+
+    const boxes = await page.evaluate(() => ({
+      panel: document.querySelector('#parts-panel').getBoundingClientRect().toJSON(),
+      frame: document.querySelector('#score-frame').getBoundingClientRect().toJSON()
+    }));
+    expect(boxes.panel.left).toBeGreaterThanOrEqual(boxes.frame.right - 1);
+    expect(boxes.frame.height).toBeGreaterThan(150);
+    expect(Math.abs(boxes.panel.top - boxes.frame.top)).toBeLessThan(24);
+
+    // And the column is wide enough to say who each part is: the one-line
+    // rows of the portrait sheet cut every name to "S…" here.
+    const cut = await page.evaluate(() => [...document.querySelectorAll('#part-list .part-name')]
+      .filter(name => name.scrollWidth > name.clientWidth + 1)
+      .map(name => name.textContent.trim()));
+    expect(cut, 'part names are truncated in the landscape column').toEqual([]);
+  });
+
+  test('the bar stepper stays on a phone and the readout counts bars', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSample(page, 'Happy birthday');
+
+    await expect(page.locator('#bar-display')).toHaveText('bar 1 / 9');
+    await page.locator('#next-bar').click();
+    await expect(page.locator('#bar-display')).toHaveText('bar 2 / 9');
+    await page.locator('#prev-bar').click();
+    await expect(page.locator('#bar-display')).toHaveText('bar 1 / 9');
+  });
+
+  test('a nine-beat count fits the width of a phone', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSample(page, 'Quick! We have but a second');
+    // Slow, so the count is up for long enough to be measured.
+    await page.evaluate(() => window.choirPracticeApp.setTempo(60));
+    await page.locator('#play-btn').click();
+
+    const overlay = page.locator('#count-in');
+    await expect(overlay).toBeVisible();
+    await expect(overlay.locator('.count-in-beat')).toHaveCount(9);
+    const fit = await page.evaluate(() => {
+      const box = document.querySelector('#count-in').getBoundingClientRect();
+      const beats = [...document.querySelectorAll('#count-in .count-in-beat')]
+        .map(beat => beat.getBoundingClientRect());
+      return {
+        left: box.left,
+        right: box.right,
+        inside: beats.every(beat => beat.left >= box.left - 0.5 && beat.right <= box.right + 0.5),
+        oneLine: beats.every(beat => Math.abs(beat.top - beats[0].top) < 1)
+      };
+    });
+    expect(fit.right, 'the count was not on screen to measure').toBeGreaterThan(fit.left);
+    expect(fit.left).toBeGreaterThanOrEqual(0);
+    expect(fit.right, 'the count runs off the right of the phone').toBeLessThanOrEqual(390);
+    expect(fit.inside, 'a number of the count spills out of its box').toBe(true);
+    expect(fit.oneLine, 'the count broke onto a second line').toBe(true);
+    await page.locator('#play-btn').click();
+  });
+
+  test('the first run says which part is chosen while the sheet is closed', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSample(page, 'Happy birthday');
+
+    const banner = page.locator('#part-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('Soprano');
+
+    await page.locator('#part-banner-open').click();
+    await expect(page.locator('#part-list')).toBeVisible();
+    await expect(banner).toBeHidden();
+    await expect(page.locator('#coach')).toBeVisible();
+
+    await page.locator('#coach-dismiss').click();
+    await page.locator('#parts-close').click();
+    await expect(page.locator('#part-list')).toBeHidden();
+    await expect(banner).toBeHidden();
   });
 });
 

@@ -13,8 +13,9 @@ export default defineConfig({
   use: {
     baseURL: `http://localhost:${PORT}`,
     trace: 'on-first-retry',
-    // Playback and microphone paths must run without a permission prompt.
-    permissions: ['microphone'],
+    // Playback, microphone and the share button's clipboard must all run
+    // without a permission prompt.
+    permissions: ['microphone', 'clipboard-read', 'clipboard-write'],
     launchOptions: {
       args: [
         '--autoplay-policy=no-user-gesture-required',
@@ -31,6 +32,13 @@ export default defineConfig({
     {
       name: 'chromium-mobile',
       use: { ...devices['Pixel 7'] }
+    },
+    {
+      // Narrower than the Pixel 7's 412px. This is the width at which a long
+      // score title first pushed the transport off the edge of the screen, and
+      // nothing ran at it, so nothing noticed.
+      name: 'chromium-phone-390',
+      use: { ...devices['Pixel 7'], viewport: { width: 390, height: 844 } }
     }
   ],
   webServer: {

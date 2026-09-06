@@ -144,6 +144,13 @@ const FERMATA_DURATION_MULTIPLIER = 2;
  */
 const TAIL_SECONDS = 4;
 
+/** Scheduling window and pace with the tab in front; see `setBackgrounded`. */
+const FOREGROUND_LOOKAHEAD_SECONDS = 0.1;
+const FOREGROUND_SCHEDULE_INTERVAL_MS = 25;
+/** Wide enough to outlast a background tab's once-a-second timer throttle. */
+const BACKGROUND_LOOKAHEAD_SECONDS = 2.5;
+const BACKGROUND_SCHEDULE_INTERVAL_MS = 250;
+
 /**
  * Collect score-wide fermata holds. A fermata belongs to the whole ensemble,
  * so simultaneous marks collapse into one hold at the shared note/rest end.
@@ -542,8 +549,10 @@ export class AudioEngine {
     this.currentBeat = 0;
     this.trackingFloorPlaybackBeat = 0;
     this.scheduledNodes = [];
-    this.lookaheadTime = 0.1;   // seconds of scheduling lookahead
-    this.scheduleInterval = 25; // ms between scheduling passes
+    this.lookaheadTime = FOREGROUND_LOOKAHEAD_SECONDS;
+    this.scheduleInterval = FOREGROUND_SCHEDULE_INTERVAL_MS;
+    /** True while the tab is hidden and timers are throttled; see `setBackgrounded`. */
+    this.isBackgrounded = false;
     this.startLead = 0.08;      // seconds before the first note sounds
     this.schedulerTimer = null;
     /* Collects the voices left ringing after a performance ends by itself. See
@@ -619,6 +628,8 @@ export class AudioEngine {
    *
    * Counted in the bar the music is about to start from rather than a fixed
    * four, so starting mid-piece in 6/8 counts six eighths and not four quarters.
+   * A pickup bar is counted as the full bar its metre describes: a one-beat
+   * upbeat in 3/4 is led into with three counts, not one.
    *
    * @returns {number} quarter-note beats
    */
@@ -632,7 +643,12 @@ export class AudioEngine {
       return scoreBeat >= start - 1e-6 && scoreBeat < start + length - 1e-6;
     }) || measures[0];
 
-    const barBeats = Number(measure?.beats) > 0 ? Number(measure.beats) : 4;
+    const numerator = Number(measure?.timeSignature?.numerator);
+    const denominator = Number(measure?.timeSignature?.denominator);
+    const metreBeats = numerator > 0 && denominator > 0 ? numerator * 4 / denominator : 0;
+    const barBeats = metreBeats > 0
+      ? metreBeats
+      : Number(measure?.beats) > 0 ? Number(measure.beats) : 4;
     return barBeats * this.countInBars;
   }
 
@@ -1818,8 +1834,45 @@ export class AudioEngine {
      Transport
      ===================================================================== */
 
-  /** Start or resume playback. */
-  play() {
+  /**
+   * How far ahead notes are scheduled.
+   *
+   * In the foreground, a tenth of a second: short enough that a tempo change
+   * or a seek is heard at once. A background tab is different. The browser
+   * throttles its timers to once a second — and after a few minutes to once a
+   * minute — while the audio clock runs on regardless, so with a short window
+   * every note due in the gap is found already overdue on the next pass and
+   * started late, all together, which is the heap of notes a singer heard when
+   * they came back to the tab. A window wider than the throttle gives every
+   * note its proper start time before the timer is put to sleep.
+   *
+   * The loop end and the end of the score are checked from the same timer
+   * while hidden, because `requestAnimationFrame` does not run in a background
+   * tab and that is where those checks normally live.
+   *
+   * @param {boolean} hidden
+   */
+  setBackgrounded(hidden) {
+    const next = Boolean(hidden);
+    if (next === this.isBackgrounded) return;
+    this.isBackgrounded = next;
+    this.lookaheadTime = next ? BACKGROUND_LOOKAHEAD_SECONDS : FOREGROUND_LOOKAHEAD_SECONDS;
+    this.scheduleInterval = next ? BACKGROUND_SCHEDULE_INTERVAL_MS : FOREGROUND_SCHEDULE_INTERVAL_MS;
+    if (!this.isPlaying || !this.audioContext) return;
+    // Fill the new window now rather than on the next (possibly throttled) pass.
+    this.scheduleAhead();
+    this.startLookaheadScheduler();
+    if (!next) this.startBeatTracking();
+  }
+
+  /**
+   * Start or resume playback.
+   *
+   * @param {{ countIn?: boolean }} [options] count in before the first note.
+   *   Only a press of play wants this; a seek during playback and the start of
+   *   another loop pass must not each wait a silent bar.
+   */
+  play({ countIn = false } = {}) {
     if (!this.audioContext) return;
 
     /* A previous performance may still be ringing out — see `finishPlayback`. Its
@@ -1840,7 +1893,12 @@ export class AudioEngine {
     if (this.isPaused) {
       currentPlaybackBeat = this.pausePlaybackBeat;
       this.pauseTime = this.timeline.beatToSeconds(currentPlaybackBeat);
-      this.startTime = this.audioContext.currentTime - this.pauseTime;
+      // Resuming counts in as well: a singer who paused mid-phrase needs the
+      // bar before coming back in at least as much as one starting cold. Without
+      // the lead, every count-in click was already in the past and skipped, so
+      // play-after-pause never counted at all.
+      this.startTime = this.audioContext.currentTime - this.pauseTime +
+                       (countIn ? this.startLead + this.getCountInSeconds() : 0);
       this.isPaused = false;
     } else {
       // A stopped transport resumes at the pass the caller last selected, so a
@@ -1853,7 +1911,7 @@ export class AudioEngine {
       // dropped by the lookahead scheduler's "already passed" check, plus the
       // count-in, which is simply silence in front of the music.
       this.startTime = this.audioContext.currentTime + this.startLead +
-                       this.getCountInSeconds() -
+                       (countIn ? this.getCountInSeconds() : 0) -
                        this.timeline.beatToSeconds(currentPlaybackBeat);
     }
 
@@ -1861,6 +1919,7 @@ export class AudioEngine {
     // score position immediately after a seek. Never let the first frames move
     // the cursor backward from the requested note/bar onset.
     this.trackingFloorPlaybackBeat = currentPlaybackBeat;
+    this.playFromPlaybackBeat = currentPlaybackBeat;
     this.isPlaying = true;
     this.preservedEventIndices.clear();
     this.scheduleIndex = 0;
@@ -1885,9 +1944,45 @@ export class AudioEngine {
     this.stopLookaheadScheduler();
     this.schedulerTimer = setInterval(() => {
       if (!this.isPlaying) return;
+      // The frame loop is asleep in a hidden tab, so the ends are watched here.
+      if (this.isBackgrounded && this.checkTransportEnd()) return;
       this.scheduleAhead();
       this.cleanupEndedNodes();
     }, this.scheduleInterval);
+  }
+
+  /**
+   * Read the performance position now and act on the loop end or the end of
+   * the score when it has been reached. Both the frame loop and the background
+   * timer go through here.
+   *
+   * @returns {boolean} true when playback ended or went round the loop
+   */
+  checkTransportEnd() {
+    const outputLatency = this.getAudibleOutputLatency();
+    const elapsed = this.audioContext.currentTime - this.startTime - outputLatency;
+    const measuredPlaybackBeat = Math.max(0, this.timeline.secondsToBeat(elapsed));
+    const playbackBeat = Math.max(this.trackingFloorPlaybackBeat, measuredPlaybackBeat);
+    this.currentBeat = this.timeline.playbackBeatToScoreBeat(playbackBeat);
+    this.currentPlaybackBeat = playbackBeat;
+
+    // A loop range ends the pass early and asks to be taken round again.
+    // Rehearsing a hard passage is the main thing a singer does with this, so
+    // the check comes before the end-of-score check.
+    const loopEnd = this.getLoopEndPlaybackBeat();
+    if (loopEnd !== null && playbackBeat >= loopEnd) {
+      if (this.onLoopEnd) this.onLoopEnd();
+      return true;
+    }
+
+    // End on the expanded timeline; during a fermata currentBeat intentionally
+    // remains fixed at the marked score position.
+    if (playbackBeat >= this.getTotalPlaybackBeats()) {
+      this.finishPlayback();
+      if (this.onPlaybackEnd) this.onPlaybackEnd();
+      return true;
+    }
+    return false;
   }
 
   /** Stop the lookahead scheduler. */
@@ -3298,32 +3393,9 @@ export class AudioEngine {
       if (!this.isPlaying) return;
       // The browser graph-to-host buffer and the host-to-speaker device path
       // are consecutive stages. Counting only one leaves visuals ahead of the
-      // sound that a microphone can physically receive.
-      const outputLatency = this.getAudibleOutputLatency();
-      const elapsed = this.audioContext.currentTime - this.startTime - outputLatency;
-      const measuredPlaybackBeat = Math.max(0, this.timeline.secondsToBeat(elapsed));
-      const playbackBeat = Math.max(this.trackingFloorPlaybackBeat, measuredPlaybackBeat);
-      this.currentBeat = this.timeline.playbackBeatToScoreBeat(playbackBeat);
-      this.currentPlaybackBeat = playbackBeat;
-
-      // A loop range ends the pass early and asks to be taken round again.
-      // Rehearsing a hard passage is the main thing a singer does with this, so
-      // the check comes before the end-of-score check.
-      const loopEnd = this.getLoopEndPlaybackBeat();
-      if (loopEnd !== null && playbackBeat >= loopEnd) {
-        if (this.onLoopEnd) this.onLoopEnd();
-        return;
-      }
-
-      // End on the expanded timeline; during a fermata currentBeat intentionally
-      // remains fixed at the marked score position.
-      if (playbackBeat >= this.getTotalPlaybackBeats()) {
-        this.finishPlayback();
-        if (this.onPlaybackEnd) {
-          this.onPlaybackEnd();
-        }
-        return;
-      }
+      // sound that a microphone can physically receive; `checkTransportEnd`
+      // reads the position with both taken off.
+      if (this.checkTransportEnd()) return;
 
       if (this.onBeatUpdate) {
         this.onBeatUpdate(this.currentBeat);
@@ -3364,6 +3436,19 @@ export class AudioEngine {
    */
   getStartTime() {
     return this.startTime;
+  }
+
+  /**
+   * When the music itself starts sounding after the last `play()`.
+   *
+   * Not the same as `getStartTime()`, which is where performance beat zero
+   * would have been: start from bar 13 and that reference lies twenty seconds
+   * in the past. The count-in ends here, so this is what it is timed against.
+   *
+   * @returns {number} AudioContext time of the first note
+   */
+  getMusicStartTime() {
+    return this.startTime + this.timeline.beatToSeconds(this.playFromPlaybackBeat || 0);
   }
 
   /**

@@ -8,7 +8,14 @@
 
 import { parseFile, detectVoiceType } from './musicxml-parser.js';
 import { describePitch } from './utils.js';
-import { NotationRenderer } from './notation-renderer.js';
+import { MAX_ZOOM, MIN_ZOOM, NotationRenderer, clampZoom, getPartLabel } from './notation-renderer.js';
+import {
+  buildShareHash,
+  describeShare,
+  findPartBySlug,
+  parseShareHash
+} from './share-link.js';
+import { clearResume, describeResume, readResume, saveResume } from './resume-store.js';
 import { AudioEngine, lyricForVerse } from './audio-engine.js';
 import { PitchDetector } from './pitch-detector.js';
 import { Metronome, isClickPattern } from './metronome.js';
@@ -30,11 +37,20 @@ import { exportMusicXMLFile, exportWavFile } from './exporters.js';
 import { Overlays } from './ui/overlays.js';
 import { PartsPanel } from './ui/parts-panel.js';
 import { Transport } from './ui/transport.js';
-import { SETTINGS_DEFAULTS, Settings } from './ui/settings.js';
+import { SETTINGS_DEFAULTS, Settings, describeTranspose } from './ui/settings.js';
 
 const TEMPO_MIN = 40;
 const TEMPO_MAX = 240;
 const TRANSPORT_UI_INTERVAL_MS = 50;
+/** One press of the zoom buttons, or one notch of Ctrl+wheel. */
+const ZOOM_STEP = 1.15;
+/** How often the bar you are at is written down while the music plays. */
+const RESUME_SAVE_INTERVAL_MS = 4000;
+/** How long a seek or a change has to settle before it is written down. */
+const RESUME_SAVE_DELAY_MS = 800;
+/** Scheduling window for a hidden tab; see AudioEngine.setBackgrounded. */
+const BACKGROUND_CLICK_LOOKAHEAD = { seconds: 2.5, intervalMs: 250 };
+const FOREGROUND_CLICK_LOOKAHEAD = { seconds: 0.1, intervalMs: 25 };
 /** How long a pitch control has to settle before playback is rebuilt. */
 const PITCH_REBUILD_DELAY_MS = 160;
 /** How long a manual pan holds the score still while playback continues. */
@@ -79,7 +95,16 @@ class ChoirPracticeApp {
       ),
       verse: readNumberPref('verse', SETTINGS_DEFAULTS.verse, 1, 20),
       soloed: new Set(),
-      loopRange: null
+      loopRange: null,
+      zoom: clampZoom(readNumberPref('zoom', 1, MIN_ZOOM, MAX_ZOOM)),
+      onlyMine: readBoolPref('only-mine', false),
+      /** The score's own tempo, which the readout and a shared link measure against. */
+      baseTempo: 120,
+      barCount: 0,
+      /** Where the open score came from, for the link and for coming back to it. */
+      sampleKey: null,
+      samplePath: null,
+      sourceFile: null
     };
 
     this.renderer = null;
@@ -97,6 +122,17 @@ class ChoirPracticeApp {
     this.pitchGuidePosition = 0;
     this.pitchAnnounceTimer = null;
     this.pitchRebuildTimer = null;
+    /** State to put back once the score a link or the home screen asked for has loaded. */
+    this.pendingRestore = null;
+    this.resumeRecord = null;
+    this.resumeTimer = null;
+    this.lastResumeSaveAt = 0;
+    /** A drag along the bar ruler, while it lasts. */
+    this.rulerDrag = null;
+    this.wasRulerDrag = false;
+    this.pointers = new Map();
+    this.pinch = null;
+    this.pinchFrame = null;
 
     this.cacheElements();
     // Exposed on the instance so the interface modules stay independently
@@ -109,15 +145,24 @@ class ChoirPracticeApp {
     this.partsPanel.setOthersLevel(this.state.othersLevel);
     this.partsPanel.setMixPreset(this.state.mixPreset);
     this.partsPanel.setDimOthers(this.state.dimOthers);
+    this.partsPanel.setOnlyMine(this.state.onlyMine);
+    this.partsPanel.setTranspose(this.state.transpose);
     this.transport.setTempo(this.state.tempo);
     this.transport.setLoopRange(null);
     this.settings.setAll(this.collectSettings());
 
     this.bindHomeScreen();
     this.bindScoreCanvas();
+    this.bindZoom();
+    this.bindShare();
+    this.bindPartBanner();
+    this.bindContinueCard();
     this.bindExports();
     this.bindKeyboard();
+    this.bindVisibility();
     this.watchAppearance();
+    this.updateZoomReadout();
+    this.readEntryPoint();
   }
 
   cacheElements() {
@@ -138,6 +183,355 @@ class ChoirPracticeApp {
     this.canvas = document.getElementById('score-canvas');
     this.pitchPill = document.getElementById('pitch-pill');
     this.pitchLabel = document.getElementById('pitch-label');
+    this.shareButton = document.getElementById('share-btn');
+    this.zoomLevel = document.getElementById('zoom-level');
+    this.zoomIn = document.getElementById('zoom-in');
+    this.zoomOut = document.getElementById('zoom-out');
+    this.partBanner = document.getElementById('part-banner');
+    this.partBannerPart = document.getElementById('part-banner-part');
+    this.continueSection = document.getElementById('continue');
+    this.continueButton = document.getElementById('continue-btn');
+    this.continueLabel = document.getElementById('continue-label');
+    this.continueDetail = document.getElementById('continue-detail');
+  }
+
+  /* =====================================================================
+     Where to start: a shared link, or where you left off
+     ===================================================================== */
+
+  /**
+   * Open whatever the URL asks for, or offer the last score on the home screen.
+   *
+   * A link with `#sample=…` in it is somebody handing over a passage, so it
+   * opens straight away. Otherwise the last score is offered rather than
+   * opened: coming back to the app is not the same as asking for that score.
+   */
+  async readEntryPoint() {
+    const shared = parseShareHash(window.location.hash);
+    if (shared.sample) {
+      const button = this.findSampleButton(shared.sample);
+      if (button) {
+        this.pendingRestore = { share: shared };
+        this.loadSample(button.dataset.samplePath, button);
+        return;
+      }
+    }
+    await this.refreshContinueCard();
+  }
+
+  /** The home-screen card for a link's short sample name. */
+  findSampleButton(key) {
+    for (const button of this.sampleList?.querySelectorAll('.sample') || []) {
+      if (button.dataset.sampleKey === key) return button;
+    }
+    return null;
+  }
+
+  /**
+   * Mirror the practice state into the URL, so the address bar always holds a
+   * link to what is on screen and reloading brings it back. `replaceState`
+   * rather than assigning the hash, so every change is not a step in the
+   * browser's history.
+   */
+  syncShareHash() {
+    if (typeof history === 'undefined' || typeof history.replaceState !== 'function') return;
+    const hash = this.buildShareState();
+    const wanted = hash ? `#${hash}` : '';
+    if (window.location.hash === wanted) return;
+    try {
+      history.replaceState(null, '', `${window.location.pathname}${window.location.search}${wanted}`);
+    } catch (error) {
+      // A sandboxed frame may refuse; the link is a convenience.
+    }
+  }
+
+  /** The current state as the hash of a link, or '' when no score is open. */
+  buildShareState() {
+    if (!this.state.parts.length) return '';
+    const part = this.state.parts.find(item => item.id === this.state.myPartId);
+    return buildShareHash({
+      sample: this.state.sampleKey,
+      part: part ? (part.voiceType || part.name) : null,
+      loop: this.state.loopRange
+        ? { fromBar: this.state.loopRange.fromBar, toBar: this.state.loopRange.toBar }
+        : null,
+      tempo: this.state.tempo,
+      zoom: this.state.zoom,
+      mix: this.state.mixPreset
+    });
+  }
+
+  /** A full link to the passage on screen. */
+  buildShareLink() {
+    const hash = this.buildShareState();
+    const base = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+    return hash ? `${base}#${hash}` : base;
+  }
+
+  /**
+   * Put back the state a link or a resume record described, now that the score
+   * it belongs to is open.
+   */
+  applyPendingRestore() {
+    const pending = this.pendingRestore;
+    this.pendingRestore = null;
+    if (!pending || !this.state.parts.length) return;
+
+    const share = pending.share;
+    if (share) {
+      if (share.part) {
+        const part = findPartBySlug(this.state.parts, share.part);
+        if (part) this.selectPart(part.id);
+      }
+      if (share.mix && isMixPreset(share.mix)) this.applyMix(share.mix);
+      if (share.tempo !== null) this.setTempo(share.tempo);
+      if (share.zoom !== null) this.setZoom(share.zoom);
+      if (share.loop) {
+        this.setLoopBars(share.loop.fromBar, share.loop.toBar);
+        const range = this.state.loopRange;
+        if (range) this.seekToBeat(range.fromBarEntry.startBeat, { followScore: true });
+      }
+    }
+
+    const record = pending.record;
+    if (record) {
+      if (record.voiceType) {
+        const part = findPartBySlug(this.state.parts, record.voiceType);
+        if (part) this.selectPart(part.id);
+      }
+      if (Number(record.tempo) > 0) this.setTempo(record.tempo);
+      if (Number(record.beat) > 0) this.seekToBeat(record.beat, { followScore: true });
+    }
+  }
+
+  /* ------------------------------------------------------------ resume */
+
+  /** Everything needed to open this score again at this bar. */
+  buildResumeRecord() {
+    if (!this.state.parts.length || !this.state.fileName) return null;
+    const part = this.state.parts.find(item => item.id === this.state.myPartId);
+    const context = this.renderer?.getMeasureContext(this.state.currentBeat);
+    const isSample = Boolean(this.state.samplePath);
+    if (!isSample && !this.state.sourceFile) return null;
+    return {
+      kind: isSample ? 'sample' : 'file',
+      samplePath: this.state.samplePath,
+      sampleKey: this.state.sampleKey,
+      file: isSample ? null : this.state.sourceFile,
+      fileName: this.state.fileName,
+      title: this.getScoreTitle({ metadata: this.state.metadata }, this.state.fileName),
+      composer: this.state.metadata?.composer || '',
+      voiceType: part?.voiceType || null,
+      partName: part ? getPartLabel(part) : null,
+      beat: Math.max(0, Number(this.state.currentBeat) || 0),
+      bar: context?.number || 1,
+      tempo: this.state.tempo
+    };
+  }
+
+  /** Write the record now. Resolves once it is stored, or at once if it cannot be. */
+  saveResumeNow() {
+    clearTimeout(this.resumeTimer);
+    this.resumeTimer = null;
+    this.lastResumeSaveAt = performance.now();
+    const record = this.buildResumeRecord();
+    if (!record) return Promise.resolve(false);
+    return saveResume(record);
+  }
+
+  /** Write the record once a change has settled. */
+  scheduleResumeSave() {
+    clearTimeout(this.resumeTimer);
+    this.resumeTimer = setTimeout(() => this.saveResumeNow(), RESUME_SAVE_DELAY_MS);
+  }
+
+  /** Write the record now and then, while the music plays. */
+  noteResumeProgress() {
+    if (performance.now() - this.lastResumeSaveAt < RESUME_SAVE_INTERVAL_MS) return;
+    this.saveResumeNow();
+  }
+
+  bindContinueCard() {
+    this.continueButton?.addEventListener('click', () => this.resumeRecent());
+    document.getElementById('continue-forget')?.addEventListener('click', async () => {
+      this.resumeRecord = null;
+      // The card goes once the record has: a reload in between would otherwise
+      // bring it straight back.
+      await clearResume();
+      if (this.continueSection) this.continueSection.hidden = true;
+      this.overlays.announce('Forgotten');
+    });
+  }
+
+  /** Offer the last score on the home screen, if there is one. */
+  async refreshContinueCard() {
+    const record = await readResume();
+    this.resumeRecord = record;
+    if (!this.continueSection) return;
+    if (!record) {
+      this.continueSection.hidden = true;
+      return;
+    }
+    const { label, detail } = describeResume(record);
+    if (this.continueLabel) this.continueLabel.textContent = label;
+    if (this.continueDetail) this.continueDetail.textContent = detail;
+    this.continueSection.hidden = false;
+  }
+
+  /** Open the last score again, at the bar it was left at. */
+  resumeRecent() {
+    const record = this.resumeRecord;
+    if (!record) return;
+    this.pendingRestore = { record };
+    if (record.kind === 'sample') {
+      const button = [...(this.sampleList?.querySelectorAll('.sample') || [])]
+        .find(candidate => candidate.dataset.samplePath === record.samplePath) || null;
+      this.loadSample(record.samplePath, button);
+      return;
+    }
+    if (record.file) {
+      const blob = record.file;
+      const file = typeof File === 'function' && blob instanceof File
+        ? blob
+        : new File([blob], record.fileName, { type: blob.type || 'application/xml' });
+      this.openFile(file);
+    }
+  }
+
+  /* ------------------------------------------------------------- share */
+
+  bindShare() {
+    this.shareButton?.addEventListener('click', () => this.sharePassage());
+  }
+
+  /** Copy a link to the passage on screen. */
+  async sharePassage() {
+    if (!this.state.parts.length) return;
+    const link = this.buildShareLink();
+    const part = this.state.parts.find(item => item.id === this.state.myPartId);
+    const summary = describeShare({
+      title: this.getScoreTitle({ metadata: this.state.metadata }, this.state.fileName),
+      partName: part ? getPartLabel(part) : null,
+      loop: this.state.loopRange,
+      tempo: this.state.tempo
+    });
+    const copied = await copyText(link);
+    let message = copied ? `Link copied — ${summary}.` : `Copy this link: ${link}`;
+    if (copied && !this.state.sampleKey) {
+      message += ' Your own file is not in the link, so elsewhere it opens the home screen.';
+    }
+    this.overlays.toast(message, { duration: copied ? 6000 : 12000 });
+    this.overlays.announce(copied ? 'Link copied' : 'The link could not be copied');
+  }
+
+  /* ------------------------------------------------------------- zoom */
+
+  bindZoom() {
+    this.zoomIn?.addEventListener('click', () => this.stepZoom(1));
+    this.zoomOut?.addEventListener('click', () => this.stepZoom(-1));
+    this.zoomLevel?.addEventListener('click', () => this.fitZoom());
+  }
+
+  /**
+   * Magnify or shrink the score.
+   * @param {number} value
+   * @param {{ announce?: boolean }} [options]
+   */
+  setZoom(value, { announce = false } = {}) {
+    const zoom = clampZoom(value);
+    this.state.zoom = zoom;
+    writePref('zoom', zoom);
+    this.renderer?.setZoom(zoom);
+    this.updateZoomReadout();
+    this.syncShareHash();
+    if (announce) this.overlays.announce(`Zoom ${Math.round(zoom * 100)} percent`);
+  }
+
+  stepZoom(direction) {
+    const next = direction > 0 ? this.state.zoom * ZOOM_STEP : this.state.zoom / ZOOM_STEP;
+    this.setZoom(next, { announce: true });
+  }
+
+  /** Fit every stave into the frame at once. */
+  fitZoom() {
+    if (!this.renderer) return;
+    this.setZoom(this.renderer.getFitZoom(), { announce: true });
+  }
+
+  updateZoomReadout() {
+    const percent = Math.round(this.state.zoom * 100);
+    if (this.zoomLevel) {
+      this.zoomLevel.textContent = `${percent}%`;
+      this.zoomLevel.setAttribute('aria-label', `Zoom ${percent} percent. Fit the score to the window.`);
+    }
+    if (this.zoomIn) this.zoomIn.disabled = this.state.zoom >= MAX_ZOOM - 1e-6;
+    if (this.zoomOut) this.zoomOut.disabled = this.state.zoom <= MIN_ZOOM + 1e-6;
+  }
+
+  /* ------------------------------------------------------ first-run help */
+
+  bindPartBanner() {
+    document.getElementById('part-banner-open')?.addEventListener('click', () => {
+      this.partsPanel.open();
+    });
+    document.getElementById('part-banner-dismiss')?.addEventListener('click', () => {
+      this.dismissCoaching();
+    });
+  }
+
+  /**
+   * On a first run, say which part is chosen and where to change it.
+   *
+   * The coach inside the parts panel does this when the panel is open. On a
+   * phone the panel starts closed, so the same words go over the score until
+   * the panel is opened or the singer says they know.
+   */
+  showFirstRunCoaching() {
+    if (readBoolPref('coach-seen', false)) return;
+    this.partsPanel.showCoach();
+    this.syncPartBanner();
+  }
+
+  syncPartBanner() {
+    if (!this.partBanner || !this.partsPanel) return;
+    const show = !readBoolPref('coach-seen', false) &&
+      this.state.parts.length > 0 &&
+      !this.partsPanel.isOpen() &&
+      !this.practice?.hidden;
+    this.partBanner.hidden = !show;
+    if (!show) return;
+    const part = this.state.parts.find(item => item.id === this.state.myPartId);
+    if (this.partBannerPart) this.partBannerPart.textContent = part ? getPartLabel(part) : 'Soprano';
+  }
+
+  dismissCoaching() {
+    writeBoolPref('coach-seen', true);
+    this.partsPanel.hideCoach();
+    if (this.partBanner) this.partBanner.hidden = true;
+  }
+
+  /* ---------------------------------------------------------- background */
+
+  /**
+   * A hidden tab throttles timers but not the audio clock, so the schedulers
+   * are given a wider window while it is hidden; see AudioEngine.setBackgrounded.
+   * The bar is written down on the way out, because a phone that switches
+   * apps may never come back to this one.
+   */
+  bindVisibility() {
+    document.addEventListener('visibilitychange', () => {
+      const hidden = document.visibilityState === 'hidden';
+      this.audioEngine?.setBackgrounded(hidden);
+      const window_ = hidden ? BACKGROUND_CLICK_LOOKAHEAD : FOREGROUND_CLICK_LOOKAHEAD;
+      this.metronome?.setLookahead(window_.seconds, window_.intervalMs);
+      if (hidden) {
+        this.saveResumeNow();
+      } else if (this.state.parts.length) {
+        this.updateTransportPosition();
+        this.renderer?.setCurrentBeat(this.state.currentBeat, { autoScroll: this.state.isPlaying });
+      }
+    });
+    window.addEventListener('pagehide', () => this.saveResumeNow());
   }
 
   /* =====================================================================
@@ -220,7 +614,11 @@ class ChoirPracticeApp {
         );
       }
       const fileName = path.split('/').pop();
-      await this.readScore(new File([blob], fileName, { type: 'application/xml' }), generation);
+      await this.readScore(
+        new File([blob], fileName, { type: 'application/xml' }),
+        generation,
+        { kind: 'sample', path, key: button?.dataset.sampleKey || null }
+      );
     } catch (error) {
       if (generation === this.loadGeneration) this.failLoad(error);
     } finally {
@@ -233,7 +631,7 @@ class ChoirPracticeApp {
     const generation = ++this.loadGeneration;
     this.setLoading(true, `Opening ${file.name}…`);
     try {
-      await this.readScore(file, generation);
+      await this.readScore(file, generation, { kind: 'file', file });
     } catch (error) {
       if (generation === this.loadGeneration) this.failLoad(error);
     }
@@ -247,7 +645,13 @@ class ChoirPracticeApp {
     );
   }
 
-  async readScore(file, generation) {
+  /**
+   * @param {File} file
+   * @param {number} generation
+   * @param {{ kind: 'sample'|'file', path?: string, key?: string|null, file?: File }} [source]
+   *   where the score came from, for the link and the resume record
+   */
+  async readScore(file, generation, source = { kind: 'file', file }) {
     const result = await parseFile(file);
     if (generation !== this.loadGeneration) return;
     if (!result.parts?.length) {
@@ -259,8 +663,13 @@ class ChoirPracticeApp {
     this.state.metadata = result.metadata;
     this.state.rawXml = result.rawXml || null;
     this.state.fileName = file.name;
-    this.state.tempo = this.clampTempo(result.metadata.tempo || 120);
+    this.state.samplePath = source.kind === 'sample' ? source.path || null : null;
+    this.state.sampleKey = source.kind === 'sample' ? source.key || null : null;
+    this.state.sourceFile = source.kind === 'file' ? source.file || file : null;
+    this.state.baseTempo = this.clampTempo(result.metadata.tempo || 120);
+    this.state.tempo = this.state.baseTempo;
     this.committedTempo = this.state.tempo;
+    this.transport.setBaseTempo(this.state.baseTempo);
     this.state.myPartId = this.chooseDefaultPart(result.parts);
 
     for (const part of result.parts) {
@@ -276,11 +685,16 @@ class ChoirPracticeApp {
     this.partsPanel.renderParts(this.state.parts, this.state);
     this.partsPanel.setVolumes(this.state.volumes);
     this.partsPanel.setMixPreset(this.state.mixPreset);
+    this.partsPanel.setTranspose(this.state.transpose);
     this.transport.setTempo(this.state.tempo);
     this.updateTransportPosition();
+    this.updateZoomReadout();
     this.setLoading(false);
 
-    if (!readBoolPref('coach-seen', false)) this.partsPanel.showCoach();
+    this.applyPendingRestore();
+    this.syncShareHash();
+    this.saveResumeNow();
+    this.showFirstRunCoaching();
     this.overlays.announce(
       `${this.getScoreTitle(result, file.name)} is open with ${result.parts.length} parts. Press space to play.`
     );
@@ -338,6 +752,7 @@ class ChoirPracticeApp {
     if (this.scoreComposer) this.scoreComposer.textContent = result.metadata?.composer || '';
     if (this.scoreMeta) this.scoreMeta.hidden = false;
     if (this.exportMenu) this.exportMenu.hidden = false;
+    if (this.shareButton) this.shareButton.hidden = false;
     if (this.home) this.home.hidden = true;
     if (this.practice) this.practice.hidden = false;
     this.transport.setVisible(true);
@@ -363,11 +778,20 @@ class ChoirPracticeApp {
     this.state.loopRange = null;
     this.state.loop = false;
     this.state.metronome = false;
+    this.state.sampleKey = null;
+    this.state.samplePath = null;
+    this.state.sourceFile = null;
+    this.state.barCount = 0;
     this.isSeeking = false;
+    this.rulerDrag = null;
     clearTimeout(this.pitchRebuildTimer);
     this.pitchRebuildTimer = null;
+    clearTimeout(this.resumeTimer);
+    this.resumeTimer = null;
     this.renderer?.destroy();
     this.renderer = null;
+    this.overlays.hideCountIn();
+    if (this.partBanner) this.partBanner.hidden = true;
 
     this.audioEngine?.resetForNewScore();
     if (this.metronome) {
@@ -387,10 +811,14 @@ class ChoirPracticeApp {
   }
 
   /** Return to the score picker. */
-  returnHome() {
+  async returnHome() {
     this.loadGeneration++;
+    this.pendingRestore = null;
     this.setLoading(false);
     this.overlays.closeMenus();
+    // The bar is written down before the session is cleared, so the home
+    // screen can offer this score again at this bar.
+    const saved = this.saveResumeNow();
     this.resetSession();
     this.partsPanel.hide();
     this.transport.setVisible(false);
@@ -398,9 +826,13 @@ class ChoirPracticeApp {
     if (this.home) this.home.hidden = false;
     if (this.scoreMeta) this.scoreMeta.hidden = true;
     if (this.exportMenu) this.exportMenu.hidden = true;
+    if (this.shareButton) this.shareButton.hidden = true;
     if (this.pitchPill) this.pitchPill.hidden = true;
     document.title = 'Choir Practice';
+    this.syncShareHash();
     this.sampleList?.querySelector('.sample')?.focus();
+    await saved;
+    await this.refreshContinueCard();
   }
 
   /* =====================================================================
@@ -417,6 +849,9 @@ class ChoirPracticeApp {
     this.renderer.showLyrics = this.state.showLyrics;
     this.renderer.showTimeSignatures = this.state.showTimeSignatures;
     this.renderer.verse = this.state.verse;
+    this.renderer.zoom = this.state.zoom;
+    this.renderer.soloStave = this.state.onlyMine;
+    this.renderer.selectedPartId = this.state.myPartId;
     this.renderer.setData(this.state.parts, this.state.metadata);
     this.renderer.setSelectedPart(this.state.myPartId);
     this.renderer.setFocusSelectedPart(this.state.dimOthers);
@@ -456,8 +891,38 @@ class ChoirPracticeApp {
     let startBeat = 0;
     let didDrag = false;
 
+    const canvasPoint = event => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    };
+
+    const releaseScrub = () => {
+      pointerId = null;
+      didDrag = false;
+      canvas.classList.remove('is-scrubbing');
+    };
+
     canvas.addEventListener('pointerdown', event => {
-      if (!this.renderer || event.button !== 0) return;
+      if (!this.renderer) return;
+      this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      // A second finger is a pinch, whatever the first was doing.
+      if (this.pointers.size === 2) {
+        releaseScrub();
+        this.rulerDrag = null;
+        this.beginPinch();
+        return;
+      }
+      if (event.button !== 0) return;
+
+      const point = canvasPoint(event);
+      const hit = this.renderer.hitTest(point.x, point.y);
+      if (hit.zone === 'ruler' || hit.zone === 'handle') {
+        pointerId = event.pointerId;
+        canvas.setPointerCapture?.(pointerId);
+        this.beginRulerDrag(hit, event.clientX);
+        return;
+      }
+
       pointerId = event.pointerId;
       startX = event.clientX;
       startBeat = this.state.currentBeat;
@@ -467,25 +932,54 @@ class ChoirPracticeApp {
     });
 
     canvas.addEventListener('pointermove', event => {
-      if (pointerId === null || event.pointerId !== pointerId || !this.renderer) return;
+      if (!this.renderer) return;
+      if (this.pointers.has(event.pointerId)) {
+        this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      }
+      if (this.pinch) {
+        this.updatePinch();
+        return;
+      }
+
+      // Nothing pressed: show what the ruler would do here.
+      if (pointerId === null) {
+        if (event.pointerType === 'mouse') this.hoverRuler(canvasPoint(event));
+        return;
+      }
+      if (event.pointerId !== pointerId) return;
+
+      if (this.rulerDrag) {
+        event.preventDefault();
+        this.updateRulerDrag(canvasPoint(event).x, event.clientX);
+        return;
+      }
+
       const distance = event.clientX - startX;
       if (!didDrag && Math.abs(distance) <= 4) return;
       didDrag = true;
       event.preventDefault();
       const startScoreX = this.renderer.getScoreX(startBeat);
-      const targetBeat = this.renderer.getBeatAtScoreX(startScoreX - distance);
+      const targetBeat = this.renderer.getBeatAtScoreX(
+        startScoreX - this.renderer.screenToLayout(distance)
+      );
       this.renderer.isAutoScrollEnabled = true;
       this.seekToBeat(targetBeat, { followScore: true });
     });
 
     const endDrag = event => {
+      this.pointers.delete(event.pointerId);
+      if (this.pinch && this.pointers.size < 2) this.endPinch();
       if (pointerId === null || event.pointerId !== pointerId) return;
-      pointerId = null;
-      canvas.classList.remove('is-scrubbing');
-      this.wasScoreDragged = didDrag;
+      const wasRuler = Boolean(this.rulerDrag);
+      if (wasRuler) this.finishRulerDrag();
+      this.wasScoreDragged = wasRuler || didDrag;
+      releaseScrub();
     };
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
+    canvas.addEventListener('pointerleave', () => {
+      if (pointerId === null) this.hoverRuler(null);
+    });
 
     canvas.addEventListener('click', event => {
       if (!this.renderer) return;
@@ -501,16 +995,137 @@ class ChoirPracticeApp {
 
     // Trackpad and shift-wheel gestures browse ahead without moving playback.
     // While playing, auto-scroll pauses briefly so the view does not snap back
-    // under the reader's hand, then resumes on its own.
+    // under the reader's hand, then resumes on its own. With Ctrl held — which
+    // is also how a trackpad pinch arrives — the wheel zooms instead.
     canvas.addEventListener('wheel', event => {
       if (!this.renderer) return;
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        this.setZoom(this.state.zoom * Math.exp(-event.deltaY * 0.0025));
+        return;
+      }
       const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
       if (!horizontal && !event.shiftKey) return;
       event.preventDefault();
       const delta = horizontal ? event.deltaX : event.deltaY;
       this.autoScrollResumesAt = performance.now() + AUTO_SCROLL_PAUSE_MS;
-      this.renderer.setScrollX(this.renderer.scrollX + delta);
+      this.renderer.setScrollX(this.renderer.scrollX + this.renderer.screenToLayout(delta));
     }, { passive: false });
+  }
+
+  /* ------------------------------------------------------------- pinch */
+
+  /** Two fingers on the score: remember how far apart they started. */
+  beginPinch() {
+    const [first, second] = [...this.pointers.values()];
+    if (!first || !second) return;
+    const distance = Math.hypot(second.x - first.x, second.y - first.y);
+    this.pinch = { startDistance: Math.max(1, distance), startZoom: this.state.zoom };
+  }
+
+  updatePinch() {
+    if (!this.pinch) return;
+    const [first, second] = [...this.pointers.values()];
+    if (!first || !second) return;
+    const distance = Math.hypot(second.x - first.x, second.y - first.y);
+    const wanted = this.pinch.startZoom * (distance / this.pinch.startDistance);
+    // Re-laying out on every move would stutter; one change per frame is plenty.
+    this.pinch.wanted = wanted;
+    if (this.pinchFrame !== null) return;
+    this.pinchFrame = requestAnimationFrame(() => {
+      this.pinchFrame = null;
+      if (this.pinch) this.setZoom(this.pinch.wanted);
+    });
+  }
+
+  endPinch() {
+    if (this.pinchFrame !== null) {
+      cancelAnimationFrame(this.pinchFrame);
+      this.pinchFrame = null;
+    }
+    if (this.pinch?.wanted) this.setZoom(this.pinch.wanted, { announce: true });
+    this.pinch = null;
+  }
+
+  /* ------------------------------------------------------------- ruler */
+
+  /**
+   * Show what the ruler would do under the pointer: a bar lights up, and the
+   * cursor says whether a press would take hold of a handle.
+   * @param {{ x: number, y: number }|null} point
+   */
+  hoverRuler(point) {
+    if (!this.renderer || !this.canvas) return;
+    const hit = point ? this.renderer.hitTest(point.x, point.y) : null;
+    const onRuler = hit && (hit.zone === 'ruler' || hit.zone === 'handle');
+    this.renderer.setRulerHover(onRuler ? hit.measureIndex : null);
+    this.canvas.style.cursor = hit?.zone === 'handle' ? 'ew-resize' : onRuler ? 'pointer' : '';
+  }
+
+  /**
+   * Start a drag along the bar ruler.
+   *
+   * A press on the ruler starts a new range at that bar; a press on a handle
+   * picks that end of the range up and keeps the other where it is.
+   *
+   * @param {{ zone: string, edge: string|null, measureIndex: number|null }} hit
+   * @param {number} clientX
+   */
+  beginRulerDrag(hit, clientX) {
+    const bars = this.getBarList();
+    if (!bars.length) return;
+    const index = Math.max(0, Math.min(bars.length - 1, hit.measureIndex ?? 0));
+    const range = this.state.loopRange;
+    if (hit.zone === 'handle' && range) {
+      const fromIndex = bars.findIndex(bar => bar.number === range.fromBar);
+      const toIndex = bars.findIndex(bar => bar.number === range.toBar);
+      this.rulerDrag = {
+        mode: 'handle',
+        anchorIndex: hit.edge === 'start' ? toIndex : fromIndex,
+        currentIndex: hit.edge === 'start' ? fromIndex : toIndex,
+        moved: false,
+        startX: clientX
+      };
+    } else {
+      this.rulerDrag = { mode: 'new', anchorIndex: index, currentIndex: index, moved: false, startX: clientX };
+    }
+    this.renderer?.setRulerHover(index);
+  }
+
+  updateRulerDrag(canvasX, clientX) {
+    const drag = this.rulerDrag;
+    if (!drag || !this.renderer) return;
+    // A press that has not travelled is still a tap, not a range.
+    if (!drag.moved && Math.abs(clientX - drag.startX) <= 3) return;
+    const scoreX = this.renderer.screenToLayout(canvasX) + this.renderer.scrollX;
+    const index = this.renderer.getMeasureIndexAtScoreX(scoreX);
+    if (index === null) return;
+    const first = !drag.moved;
+    drag.moved = true;
+    if (!first && index === drag.currentIndex) return;
+    drag.currentIndex = index;
+    this.renderer.setRulerHover(index);
+    const bars = this.getBarList();
+    const low = bars[Math.min(drag.anchorIndex, index)];
+    const high = bars[Math.max(drag.anchorIndex, index)];
+    if (low && high) this.setLoopBars(low.number, high.number, { announce: false });
+  }
+
+  finishRulerDrag() {
+    const drag = this.rulerDrag;
+    this.rulerDrag = null;
+    if (!drag) return;
+    if (drag.moved) {
+      const range = this.state.loopRange;
+      if (range) this.overlays.announce(`Looping bars ${range.fromBar} to ${range.toBar}`);
+      return;
+    }
+    // A tap on the ruler goes to that bar, as a tap on the music goes to a note.
+    if (drag.mode !== 'new') return;
+    const bar = this.getBarList()[drag.anchorIndex];
+    if (!bar) return;
+    this.seekToBeat(bar.startBeat, { followScore: true });
+    this.announceBar();
   }
 
   /* =====================================================================
@@ -527,7 +1142,10 @@ class ChoirPracticeApp {
       onMixChange: presetId => this.applyMix(presetId),
       onOthersLevelChange: level => this.setOthersLevel(level),
       onDimChange: dim => this.setDimOthers(dim),
-      onCoachDismiss: () => writeBoolPref('coach-seen', true)
+      onOnlyMineChange: only => this.setOnlyMine(only),
+      onTransposeStep: delta => this.stepTranspose(delta),
+      onLayoutChange: () => this.syncPartBanner(),
+      onCoachDismiss: () => this.dismissCoaching()
     };
   }
 
@@ -540,6 +1158,9 @@ class ChoirPracticeApp {
     this.partsPanel.setSelectedPart(partId);
     this.renderer?.setSelectedPart(partId);
     if (this.state.mixPreset) this.applyMix(this.state.mixPreset, { persist: false });
+    this.syncPartBanner();
+    this.syncShareHash();
+    this.scheduleResumeSave();
     this.overlays.announce(`${part.name} is now your part.`);
   }
 
@@ -624,6 +1245,7 @@ class ChoirPracticeApp {
     this.partsPanel.setVolumes(this.state.volumes);
     this.partsPanel.setMixPreset(presetId);
     if (persist) writePref('mix-preset', presetId);
+    this.syncShareHash();
   }
 
   setOthersLevel(level) {
@@ -638,6 +1260,22 @@ class ChoirPracticeApp {
     this.state.dimOthers = Boolean(dim);
     writeBoolPref('dim-others', this.state.dimOthers);
     this.renderer?.setFocusSelectedPart(this.state.dimOthers);
+  }
+
+  /** Show only the chosen part's stave, larger. */
+  setOnlyMine(only) {
+    this.state.onlyMine = Boolean(only);
+    writeBoolPref('only-mine', this.state.onlyMine);
+    this.partsPanel.setOnlyMine(this.state.onlyMine);
+    this.renderer?.setSoloStave(this.state.onlyMine);
+    this.overlays.announce(this.state.onlyMine ? 'Showing only your stave' : 'Showing every stave');
+  }
+
+  /** The stepper in the parts panel: a semitone at a time. */
+  stepTranspose(delta) {
+    this.setTranspose(this.state.transpose + Math.sign(Number(delta) || 0));
+    this.settings.setAll(this.collectSettings());
+    this.overlays.announce(describeTranspose(this.state.transpose));
   }
 
   /* =====================================================================
@@ -705,8 +1343,30 @@ class ChoirPracticeApp {
         this.audioEngine.getClickBus()
       );
       this.metronome.onBeat = (_beat, isDownbeat) => this.transport.flashBeat(isDownbeat);
+      this.metronome.onCountIn = (beat, _index, _total, beatsPerBar) =>
+        this.handleCountIn(beat, beatsPerBar);
     }
     return this.audioEngine;
+  }
+
+  /**
+   * One beat of the count-in has arrived, or the count is over.
+   * @param {number|null} beat 1-based, or null when the music starts
+   * @param {number} beatsPerBar
+   */
+  handleCountIn(beat, beatsPerBar) {
+    if (beat === null || !this.state.isPlaying) {
+      this.overlays.hideCountIn();
+      return;
+    }
+    if (!this.overlays.isCountInShowing()) this.overlays.showCountIn(beatsPerBar);
+    this.overlays.setCountInBeat(beat);
+  }
+
+  /** Stop a count-in that is under way, clicks and numbers both. */
+  cancelCountIn() {
+    this.metronome?.cancelCountIn();
+    this.overlays.hideCountIn();
   }
 
   /** Build the audio graph for a freshly loaded score without resuming it. */
@@ -737,6 +1397,7 @@ class ChoirPracticeApp {
 
     // Bar numbers bound the loop fields, so they follow the score that is open.
     const bars = this.getBarList();
+    this.state.barCount = bars.length;
     if (bars.length) {
       this.transport.setBarRange(bars[0].number, bars[bars.length - 1].number);
     }
@@ -766,6 +1427,7 @@ class ChoirPracticeApp {
       performance.now() >= this.autoScrollResumesAt;
     this.renderer?.setCurrentBeat(beat, { autoScroll: followPlayhead });
     this.updateTransportPosition({ throttle: true });
+    if (this.state.isPlaying) this.noteResumeProgress();
   }
 
   /**
@@ -830,6 +1492,7 @@ class ChoirPracticeApp {
   handleAudioContextState(state) {
     if (state === 'running' || !this.state.isPlaying) return;
     this.state.isPlaying = false;
+    this.cancelCountIn();
     this.audioEngine?.pause();
     if (this.state.metronome) this.metronome?.stop();
     this.transport.setPlaying(false);
@@ -843,9 +1506,11 @@ class ChoirPracticeApp {
 
     if (this.state.isPlaying) {
       this.state.isPlaying = false;
+      this.cancelCountIn();
       this.audioEngine.pause();
       if (this.state.metronome) this.metronome.stop();
       this.transport.setPlaying(false);
+      this.saveResumeNow();
       this.overlays.announce('Paused');
     } else {
       // A context that did not start has to be reported, not played into. This
@@ -868,7 +1533,7 @@ class ChoirPracticeApp {
       // A score click can happen before the engine exists, so align the
       // transport with the visible cursor before the first play.
       if (!this.audioEngine.isPaused) this.audioEngine.seek(this.state.currentBeat);
-      this.audioEngine.play();
+      this.audioEngine.play({ countIn: true });
       this.playCountIn();
       if (this.state.metronome) this.startMetronome();
       this.transport.setPlaying(true);
@@ -900,12 +1565,18 @@ class ChoirPracticeApp {
     const clickInterval = secondsPerBeat * (4 / denominator);
     const clicks = clickInterval > 0 ? Math.round(beats / (4 / denominator)) : 0;
 
+    const beatsPerBar = Number(measure?.timeSignature?.numerator) || 4;
     this.metronome.playCountIn({
-      startTime: this.audioEngine.getStartTime(),
+      // Timed back from the first note, wherever in the score that is. Timing
+      // it from performance beat zero meant a count-in that only ever happened
+      // when play was pressed at the very start.
+      startTime: this.audioEngine.getMusicStartTime(),
       clicks,
       interval: clickInterval,
-      beatsPerBar: Number(measure?.timeSignature?.numerator) || 4
+      beatsPerBar
     });
+    // The numbers go up at once; each lights as its click sounds.
+    if (clicks > 0) this.overlays.showCountIn(beatsPerBar);
   }
 
   /**
@@ -967,6 +1638,8 @@ class ChoirPracticeApp {
     const tempo = this.clampTempo(bpm);
     this.state.tempo = tempo;
     this.transport.setTempo(tempo);
+    this.syncShareHash();
+    this.scheduleResumeSave();
     if (tempo === this.committedTempo) return;
 
     const restartMetronome = Boolean(
@@ -1021,6 +1694,7 @@ class ChoirPracticeApp {
   setTranspose(value) {
     this.state.transpose = Math.max(-12, Math.min(12, Math.round(Number(value) || 0)));
     writePref('transpose', this.state.transpose);
+    this.partsPanel.setTranspose(this.state.transpose);
     this.audioEngine?.setTranspose(this.state.transpose);
     this.applyPitchReference();
     this.rebuildPlaybackForPitchChange();
@@ -1187,10 +1861,15 @@ class ChoirPracticeApp {
    * engine works in performance positions. Either end may be left blank, which
    * means "leave that end where it is".
    *
+   * Marking a range turns looping on: the range is the point, and a range that
+   * has to be switched on separately is a range that plays once and stops
+   * while you wonder why.
+   *
    * @param {number|null} fromBar
    * @param {number|null} toBar
+   * @param {{ syncFields?: boolean, announce?: boolean }} [options]
    */
-  setLoopBars(fromBar, toBar, { syncFields = true } = {}) {
+  setLoopBars(fromBar, toBar, { syncFields = true, announce = true } = {}) {
     const bars = this.getBarList();
     if (!bars.length) return;
 
@@ -1213,9 +1892,15 @@ class ChoirPracticeApp {
       toBarEntry: ordered[1]
     };
     this.applyLoopRange({ syncFields });
-    this.overlays.announce(
-      `Looping bars ${this.state.loopRange.fromBar} to ${this.state.loopRange.toBar}`
-    );
+    if (!this.state.loop) {
+      this.state.loop = true;
+      this.transport.setLoop(true);
+    }
+    if (announce) {
+      this.overlays.announce(
+        `Looping bars ${this.state.loopRange.fromBar} to ${this.state.loopRange.toBar}`
+      );
+    }
   }
 
   /**
@@ -1246,7 +1931,9 @@ class ChoirPracticeApp {
     if (!range) {
       this.audioEngine.clearLoopRange();
       this.transport.setLoopRange(null);
+      this.renderer?.setLoopRange(null);
       if (syncFields) this.transport.setLoopFields(null);
+      this.syncShareHash();
       return;
     }
 
@@ -1260,7 +1947,9 @@ class ChoirPracticeApp {
       ? { fromBar: range.fromBar, toBar: range.toBar }
       : null;
     this.transport.setLoopRange(shown);
+    this.renderer?.setLoopRange(shown);
     if (syncFields) this.transport.setLoopFields(shown);
+    this.syncShareHash();
   }
 
   /** Every bar in the score, with its position and length. */
@@ -1323,6 +2012,7 @@ class ChoirPracticeApp {
     this.applySeekToView(targetBeat, options);
     this.resumeTransport(wasPlaying);
     this.updateTransportPosition();
+    this.scheduleResumeSave();
   }
 
   /**
@@ -1354,6 +2044,7 @@ class ChoirPracticeApp {
     this.applySeekToView(targetBeat, options);
     this.resumeTransport(wasPlaying);
     this.updateTransportPosition();
+    this.scheduleResumeSave();
   }
 
   /**
@@ -1368,6 +2059,8 @@ class ChoirPracticeApp {
     this.isSeeking = true;
     this.audioEngine.stop();
     this.isSeeking = false;
+    // Moving during the count means the count no longer leads anywhere.
+    this.cancelCountIn();
     if (this.state.metronome) this.metronome.stop();
   }
 
@@ -1478,11 +2171,14 @@ class ChoirPracticeApp {
       ? this.audioEngine.getCurrentPlaybackBeat()
       : this.audioEngine.pausePlaybackBeat;
 
+    const context = this.renderer?.getMeasureContext(this.state.currentBeat);
     this.transport.setPosition({
       percent: (playbackBeat / totalPlaybackBeats) * 100,
       currentSeconds: this.audioEngine.playbackBeatToSeconds(playbackBeat),
       totalSeconds: this.audioEngine.getTotalSeconds(),
-      barLabel: this.getBarLabel()
+      barLabel: context ? `bar ${context.number}` : '',
+      bar: context?.number,
+      barCount: this.state.barCount
     });
   }
 
@@ -1801,9 +2497,52 @@ class ChoirPracticeApp {
         if (!this.settings.isOpen()) this.settings.setAll(this.collectSettings());
         this.settings.toggle();
         break;
+      case 'Minus':
+        event.preventDefault();
+        this.stepZoom(-1);
+        break;
+      case 'Equal':
+        event.preventDefault();
+        this.stepZoom(1);
+        break;
+      case 'Digit0':
+        event.preventDefault();
+        this.fitZoom();
+        break;
       default:
         break;
     }
+  }
+}
+
+/**
+ * Put text on the clipboard, by the modern API where it exists and by the old
+ * selection trick where it does not, and say whether it worked.
+ * @param {string} text
+ * @returns {Promise<boolean>}
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (error) {
+    // Fall through to the selection method.
+  }
+  try {
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.appendChild(field);
+    field.select();
+    const copied = document.execCommand('copy');
+    field.remove();
+    return Boolean(copied);
+  } catch (error) {
+    return false;
   }
 }
 

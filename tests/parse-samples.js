@@ -26,6 +26,7 @@ import { compileTempoMap, beatToSeconds } from '../public/js/tempo-map.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAMPLES = join(ROOT, 'public', 'sample-pieces');
+const INDEX_HTML = readFileSync(join(ROOT, 'public', 'index.html'), 'utf8');
 
 let passed = 0;
 let failed = 0;
@@ -159,6 +160,91 @@ test('the sample with printed dynamics is recognised', () => {
   const timeline = buildDynamicsTimeline({ marks, wedges });
   const levels = new Set(timeline.nodes.map(node => node.velocity.toFixed(4)));
   assert(levels.size > 1, 'the score should not play at a single flat level');
+});
+
+/**
+ * What the home screen's card says about a sample, read off its markup.
+ * @param {string} fileName
+ */
+function sampleCard(fileName) {
+  const escaped = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tag = INDEX_HTML.match(new RegExp(`<button class="sample"[^>]*data-sample-path="sample-pieces/${escaped}"[^>]*>`));
+  if (!tag) return null;
+  const attribute = (name) => (tag[0].match(new RegExp(`${name}="([^"]*)"`)) || [])[1] || '';
+  const body = INDEX_HTML.slice(tag.index, INDEX_HTML.indexOf('</button>', tag.index));
+  const span = (className) =>
+    (body.match(new RegExp(`<span class="${className}">([^<]*)</span>`)) || [])[1] || '';
+  return {
+    key: attribute('data-sample-key'),
+    voicing: attribute('data-voicing'),
+    bars: Number(attribute('data-bars')),
+    duration: attribute('data-duration'),
+    composer: span('sample-composer'),
+    meta: span('sample-meta')
+  };
+}
+
+/** "SSAATB": one letter per part, in score order. */
+function voicingOf(result) {
+  const letters = { soprano: 'S', mezzo: 'M', alto: 'A', tenor: 'T', baritone: 'Br', bass: 'B' };
+  return result.parts.map(part => {
+    const type = String(part.voiceType || part.name || '').toLowerCase();
+    const found = Object.keys(letters).find(key => type.includes(key));
+    return found ? letters[found] : '?';
+  }).join('');
+}
+
+/** "4:18": the score played through at its own tempi. */
+function durationOf(result) {
+  const measures = result.metadata.measureStructure;
+  const last = measures[measures.length - 1];
+  const total = (Number(last.startBeat) || 0) + (Number(last.beats) || 0);
+  const seconds = Math.round(beatToSeconds(compileTempoMap(result.metadata.tempoMap), total));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+test('every home-screen card says what the file says', () => {
+  for (const [fileName, result] of parsedSamples) {
+    const card = sampleCard(fileName);
+    assert(card, `${fileName}: no card on the home screen`);
+    assert.match(card.key, /^[a-z][a-z0-9-]*$/, `${fileName}: a link needs a short sample key`);
+    assert.equal(card.voicing, voicingOf(result), `${fileName}: voicing`);
+    assert.equal(card.bars, result.metadata.measureStructure.length, `${fileName}: bar count`);
+    assert.equal(card.duration, durationOf(result), `${fileName}: duration`);
+    assert.equal(
+      card.meta,
+      `${card.voicing} · ${card.bars} bars · ${card.duration}`,
+      `${fileName}: the visible line and the data attributes disagree`
+    );
+
+    // The card credits the composer, or the arranger when the score names one
+    // and the song is somebody else's.
+    const xml = readFileSync(join(SAMPLES, fileName), 'utf8');
+    const arranger = (xml.match(/<creator type="arranger">([^<]*)<\/creator>/) || [])[1];
+    const credited = card.composer === result.metadata.composer ||
+      (arranger && card.composer === `arr. ${arranger}`);
+    assert(
+      credited,
+      `${fileName}: the card says "${card.composer}" but the file says "${result.metadata.composer}"`
+    );
+  }
+});
+
+test('the Stanford sample is credited the way the card credits it', () => {
+  const stanford = parsedSamples.get('Quick! We have but a second.musicxml');
+  assert.equal(stanford.metadata.composer, 'C. V. Stanford');
+  assert.equal(stanford.metadata.title, 'Quick! We have but a second');
+});
+
+test('the measure structure carries the metre of every bar', () => {
+  for (const [fileName, result] of parsedSamples) {
+    for (const measure of result.metadata.measureStructure) {
+      assert(
+        measure.timeSignature?.numerator > 0,
+        `${fileName}: bar ${measure.number} has no metre to count in with`
+      );
+    }
+  }
 });
 
 test('an octave-transposing clef is preserved', () => {

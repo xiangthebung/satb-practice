@@ -30,6 +30,7 @@ export class Overlays {
     this.helpDialog = document.getElementById('help-dialog');
     this.micDialog = document.getElementById('mic-dialog');
     this.micSkipCheckbox = document.getElementById('mic-skip-prompt');
+    this.countIn = document.getElementById('count-in');
     this.lastAnnouncement = '';
 
     document.getElementById('help-btn')?.addEventListener('click', () => this.openHelp());
@@ -169,6 +170,58 @@ export class Overlays {
       ? `${message} `
       : message;
     this.lastAnnouncement = message;
+  }
+
+  /* --------------------------------------------------------------- count-in */
+
+  /**
+   * Put the count over the score: "1 · 2 · 3 · 4", with the current beat lit.
+   *
+   * A count-in that was only a click gave no warning of when the music would
+   * start; the numbers do, and they say what the metre is while they are at it.
+   *
+   * @param {number} beatsPerBar
+   */
+  showCountIn(beatsPerBar) {
+    if (!this.countIn) return;
+    const count = Math.max(1, Math.min(16, Math.round(Number(beatsPerBar) || 4)));
+    this.countIn.replaceChildren();
+    for (let beat = 1; beat <= count; beat++) {
+      if (beat > 1) {
+        const dot = document.createElement('span');
+        dot.className = 'count-in-dot';
+        dot.setAttribute('aria-hidden', 'true');
+        dot.textContent = '·';
+        this.countIn.appendChild(dot);
+      }
+      const number = document.createElement('span');
+      number.className = 'count-in-beat';
+      number.textContent = String(beat);
+      this.countIn.appendChild(number);
+    }
+    // A 12/8 bar counts twelve; the numbers shrink to stay on one line.
+    this.countIn.dataset.count = count > 9 ? 'lots' : count > 6 ? 'many' : 'few';
+    this.countIn.hidden = false;
+  }
+
+  /**
+   * Light one number of the count.
+   * @param {number} beat 1-based
+   */
+  setCountInBeat(beat) {
+    if (!this.countIn || this.countIn.hidden) return;
+    const numbers = this.countIn.querySelectorAll('.count-in-beat');
+    numbers.forEach((element, index) => {
+      element.classList.toggle('is-now', index === Math.round(beat) - 1);
+    });
+  }
+
+  hideCountIn() {
+    if (this.countIn) this.countIn.hidden = true;
+  }
+
+  isCountInShowing() {
+    return Boolean(this.countIn && !this.countIn.hidden);
   }
 
   openHelp() {

@@ -1411,6 +1411,9 @@ function collectScoreStructure(parts = []) {
   const measureCount = Math.max(0, ...parts.map(part => part.measures?.length || 0));
   const measures = [];
 
+  // The metre is carried forward from the last bar that declared one, so a
+  // count-in into a pickup bar can count the whole bar rather than the pickup.
+  let timeSignature = null;
   for (let index = 0; index < measureCount; index++) {
     const barlines = [];
     const navigation = new Set();
@@ -1424,6 +1427,12 @@ function collectScoreStructure(parts = []) {
       if (measure.number !== undefined) number = measure.number;
       startBeat = Number(measure.startBeat) || 0;
       beats = Math.max(beats, Number(measure.beats) || 0);
+      if (measure.timeSignature) {
+        timeSignature = {
+          numerator: Number(measure.timeSignature.numerator),
+          denominator: Number(measure.timeSignature.denominator)
+        };
+      }
       for (const mark of measure.navigation || []) navigation.add(mark);
 
       for (const barline of measure.barlines || []) {
@@ -1438,7 +1447,15 @@ function collectScoreStructure(parts = []) {
       }
     }
 
-    measures.push({ index, number, startBeat, beats, barlines, navigation: [...navigation] });
+    measures.push({
+      index,
+      number,
+      startBeat,
+      beats,
+      timeSignature: timeSignature ? { ...timeSignature } : null,
+      barlines,
+      navigation: [...navigation]
+    });
   }
 
   return { measures };

@@ -62,6 +62,17 @@
     </div>
 
     <div class="app-bar-actions">
+      <!-- Copies a link to this passage: the score, your part, the looped bars
+           and the tempo, so the rest of the section can open the same four bars.
+           See js/share-link.js for what goes in the link. -->
+      <button id="share-btn" class="btn btn-quiet share-btn" type="button" aria-label="Share this passage" title="Copy a link to this passage" hidden>
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 13.5a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.4 1.4"/>
+          <path d="M14 10.5a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.4-1.4"/>
+        </svg>
+        <span class="btn-label">Share</span>
+      </button>
+
       <div class="menu" id="export-menu" hidden>
         <button id="export-btn" class="btn btn-quiet" type="button" popovertarget="export-popover" aria-expanded="false">
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -109,29 +120,60 @@
           </ol>
         </div>
 
+        <!-- The last score opened, and the bar it was left at. Filled from
+             js/resume-store.js once the record has been read; hidden until then,
+             and hidden for good when there is nothing to go back to. -->
+        <section id="continue" class="continue" aria-labelledby="continue-title" hidden>
+          <h2 id="continue-title" class="section-title">Continue where you left off</h2>
+          <div class="continue-row">
+            <button id="continue-btn" class="continue-card" type="button">
+              <span class="continue-art" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.4v13.2a.8.8 0 0 0 1.2.7l10-6.6a.8.8 0 0 0 0-1.4l-10-6.6a.8.8 0 0 0-1.2.7z"/></svg>
+              </span>
+              <span class="continue-body">
+                <span id="continue-label" class="continue-label"></span>
+                <span id="continue-detail" class="continue-detail"></span>
+              </span>
+            </button>
+            <button id="continue-forget" class="icon-btn continue-forget" type="button" aria-label="Forget this score" title="Forget this score">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+                <path d="M6 6l12 12M18 6 6 18"/>
+              </svg>
+            </button>
+          </div>
+        </section>
+
         <section class="library" aria-labelledby="library-title">
           <h2 id="library-title" class="section-title">Start with a sample</h2>
+          <!-- Each card carries the score's voicing, length and duration as data
+               attributes, so the home screen can say them without parsing a
+               megabyte of MusicXML first. tests/parse-samples.js and
+               tests/check-docs.js hold them to the files. The `data-sample-key`
+               is the short name a shared link uses: #sample=quick. -->
           <div id="sample-list" class="sample-grid">
             <!-- Easiest first. This is the one a singer who has never used the app should
                  open: four parts, nine bars, and a tune nobody has to sight-read, so the
                  attention goes on holding a line against the other three. The card names
                  the arranger, as the other two real pieces name their composers. -->
-            <button class="sample" type="button" data-sample-path="sample-pieces/Happy Birthday.musicxml">
+            <button class="sample" type="button" data-sample-path="sample-pieces/Happy Birthday.musicxml" data-sample-key="birthday" data-voicing="SATB" data-bars="9" data-duration="0:18">
               <span class="sample-art" aria-hidden="true">♫</span>
               <span class="sample-title">Happy birthday</span>
               <span class="sample-composer">arr. David Bauguess</span>
+              <span class="sample-meta">SATB · 9 bars · 0:18</span>
               <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
-            <button class="sample" type="button" data-sample-path="sample-pieces/draw-on-sweet-night.musicxml">
+            <button class="sample" type="button" data-sample-path="sample-pieces/draw-on-sweet-night.musicxml" data-sample-key="night" data-voicing="SSAATB" data-bars="129" data-duration="4:18">
               <span class="sample-art" aria-hidden="true">♪</span>
               <span class="sample-title">Draw on, sweet night</span>
               <span class="sample-composer">John Wilbye</span>
+              <span class="sample-meta">SSAATB · 129 bars · 4:18</span>
               <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
-            <button class="sample" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml">
+            <button class="sample" type="button" data-sample-path="sample-pieces/Quick! We have but a second.musicxml" data-sample-key="quick" data-voicing="SATB" data-bars="26" data-duration="0:48">
               <span class="sample-art" aria-hidden="true">♩</span>
               <span class="sample-title">Quick! We have but a second</span>
               <span class="sample-composer">C. V. Stanford</span>
+              <span class="sample-meta">SATB · 26 bars · 0:48</span>
               <span class="sample-open" aria-hidden="true">Open<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="m12 6 6 6-6 6"/></svg></span>
             </button>
           </div>
@@ -193,12 +235,29 @@
             </div>
           </fieldset>
 
+          <div class="transpose-row" role="group" aria-labelledby="transpose-label">
+            <span id="transpose-label" class="panel-label">Transpose</span>
+            <div class="stepper">
+              <button id="transpose-down" class="stepper-btn" type="button" aria-label="Transpose down a semitone" title="Down a semitone">−</button>
+              <output id="transpose-readout" class="stepper-value" aria-live="polite">As written</output>
+              <button id="transpose-up" class="stepper-btn" type="button" aria-label="Transpose up a semitone" title="Up a semitone">+</button>
+            </div>
+          </div>
+
           <label class="switch-row" for="dim-others">
             <span class="switch-label">
               Dim other staves
               <span class="switch-hint">Keeps your line easy to follow</span>
             </span>
             <input type="checkbox" id="dim-others" class="switch" role="switch">
+          </label>
+
+          <label class="switch-row" for="only-mine">
+            <span class="switch-label">
+              Only my stave
+              <span class="switch-hint">Hides the other staves and enlarges yours</span>
+            </span>
+            <input type="checkbox" id="only-mine" class="switch" role="switch">
           </label>
         </div>
       </dialog>
@@ -215,8 +274,30 @@
           ></canvas>
           <p id="score-hint" class="visually-hidden">
             Click the score to jump to a note, drag sideways to scrub, or use the
-            arrow keys to move a bar at a time. Press space to play or pause.
+            arrow keys to move a bar at a time. Drag along the bar numbers above
+            the staves to loop a passage. Press space to play or pause.
           </p>
+        </div>
+
+        <div class="zoom-controls" role="group" aria-label="Zoom">
+          <button id="zoom-out" class="zoom-btn" type="button" aria-label="Zoom out" title="Zoom out (-)">−</button>
+          <button id="zoom-level" class="zoom-btn zoom-level" type="button" aria-label="Fit the score to the window" title="Fit the score to the window (0)">100%</button>
+          <button id="zoom-in" class="zoom-btn" type="button" aria-label="Zoom in" title="Zoom in (=)">+</button>
+        </div>
+
+        <!-- The count-in, counted over the score: "1 · 2 · 3 · 4". Filled by
+             js/ui/overlays.js from the metre of the bar the music starts in. -->
+        <div id="count-in" class="count-in" role="status" aria-live="off" hidden></div>
+
+        <!-- First run, with the parts sheet closed: says which part is chosen
+             and where to change it. The same coaching sits inside the sheet when
+             it is open, so this appears only when that one cannot be seen. -->
+        <div id="part-banner" class="part-banner" role="note" hidden>
+          <p id="part-banner-text">Singing <strong id="part-banner-part">Soprano</strong>? Pick the part you sing, then press play.</p>
+          <div class="part-banner-actions">
+            <button id="part-banner-open" class="btn btn-primary btn-small" type="button">Choose my part</button>
+            <button id="part-banner-dismiss" class="btn btn-quiet btn-small" type="button">Got it</button>
+          </div>
         </div>
 
         <div id="pitch-pill" class="pitch-pill" data-state="listening" hidden>
@@ -238,11 +319,18 @@
 
     <div class="transport-row">
       <div class="transport-side transport-left">
-        <span id="time-display" class="time" aria-hidden="true">0:00 / 0:00</span>
+        <div class="readouts">
+          <span id="time-display" class="time" aria-hidden="true">0:00 / 0:00</span>
+          <span id="bar-display" class="bar-readout" aria-hidden="true"></span>
+        </div>
         <div class="tempo">
           <label class="visually-hidden" for="tempo">Tempo in beats per minute</label>
           <input id="tempo" class="tempo-range slider" type="range" min="40" max="240" step="1" value="120">
-          <output id="tempo-value" class="tempo-value" for="tempo">120 BPM</output>
+          <!-- The readout is a button: click to type a tempo, double-click for
+               the score's own. The field takes the readout's place while it is
+               open, so nothing else in the bar moves. -->
+          <button id="tempo-value" class="tempo-value" type="button" title="Click to type a tempo · double-click for the score's own">120 BPM</button>
+          <input id="tempo-entry" class="tempo-entry" type="number" min="40" max="240" step="1" inputmode="numeric" aria-label="Tempo in beats per minute" hidden>
         </div>
       </div>
 
@@ -303,6 +391,7 @@
           <div id="loop-popover" class="popover popover-end popover-up" popover>
             <p class="popover-title">Loop these bars</p>
             <p id="loop-range-summary" class="popover-note">The whole score</p>
+            <p class="popover-hint">Or drag along the bar numbers above the score.</p>
             <div class="loop-fields">
               <label class="loop-field">
                 <span>From bar</span>
@@ -522,12 +611,12 @@
 
             <div class="settings-row">
               <div class="settings-row-head">
-                <label class="settings-label" for="count-in">Count in</label>
-                <output id="count-in-value" class="settings-value" for="count-in">Off</output>
+                <label class="settings-label" for="count-in-bars">Count in</label>
+                <output id="count-in-value" class="settings-value" for="count-in-bars">1 bar</output>
               </div>
-              <input id="count-in" class="slider" type="range" min="0" max="4" step="1" value="0">
+              <input id="count-in-bars" class="slider" type="range" min="0" max="4" step="1" value="1">
               <p class="settings-hint">
-                Counted in the bar you start from, so 6/8 counts six.
+                Counted aloud over the score, in the bar you start from, so 6/8 counts six.
               </p>
             </div>
           </div>
@@ -560,6 +649,8 @@
             <li>Click a note to jump there</li>
             <li>Drag left or right to scrub</li>
             <li>Scroll sideways to browse ahead</li>
+            <li>Drag along the bar numbers to loop a passage</li>
+            <li>Pinch, or hold Ctrl and scroll, to zoom</li>
           </ul>
         </section>
         <section>
@@ -572,6 +663,8 @@
             <li><kbd>R</kbd> Loop</li>
             <li><kbd>[</kbd><kbd>]</kbd> Loop from or to here</li>
             <li><kbd>\</kbd> Loop the whole score</li>
+            <li><kbd>-</kbd><kbd>=</kbd> Zoom out or in</li>
+            <li><kbd>0</kbd> Fit the score to the window</li>
             <li><kbd>,</kbd> Settings</li>
             <li><kbd>?</kbd> This help</li>
           </ul>
@@ -582,6 +675,8 @@
             <li>Uncompressed <code>.musicxml</code> and <code>.xml</code></li>
             <li>Compressed <code>.mxl</code> files</li>
             <li>Rename a part by double-clicking its name</li>
+            <li>The last score opens again from the home screen</li>
+            <li>Share copies a link to your part, bars and tempo</li>
           </ul>
         </section>
         <section>

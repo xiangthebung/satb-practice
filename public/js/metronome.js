@@ -91,6 +91,14 @@ export class Metronome {
     this.lookaheadTime = 0.1; // seconds
     this.scheduleIntervalMs = 25; // ms
     this.onBeat = null; // callback(beatNumber, isDownbeat)
+    /**
+     * Count-in progress: callback(beatInBar, index, total, beatsPerBar), and once
+     * more with `null` when the count is over and the music begins. Drives the
+     * big "1 · 2 · 3 · 4" over the score.
+     */
+    this.onCountIn = null;
+    this.countInTimers = new Set();
+    this.countInClicks = new Set();
     // Measure boundaries from the score: sorted array of score-beat positions
     // where each measure starts. Used to determine true downbeats (accents)
     // instead of relying on a simple modulo counter which breaks on pickup
@@ -158,15 +166,79 @@ export class Metronome {
     if (count <= 0 || !Number.isFinite(gap) || gap <= 0) return;
     if (!Number.isFinite(startTime) || !this.audioContext) return;
 
+    this.cancelCountIn();
     const firstClick = startTime - count * gap;
     const now = this.audioContext.currentTime;
+    const perBar = Math.max(1, Math.round(beatsPerBar) || 1);
     for (let index = 0; index < count; index++) {
       const time = firstClick + index * gap;
       if (time < now - 0.01) continue;
       // Accent the first count of each bar so a two-bar count-in is countable.
       const isDownbeat = beatsPerBar > 0 && index % beatsPerBar === 0;
-      this.scheduleClick(time, isDownbeat);
-      this.flashAt(time, isDownbeat, (index % Math.max(1, beatsPerBar)) + 1);
+      // Kept apart from the running click: `stop()` silences every click still
+      // to come, and the running metronome is started — through `stop()` —
+      // immediately after the count-in is scheduled. Without this the count-in
+      // was silent whenever the metronome was on.
+      this.scheduleClick(time, isDownbeat, { countIn: true });
+      this.flashAt(time, isDownbeat, (index % perBar) + 1);
+      this.countAt(time, (index % perBar) + 1, index, count, perBar);
+    }
+    // The count is over when the music starts.
+    this.countAt(startTime, null, count, count, perBar);
+  }
+
+  /**
+   * Report a count-in beat at an AudioContext time.
+   * @param {number} time
+   * @param {number|null} beatInBar null once the count is over
+   * @param {number} index
+   * @param {number} total
+   * @param {number} beatsPerBar
+   */
+  countAt(time, beatInBar, index, total, beatsPerBar) {
+    if (!this.audioContext) return;
+    const delay = Math.max(0, (time - this.audioContext.currentTime) * 1000);
+    const timer = setTimeout(() => {
+      this.countInTimers.delete(timer);
+      if (this.onCountIn) this.onCountIn(beatInBar, index, total, beatsPerBar);
+    }, delay);
+    this.countInTimers.add(timer);
+  }
+
+  /**
+   * Abandon a count-in that has not finished: its clicks, and the numbers over
+   * the score. Pausing during the count is the usual reason.
+   */
+  cancelCountIn() {
+    for (const timer of this.countInTimers) clearTimeout(timer);
+    this.countInTimers.clear();
+    if (!this.audioContext) return;
+    const now = this.audioContext.currentTime;
+    for (const click of this.countInClicks) {
+      if (click.startTime >= now) this.silenceClick(click, now);
+    }
+    this.countInClicks.clear();
+  }
+
+  /**
+   * How far ahead clicks are scheduled.
+   *
+   * A background tab has its timers throttled to once a second, so the window
+   * has to grow to cover that gap or the clicks it should have scheduled arrive
+   * late and land in a heap. The app switches this on `visibilitychange`.
+   *
+   * @param {number} seconds
+   * @param {number} [intervalMs]
+   */
+  setLookahead(seconds, intervalMs) {
+    const lookahead = Number(seconds);
+    if (Number.isFinite(lookahead) && lookahead > 0) this.lookaheadTime = lookahead;
+    const interval = Number(intervalMs);
+    if (Number.isFinite(interval) && interval > 0) this.scheduleIntervalMs = interval;
+    if (this.isRunning && this.schedulerTimer) {
+      clearInterval(this.schedulerTimer);
+      this.schedulerTimer = null;
+      this.schedule();
     }
   }
 
@@ -346,20 +418,24 @@ export class Metronome {
     // The lookahead scheduler may have queued clicks that have not started yet.
     // Silence and stop those nodes so restarting at a new tempo cannot play both
     // the old and new click. Let an already-sounding click finish naturally.
+    // A count-in is not the running click and is left alone; see `cancelCountIn`.
     const now = this.audioContext.currentTime;
     for (const click of this.scheduledClicks) {
-      if (click.startTime >= now) {
+      if (click.startTime >= now) this.silenceClick(click, now);
+    }
+  }
+
+  /** Silence one scheduled click before it sounds. */
+  silenceClick(click, now) {
+    try {
+      click.output.gain.cancelScheduledValues(now);
+      click.output.gain.setValueAtTime(0, now);
+      for (const source of click.sources) {
         try {
-          click.output.gain.cancelScheduledValues(now);
-          click.output.gain.setValueAtTime(0, now);
-          for (const source of click.sources) {
-            try {
-              source.stop(now);
-            } catch (e) { /* already stopped */ }
-          }
+          source.stop(now);
         } catch (e) { /* already stopped */ }
       }
-    }
+    } catch (e) { /* already stopped */ }
   }
 
   /** Schedule score-beat clicks, mapping around fermata holds when provided. */
@@ -475,7 +551,7 @@ export class Metronome {
    * @param {number} time - AudioContext time to play the click
    * @param {boolean} isDownbeat - true for beat 1 (brighter and a little louder)
    */
-  scheduleClick(time, isDownbeat, { subdivision = false } = {}) {
+  scheduleClick(time, isDownbeat, { subdivision = false, countIn = false } = {}) {
     const ctx = this.audioContext;
     const output = ctx.createGain();
     // A subdivision sits under the beat it belongs to rather than competing
@@ -532,12 +608,13 @@ export class Metronome {
     nodes.push(band, noiseGain);
 
     const clickEntry = { sources, nodes, output, startTime: time, endTime };
-    this.scheduledClicks.add(clickEntry);
+    const registry = countIn ? this.countInClicks : this.scheduledClicks;
+    registry.add(clickEntry);
 
     // Every source stops at the same moment, so the first one to report in can
     // release the whole click.
     sources[0].onended = () => {
-      this.scheduledClicks.delete(clickEntry);
+      registry.delete(clickEntry);
       for (const node of nodes.concat(sources)) {
         try {
           node.disconnect();
@@ -551,6 +628,7 @@ export class Metronome {
    */
   reset() {
     this.stop();
+    this.cancelCountIn();
     this.currentBeat = 0;
     this.searchFrom = 0;
     this.lastScoreBeat = 0;

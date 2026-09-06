@@ -24,6 +24,7 @@ import { getPartLabel } from '../notation-renderer.js';
 import { MIX_PRESETS } from '../mix.js';
 import { ensureContrast, readScoreTheme } from '../theme.js';
 import { readBoolPref, writeBoolPref } from '../prefs.js';
+import { describeTranspose } from './settings.js';
 
 const SHEET_QUERY = '(max-width: 899px)';
 
@@ -82,6 +83,9 @@ export class PartsPanel {
    * @param {(presetId: string) => void} handlers.onMixChange
    * @param {(level: number) => void} handlers.onOthersLevelChange
    * @param {(dim: boolean) => void} handlers.onDimChange
+   * @param {(only: boolean) => void} handlers.onOnlyMineChange
+   * @param {(delta: number) => void} handlers.onTransposeStep
+   * @param {(open: boolean) => void} handlers.onLayoutChange the panel opened or closed
    * @param {() => void} handlers.onCoachDismiss
    */
   constructor(handlers = {}) {
@@ -93,6 +97,10 @@ export class PartsPanel {
     this.othersInput = document.getElementById('others-level');
     this.othersOutput = document.getElementById('others-level-value');
     this.dimSwitch = document.getElementById('dim-others');
+    this.onlyMineSwitch = document.getElementById('only-mine');
+    this.transposeReadout = document.getElementById('transpose-readout');
+    this.transposeDown = document.getElementById('transpose-down');
+    this.transposeUp = document.getElementById('transpose-up');
     this.coach = document.getElementById('coach');
     this.closeButton = document.getElementById('parts-close');
     this.trigger = document.getElementById('parts-btn');
@@ -140,6 +148,14 @@ export class PartsPanel {
     this.dimSwitch?.addEventListener('change', () => {
       this.handlers.onDimChange?.(this.dimSwitch.checked);
     });
+    this.onlyMineSwitch?.addEventListener('change', () => {
+      this.handlers.onOnlyMineChange?.(this.onlyMineSwitch.checked);
+    });
+
+    // Transposition lives here as well as in Settings, because changing the key
+    // is a rehearsal decision made beside the part choice, not a preference.
+    this.transposeDown?.addEventListener('click', () => this.handlers.onTransposeStep?.(-1));
+    this.transposeUp?.addEventListener('click', () => this.handlers.onTransposeStep?.(1));
 
     document.getElementById('coach-dismiss')?.addEventListener('click', () => {
       this.hideCoach();
@@ -174,6 +190,7 @@ export class PartsPanel {
     // the keyboard away from the transport.
     if (this.panel.open !== shouldOpen) this.panel.open = shouldOpen;
     this.syncTrigger();
+    this.handlers.onLayoutChange?.(this.isOpen());
   }
 
   syncTrigger() {
@@ -508,6 +525,21 @@ export class PartsPanel {
 
   setDimOthers(dim) {
     if (this.dimSwitch) this.dimSwitch.checked = Boolean(dim);
+  }
+
+  setOnlyMine(only) {
+    if (this.onlyMineSwitch) this.onlyMineSwitch.checked = Boolean(only);
+  }
+
+  /**
+   * Show the transposition, and stop the stepper at either end of its range.
+   * @param {number} semitones
+   */
+  setTranspose(semitones) {
+    const value = Math.round(Number(semitones) || 0);
+    if (this.transposeReadout) this.transposeReadout.textContent = describeTranspose(value);
+    if (this.transposeDown) this.transposeDown.disabled = value <= -12;
+    if (this.transposeUp) this.transposeUp.disabled = value >= 12;
   }
 
   /* ------------------------------------------------------------------ coach */

@@ -15,15 +15,30 @@ no accounts, no uploads, no build step.
   but you, everyone) plus per-part volume, mute and solo. The panel opens beside
   the score on a wide window and under it on a narrow one, and closes either way,
   so you can move a fader while the music is playing.
-- **Playback** — synthesised voices or plain tones, tempo from 40 to 240 BPM,
-  room reverb, fermata hold length, looping, and a metronome whose accents *and*
-  spacing follow the score's own bars, including pickup bars and a change of
-  metre partway through. Each voice part is rendered as a section of singers, and
-  the sung vowels follow the words of whichever verse is on screen.
+- **Playback** — synthesised voices or plain tones, tempo from 40 to 240 BPM
+  shown against the score's own ("60 BPM · 71%"; click the readout to type a
+  tempo, double-click for the written one), room reverb, fermata hold length,
+  and a metronome whose accents *and* spacing follow the score's own bars,
+  including pickup bars and a change of metre partway through. Pressing play
+  counts one bar in, with the count written large over the score. Each voice
+  part is rendered as a section of singers, and the sung vowels follow the
+  words of whichever verse is on screen.
+- **Rehearse a passage** — drag along the bar numbers above the score and the
+  bars you crossed become a tinted band with a handle at each end; looping
+  turns on by itself. The same range can be typed, or marked from the keyboard.
 - **Score view** — scrolling notation with the playhead pinned in view; click to
-  jump, drag to scrub, scroll sideways to read ahead. What it draws and what it
-  plays are set out in [Notation coverage](#notation-coverage), because those two
-  lists are not the same.
+  jump, drag to scrub, scroll sideways to read ahead. Zoom with the buttons over
+  the score, with Ctrl and the wheel, or by pinching; *Fit* brings every stave
+  of a six-part score onto one laptop screen. *Only my stave* shows your line on
+  its own, larger. What it draws and what it plays are set out in
+  [Notation coverage](#notation-coverage), because those two lists are not the
+  same.
+- **Share a passage** — the score, your part, the looped bars, the tempo and
+  the zoom are mirrored into the address bar as they change
+  (`#sample=quick&part=alto&loop=13-16&tempo=90`), and *Share* copies that
+  link, so the rest of the section can open the same four bars.
+- **Continue** — the last score opened, your own file included, is offered
+  again on the home screen at the bar you left it.
 - **Microphone guidance** — optional pitch feedback against the written note,
   shown as a calm left/right indicator plus a trail on your stave.
 - **Export** — a WAV of the current mix, or MusicXML with your tempo and part
@@ -82,9 +97,9 @@ them — easiest first. All three are music.
 
 | Score | Parts | Length | Notes |
 | --- | --- | --- | --- |
-| Happy birthday | SATB | 9 bars | arr. David Bauguess. Ab major, two tempi, divisi in the last two bars, and a fermata to end on. A first score. |
-| Draw on, sweet night | SSAATB | 70 bars | John Wilbye, 1609. Imitative six-part counterpoint. |
-| Quick! We have but a second | SATB | 104 bars | C. V. Stanford. Fast, and in shifting compound metre. |
+| Happy birthday | SATB | 9 bars, 0:18 | arr. David Bauguess. Ab major, two tempi, divisi in the last two bars, and a fermata to end on. A first score. |
+| Draw on, sweet night | SSAATB | 129 bars, 4:18 | John Wilbye, 1609. Imitative six-part counterpoint. |
+| Quick! We have but a second | SATB | 26 bars, 0:48 | C. V. Stanford. Fast, and in shifting compound metre. |
 
 None of the three has a repeat in it, which is how the repeat signs came to be
 performed and never drawn. The browser tests carry two scores of their own for
@@ -190,6 +205,8 @@ the repository root.
 | <kbd>R</kbd> | Loop |
 | <kbd>[</kbd> <kbd>]</kbd> | Loop from or to here |
 | <kbd>\\</kbd> | Loop the whole score |
+| <kbd>-</kbd> <kbd>=</kbd> | Zoom out or in |
+| <kbd>0</kbd> | Fit the score to the window |
 | <kbd>,</kbd> | Settings |
 | <kbd>?</kbd> | Help |
 
@@ -208,9 +225,12 @@ serves the app, and nothing else is requested over the network. When microphone
 guidance is on, audio is analysed in the page by `public/js/pitch-detector.js` and
 is never recorded, stored, or sent anywhere; turning it off stops the media
 tracks, so the browser's recording indicator goes out. Preferences — your voice
-part, tempo, mix and the rest — are kept in `localStorage` on your own device.
-There is no analytics, no telemetry and no third-party script anywhere in
-`public/`.
+part, tempo, mix and the rest — are kept in `localStorage` on your own device,
+and the last score opened, with the bar you were at, in the browser's IndexedDB
+on the same device, which is what lets a score of your own be opened again
+without the file picker. A shared link carries only what is in its hash: which
+bundled sample, your part, the bars, the tempo. There is no analytics, no
+telemetry and no third-party script anywhere in `public/`.
 
 ## Project layout
 
@@ -233,6 +253,8 @@ public/js/metronome.js       click scheduling
 public/js/mix.js             rehearsal mix presets
 public/js/theme.js           canvas palette derived from the CSS tokens
 public/js/prefs.js           saved preferences
+public/js/share-link.js      the practice state as a link, and back
+public/js/resume-store.js    the last score and bar, in IndexedDB
 public/js/exporters.js       WAV and MusicXML export
 public/sample-pieces/        the bundled scores
 public/og.png                the link-preview card
@@ -260,11 +282,15 @@ a mute lets through, and the formatting helpers.
 
 `npm run test:docs` reads this file and fails if it has drifted from the code —
 if the keyboard table and the key handler disagree, if a bundled score is not
-offered on the home screen, if a path in the layout above does not exist, or if a
-command named here is not in `package.json`. It exists because every one of those
-had gone stale at least once.
+offered on the home screen, if the bar counts in the table above or on the home
+screen's cards are not what the files contain, if a path in the layout above
+does not exist, or if a command named here is not in `package.json`. It exists
+because every one of those had gone stale at least once; the table said 104 and
+70 bars for scores that have 26 and 129.
 
-The browser suite drives the real app in two viewports and asserts geometry
+The browser suite drives the real app in three viewports — a laptop, a Pixel 7
+and a 390px phone, the width at which a long title first pushed the transport
+off the screen — and asserts geometry
 rather than class names where the geometry is the point: that the parts panel
 never covers the score, that the repeat signs are painted from the score's own
 barlines, and that the words are painted clear of the notes above them.

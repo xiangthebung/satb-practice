@@ -58,6 +58,11 @@
   --score-cursor: #0071e3;
   --score-selection-fill: rgba(0, 113, 227, 0.06);
   --score-selection-edge: rgba(0, 113, 227, 0.5);
+  /* The rehearsal loop, painted as a band over the score with a handle at
+     each end on the bar ruler. */
+  --score-loop-fill: rgba(0, 113, 227, 0.09);
+  --score-loop-edge: rgba(0, 113, 227, 0.5);
+  --score-loop-handle: #0071e3;
   --score-muted: #86868b;
 
   /* Pitch feedback */
@@ -118,6 +123,9 @@
     --score-cursor: #0a84ff;
     --score-selection-fill: rgba(10, 132, 255, 0.12);
     --score-selection-edge: rgba(10, 132, 255, 0.6);
+    --score-loop-fill: rgba(10, 132, 255, 0.16);
+    --score-loop-edge: rgba(10, 132, 255, 0.65);
+    --score-loop-handle: #0a84ff;
     --score-muted: #98989d;
 
     --pitch-listening: #98989d;
@@ -164,6 +172,13 @@ body {
   height: 100dvh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  /* The one column must not be sized by its content. Left at `auto`, a long
+     score title in the app bar set the column's minimum width, the whole page
+     grew past the phone's screen, and the export, microphone and settings
+     buttons went with it. `minmax(0, 1fr)` is the width of the screen, full stop;
+     what does not fit inside it has to shrink or be cut, which the title now
+     does. */
+  grid-template-columns: minmax(0, 1fr);
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -426,6 +441,8 @@ input[type="checkbox"] {
 }
 
 .score-name {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-weight: 550;
@@ -433,9 +450,15 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+/* The composer gives way as well: a name that cannot shrink was the other half
+   of what pushed the app bar wider than the phone. */
 .score-composer {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .score-composer:not(:empty)::before {
@@ -447,6 +470,12 @@ input[type="checkbox"] {
   display: flex;
   align-items: center;
   gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.share-btn .btn-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .menu {
@@ -683,6 +712,98 @@ input[type="checkbox"] {
 .sample-composer {
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* Voicing, length and duration: what a singer wants to know before opening a
+   score, and what the sheet gives them at a glance. */
+.sample-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+/* --- Continue where you left off ------------------------------------ */
+
+.continue-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.continue-card {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--separator));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
+  text-align: left;
+  transition: transform var(--transition), box-shadow var(--transition),
+    border-color var(--transition), background var(--transition);
+}
+
+.continue-card:hover {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+.continue-card:active {
+  transform: translateY(0);
+}
+
+.continue-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.continue-art svg {
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+}
+
+.continue-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.continue-label {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.continue-detail {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.continue-forget {
+  flex-shrink: 0;
 }
 
 .sample-open {
@@ -1136,6 +1257,68 @@ input[type="checkbox"] {
   text-align: right;
 }
 
+/* --- Transpose stepper ------------------------------------------------ */
+
+/* Beside the part choice rather than only in Settings: moving the key is a
+   rehearsal decision, and the stepper says where it is in the words a singer
+   would use. */
+.transpose-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--separator);
+}
+
+.transpose-row .panel-label {
+  margin: 0;
+}
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+}
+
+.stepper-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  font-size: 17px;
+  line-height: 1;
+  transition: background var(--transition), color var(--transition);
+}
+
+.stepper-btn:hover {
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
+}
+
+.stepper-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  box-shadow: none;
+  background: none;
+}
+
+.stepper-value {
+  min-width: 8.4em;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 /* --- Switch ----------------------------------------------------------- */
 
 .switch-row {
@@ -1353,6 +1536,169 @@ input[type="checkbox"] {
   to { transform: rotate(360deg); }
 }
 
+/* --- Zoom -------------------------------------------------------------- */
+
+/* A small cluster over the top right of the score, as a map has. The middle
+   button says the zoom and fits the score to the window when pressed. */
+.zoom-controls {
+  position: absolute;
+  top: calc(var(--space-4) + 8px);
+  right: calc(var(--space-4) + 8px);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+.zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  transition: background var(--transition), color var(--transition);
+}
+
+.zoom-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.zoom-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.zoom-level {
+  min-width: 48px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Count-in ---------------------------------------------------------- */
+
+/* "1 · 2 · 3 · 4" over the middle of the score while the count runs, the
+   current beat lit. Large, because it is read from a music stand away. */
+.count-in {
+  position: absolute;
+  top: 50%;
+  /* Centred with auto margins between two insets rather than with a
+     translate from the middle: a translated box still counts its untranslated
+     position as page overflow, which pushed the page wider than a phone. */
+  right: var(--space-4);
+  left: var(--space-4);
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3em;
+  width: max-content;
+  /* Percentages here are of the stage, not of the box between the two insets,
+     so the insets are taken off by hand; at 100% the box sat 16px past the
+     right edge of a phone and took the whole page with it. */
+  max-width: calc(100% - 2 * var(--space-4));
+  margin: 0 auto;
+  padding: 10px 24px 12px;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  color: var(--text-muted);
+  font-size: 42px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  transform: translateY(-50%);
+  pointer-events: none;
+  animation: count-in-appear 160ms ease-out;
+}
+
+.count-in[data-count="many"] {
+  font-size: 30px;
+}
+
+.count-in[data-count="lots"] {
+  font-size: 22px;
+  gap: 0.25em;
+}
+
+.count-in-beat {
+  min-width: 1.1em;
+  text-align: center;
+  transition: color 70ms linear, transform 90ms cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+.count-in-beat.is-now {
+  color: var(--accent);
+  transform: scale(1.2);
+}
+
+.count-in-dot {
+  color: var(--separator-strong);
+  font-size: 0.55em;
+}
+
+@keyframes count-in-appear {
+  from { opacity: 0; transform: translateY(-50%) scale(0.94); }
+  to { opacity: 1; transform: translateY(-50%) scale(1); }
+}
+
+/* --- First-run banner -------------------------------------------------- */
+
+/* Over the bottom of the score, only while the parts sheet is closed: on a
+   phone the sheet starts closed, and without this a part was chosen for the
+   singer without a word. */
+.part-banner {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-5);
+  left: var(--space-4);
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2) var(--space-4);
+  width: max-content;
+  /* As for .count-in: the insets are not part of the percentage. */
+  max-width: calc(100% - 2 * var(--space-4));
+  margin: 0 auto;
+  padding: 10px 14px 10px 18px;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  font-size: 13.5px;
+  animation: toast-in 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.part-banner p {
+  margin: 0;
+}
+
+.part-banner-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
 /* --- Pitch guidance --------------------------------------------------- */
 
 .pitch-pill {
@@ -1538,12 +1884,34 @@ input[type="checkbox"] {
 
 /* Both readouts hold their own width. Otherwise the tempo slider slid sideways
    as 9 BPM became 10, and again when a piece passed ten minutes. */
+.readouts {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .time {
   min-width: 7.4em;
   color: var(--text-muted);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* "bar 14 / 26": where you are in the words a rehearsal uses. */
+.bar-readout {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bar-readout:not(:empty)::before {
+  content: "·";
+  margin-right: var(--space-2);
+  color: var(--text-muted);
 }
 
 .tempo {
@@ -1559,12 +1927,36 @@ input[type="checkbox"] {
   width: clamp(70px, 12vw, 130px);
 }
 
+/* The readout is a button (click to type, double-click to reset) and the
+   field that replaces it is the same size, so the bar does not shift. */
 .tempo-value {
-  min-width: 4.9em;
+  min-width: 8.6em;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
+  text-align: left;
   white-space: nowrap;
+  cursor: text;
+  transition: background var(--transition), color var(--transition);
+}
+
+.tempo-value:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.tempo-entry {
+  width: 8.6em;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .transport-center {
@@ -1707,6 +2099,12 @@ input[type="checkbox"] {
   margin-bottom: var(--space-3);
   color: var(--text);
   font-size: 13px;
+}
+
+.popover-hint {
+  margin: calc(-1 * var(--space-2)) 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .popover-actions {
@@ -2318,6 +2716,15 @@ input[type="checkbox"] {
     transform: translateX(50%);
   }
 
+  .zoom-controls {
+    top: var(--space-2);
+    right: var(--space-2);
+  }
+
+  .part-banner {
+    bottom: var(--space-3);
+  }
+
   .parts-panel {
     grid-column: 1;
     grid-row: 2;
@@ -2356,6 +2763,187 @@ input[type="checkbox"] {
   .part-rename {
     opacity: 1;
   }
+
+  /* The sheet, made for a thumb. It used to be 829px of content in a 289px
+     window, with the balance presets below four tall part cards. Now the
+     presets come first as one row of four, each part is one line, and the
+     whole thing is about half the height. */
+  .parts-panel .panel-head {
+    padding-bottom: 0;
+  }
+
+  .parts-panel .panel-scroll {
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-3) var(--space-4);
+  }
+
+  .parts-panel .coach {
+    order: -2;
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .parts-panel .mix {
+    order: -1;
+  }
+
+  .parts-panel .panel-label {
+    margin-bottom: var(--space-1);
+  }
+
+  .mix-options {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 2px;
+    padding: 3px;
+  }
+
+  .mix-option {
+    justify-content: center;
+    padding: 6px 4px;
+    font-size: 12px;
+    line-height: 1.2;
+    text-align: center;
+  }
+
+  .mix-option .mix-check {
+    display: none;
+  }
+
+  .others-level {
+    margin-top: var(--space-2);
+  }
+
+  .part {
+    grid-template-columns: minmax(0, 1.1fr) 28px 28px minmax(56px, 1.4fr) 34px;
+    grid-template-areas: "pick solo mute slider level";
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+  }
+
+  .part-pick {
+    grid-area: pick;
+  }
+
+  .part-solo {
+    grid-area: solo;
+  }
+
+  /* Renaming is by double-tap on the name; the button has no room on one line. */
+  .part-rename {
+    display: none;
+  }
+
+  .part-volume-row {
+    display: contents;
+  }
+
+  .part-mute {
+    grid-area: mute;
+  }
+
+  .part input.part-volume {
+    grid-area: slider;
+  }
+
+  .part-level {
+    grid-area: level;
+  }
+
+  .switch-row {
+    padding-top: var(--space-2);
+  }
+
+  .transpose-row {
+    padding-top: var(--space-2);
+  }
+}
+
+/* A phone on its side has no height to give a sheet. The panel becomes a column
+   beside the score instead, as it is on a desktop, and the score keeps the
+   whole height of the screen. */
+@media (max-width: 899px) and (orientation: landscape) and (max-height: 520px) {
+  .practice {
+    grid-template-columns: minmax(0, 1fr) min(300px, 42vw);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .stage {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .parts-panel {
+    grid-column: 2;
+    grid-row: 1;
+    width: auto;
+    height: 100%;
+    max-height: none;
+    border: 0;
+    border-left: 1px solid var(--separator);
+    border-radius: 0;
+    box-shadow: none;
+    animation: none;
+  }
+
+  .parts-panel .panel-head {
+    padding-top: var(--space-3);
+  }
+
+  .parts-panel .panel-head::before {
+    content: none;
+  }
+
+  /* The column is as wide as the desktop panel, so each part goes back to two
+     lines, the fader under the name. On one line at this width every name
+     was cut to "S…", which is no way to choose a part. */
+  .part {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: none;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+
+  .part-pick,
+  .part-solo,
+  .part-mute,
+  .part input.part-volume,
+  .part-level {
+    grid-area: auto;
+  }
+
+  .part-volume-row {
+    display: grid;
+  }
+
+  /* The transport keeps its desktop shape but the left side has a third of
+     the width: the readouts stack and the slider gives up some length. */
+  .transport-row {
+    gap: var(--space-2);
+    padding: 6px var(--space-3) 8px;
+  }
+
+  .readouts {
+    flex-direction: column;
+    gap: 0;
+    line-height: 1.25;
+  }
+
+  .time {
+    min-width: 0;
+  }
+
+  .bar-readout:not(:empty)::before {
+    content: none;
+  }
+
+  .tempo-range {
+    width: clamp(60px, 10vw, 110px);
+  }
+
+  .tempo-value {
+    min-width: 0;
+  }
 }
 
 @keyframes sheet-in {
@@ -2378,15 +2966,19 @@ input[type="checkbox"] {
       "time tempo"
       "center right";
     row-gap: var(--space-2);
-    padding: 8px var(--space-3) 10px;
+    padding: 8px var(--space-2) 10px;
   }
 
   .transport-left {
     display: contents;
   }
 
-  .time {
+  .readouts {
     grid-area: time;
+  }
+
+  .time {
+    min-width: 0;
   }
 
   .tempo {
@@ -2394,23 +2986,48 @@ input[type="checkbox"] {
     justify-content: flex-end;
   }
 
-  /* Keep the tempo slider clearly narrower than the progress bar above it. */
+  /* The slider stays, narrower; the readout beside it is tapped to type a
+     number, which is the only way to set 84 with a thumb. */
   .tempo-range {
-    width: clamp(72px, 28vw, 130px);
+    width: clamp(64px, 22vw, 130px);
   }
 
+  .tempo-value {
+    min-width: 0;
+    text-align: right;
+  }
+
+  /* Time over bar: two short lines, so a long score's "bar 12 / 129" does not
+     fight the tempo for the row. */
+  .readouts {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    line-height: 1.25;
+  }
+
+  .bar-readout:not(:empty)::before {
+    content: none;
+  }
+
+  /* The bar stepper stays: on a phone there are no arrow keys, and a singer
+     still has to get back to the start of the phrase. The whole row is made
+     to fit a 360px screen: eight controls, a little smaller. */
   .transport-center {
     grid-area: center;
     justify-content: flex-start;
+    gap: var(--space-1);
   }
 
   .transport-right {
     grid-area: right;
+    gap: 0;
   }
 
-  #prev-bar,
-  #next-bar {
-    display: none;
+  .transport-center .icon-btn,
+  .transport-right .icon-btn {
+    width: 36px;
+    height: 36px;
   }
 
   .brand-name {
@@ -2419,6 +3036,77 @@ input[type="checkbox"] {
 
   .app-bar {
     padding-inline: var(--space-3);
+    gap: var(--space-2);
+  }
+
+  .app-bar .btn-label {
+    display: none;
+  }
+
+  .app-bar .share-btn {
+    padding: 0 10px;
+  }
+
+  /* Title over composer: two short lines fit where one long one would not.
+     Stretched, not started, so each line is as wide as the block and the
+     ellipsis has an edge to be cut at. */
+  .score-meta {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    line-height: 1.25;
+    font-size: 13px;
+    text-align: left;
+  }
+
+  .score-name,
+  .score-composer {
+    max-width: 100%;
+  }
+
+  .score-composer {
+    font-size: 11.5px;
+  }
+
+  .score-composer:not(:empty)::before {
+    content: none;
+  }
+
+  .count-in {
+    font-size: 32px;
+    padding: 8px 18px 10px;
+  }
+
+  /* Sized so that nine numbers sit on one line of a 360px phone, and twelve
+     nearly do; what will not fit wraps rather than running off the edge. */
+  .count-in[data-count="many"] {
+    font-size: 22px;
+  }
+
+  .count-in[data-count="lots"] {
+    font-size: 17px;
+  }
+
+  /* Nine numbers and eight dots did not fit a phone: the ninth was off the
+     edge of the screen. The dots go; the numbers are the count. */
+  .count-in[data-count="many"] .count-in-dot,
+  .count-in[data-count="lots"] .count-in-dot {
+    display: none;
+  }
+
+  .count-in[data-count="many"],
+  .count-in[data-count="lots"] {
+    gap: 0.35em;
+  }
+
+  /* The card's point is the bar number, which one line cut off after the
+     title. Two lines keep it. */
+  .continue-label {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    line-height: 1.25;
   }
 
   .modal-card {
@@ -2433,8 +3121,10 @@ input[type="checkbox"] {
   }
 }
 
-@media (max-width: 380px) {
-  #loop-btn {
+/* The narrowest phones lose the range caret, not the loop: the range is set
+   by dragging on the ruler, which needs no button. */
+@media (max-width: 340px) {
+  .caret-btn {
     display: none;
   }
 }

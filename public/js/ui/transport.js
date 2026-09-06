@@ -18,6 +18,32 @@ export function describePosition(currentSeconds, totalSeconds, barLabel) {
   return barLabel ? `${base}, ${barLabel}` : base;
 }
 
+/**
+ * The tempo readout: the BPM, and how it compares with the score's own tempo.
+ *
+ * "85 BPM · 100%" tells a singer they are at the written speed; "60 BPM · 71%"
+ * that they have slowed it down, and by how much. The percentage is what a
+ * conductor asks for ("take it at seventy percent"), so it is shown alongside.
+ *
+ * @param {number} bpm
+ * @param {number} baseBpm the score's own tempo; omitted or zero shows BPM alone
+ * @returns {string}
+ */
+export function formatTempoReadout(bpm, baseBpm) {
+  const value = Math.round(Number(bpm) || 0);
+  const base = Math.round(Number(baseBpm) || 0);
+  if (!(base > 0)) return `${value} BPM`;
+  return `${value} BPM · ${Math.round((value / base) * 100)}%`;
+}
+
+/** The bar readout: "bar 14 / 26". */
+export function formatBarReadout(bar, barCount) {
+  const current = Math.round(Number(bar) || 0);
+  if (current <= 0) return '';
+  const total = Math.round(Number(barCount) || 0);
+  return total > 0 ? `bar ${current} / ${total}` : `bar ${current}`;
+}
+
 const MIC_LABELS = {
   off: 'Turn on microphone pitch guidance',
   connecting: 'Connecting the microphone',
@@ -33,6 +59,11 @@ export class Transport {
     this.timeDisplay = document.getElementById('time-display');
     this.tempoInput = document.getElementById('tempo');
     this.tempoValue = document.getElementById('tempo-value');
+    this.tempoEntry = document.getElementById('tempo-entry');
+    this.barDisplay = document.getElementById('bar-display');
+    /** The score's own tempo, which the readout measures against. */
+    this.baseTempo = 0;
+    this.lastTempo = 120;
     this.playButton = document.getElementById('play-btn');
     this.playIcon = document.getElementById('play-icon');
     this.pauseIcon = document.getElementById('pause-icon');
@@ -87,7 +118,96 @@ export class Transport {
       this.handlers.onTempoCommit?.(Number(this.tempoInput.value));
     });
 
+    this.bindTempoEntry();
     this.bindLoopRange();
+  }
+
+  /**
+   * The tempo readout is a button: click it to type a tempo, double-click it
+   * to go back to the score's own.
+   *
+   * A slider seventy pixels long over two hundred BPM cannot be set to 84. The
+   * field is the same size as the readout it replaces, so nothing else moves.
+   */
+  bindTempoEntry() {
+    const button = this.tempoValue;
+    const entry = this.tempoEntry;
+    if (!button || !entry) return;
+
+    button.addEventListener('click', () => this.openTempoEntry());
+    button.addEventListener('dblclick', event => {
+      event.preventDefault();
+      this.resetTempo();
+    });
+    // The first click of a double-click has already opened the field, so the
+    // second lands here.
+    entry.addEventListener('dblclick', event => {
+      event.preventDefault();
+      this.resetTempo();
+    });
+    entry.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this.closeTempoEntry(true);
+        button.focus();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeTempoEntry(false);
+        button.focus();
+      }
+    });
+    entry.addEventListener('blur', () => this.closeTempoEntry(true));
+  }
+
+  openTempoEntry() {
+    if (!this.tempoEntry || !this.tempoValue) return;
+    if (this.tempoInput) {
+      this.tempoEntry.min = this.tempoInput.min;
+      this.tempoEntry.max = this.tempoInput.max;
+    }
+    this.tempoEntry.value = String(Math.round(this.lastTempo));
+    this.tempoValue.hidden = true;
+    this.tempoEntry.hidden = false;
+    this.tempoEntry.focus();
+    this.tempoEntry.select();
+  }
+
+  /**
+   * Put the readout back, taking the typed tempo when asked to.
+   * @param {boolean} commit
+   */
+  closeTempoEntry(commit) {
+    if (!this.tempoEntry || this.tempoEntry.hidden) return;
+    const typed = Number.parseInt(String(this.tempoEntry.value), 10);
+    // Hidden first: hiding a focused field fires blur, which comes back here
+    // and must find nothing left to do.
+    this.tempoEntry.hidden = true;
+    if (this.tempoValue) this.tempoValue.hidden = false;
+    if (!commit || !Number.isFinite(typed)) return;
+    const min = Number(this.tempoInput?.min) || 40;
+    const max = Number(this.tempoInput?.max) || 240;
+    const bpm = Math.max(min, Math.min(max, typed));
+    this.setTempo(bpm);
+    this.handlers.onTempoCommit?.(bpm);
+  }
+
+  /** Back to the tempo written in the score. */
+  resetTempo() {
+    if (!(this.baseTempo > 0)) return;
+    if (this.tempoEntry && !this.tempoEntry.hidden) {
+      this.tempoEntry.hidden = true;
+      if (this.tempoValue) this.tempoValue.hidden = false;
+    }
+    this.setTempo(this.baseTempo);
+    this.handlers.onTempoCommit?.(this.baseTempo);
+    this.tempoValue?.focus();
+  }
+
+  /** The score's own tempo, so the readout can say how far from it we are. */
+  setBaseTempo(bpm) {
+    this.baseTempo = Math.round(Number(bpm) || 0);
+    this.paintTempo(this.lastTempo);
   }
 
   /**
@@ -196,9 +316,17 @@ export class Transport {
 
   /**
    * Update the position controls.
-   * @param {{ percent: number, currentSeconds: number, totalSeconds: number, barLabel?: string }} position
+   * @param {{
+   *   percent: number,
+   *   currentSeconds: number,
+   *   totalSeconds: number,
+   *   barLabel?: string,
+   *   bar?: number,
+   *   barCount?: number
+   * }} position
    */
-  setPosition({ percent, currentSeconds, totalSeconds, barLabel }) {
+  setPosition({ percent, currentSeconds, totalSeconds, barLabel, bar, barCount }) {
+    if (this.barDisplay) this.barDisplay.textContent = formatBarReadout(bar, barCount);
     const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
     if (this.seek) {
       if (!this.isSeekDragging) this.seek.value = String(Math.round(clamped * 10));
@@ -226,7 +354,17 @@ export class Transport {
 
   paintTempo(bpm) {
     const value = Math.round(Number(bpm) || 0);
-    if (this.tempoValue) this.tempoValue.textContent = `${value} BPM`;
+    this.lastTempo = value;
+    if (this.tempoValue) {
+      this.tempoValue.textContent = formatTempoReadout(value, this.baseTempo);
+      const written = this.baseTempo > 0
+        ? `, ${Math.round((value / this.baseTempo) * 100)} percent of the written tempo`
+        : '';
+      this.tempoValue.setAttribute(
+        'aria-label',
+        `Tempo ${value} beats per minute${written}. Click to type a tempo, double-click for the score's own.`
+      );
+    }
     this.tempoInput?.setAttribute('aria-valuetext', `${value} beats per minute`);
     if (!this.tempoInput) return;
     // The slider's filled length is drawn by the stylesheet, so it has to be

@@ -76,6 +76,57 @@ const TIME_FONT_STACK = 'Georgia, "Times New Roman", serif';
  */
 const KEY_ACCIDENTAL_STEP = { sharp: 0.92, flat: 0.98 };
 
+/** The bar ruler above the top stave: its height, and its gap from the stave. */
+const RULER_HEIGHT = 22;
+const RULER_GAP = 10;
+
+/** The loop handles on the ruler, and how far a pointer may miss one by. */
+const HANDLE_WIDTH = 10;
+const HANDLE_HEIGHT = 18;
+const HANDLE_REACH = 9;
+
+/** Zoom limits: half size to two and a half times. */
+export const MIN_ZOOM = 0.5;
+export const MAX_ZOOM = 2.5;
+
+/** How much larger a stave is drawn when it is shown on its own. */
+const SOLO_STAVE_BOOST = 1.3;
+
+/**
+ * Room a syllable keeps after itself, in fractions of the lyric size: a word
+ * space, or a hyphen with air on both sides of it.
+ */
+const LYRIC_WORD_GAP = 0.45;
+const LYRIC_HYPHEN_GAP = 0.7;
+
+/** Clamp a zoom factor to the range the view supports, to two decimals. */
+export function clampZoom(value) {
+  const zoom = Number(value);
+  if (!Number.isFinite(zoom) || zoom <= 0) return 1;
+  return Math.round(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom)) * 100) / 100;
+}
+
+/**
+ * Which of a run of signature changes the gutter should show.
+ *
+ * The gutter carries the key and time in force at the left edge of the music,
+ * the way the first bar of a printed system does. As the score scrolls, each
+ * inline change reaches that edge; from then on the gutter shows it and the
+ * inline mark is dropped, so a 9/8 never sits beside its own courtesy copy.
+ *
+ * @param {number[]} markLefts left edge of each change's mark, in view coordinates;
+ *   the first entry is the opening signature and is never a candidate
+ * @param {number} threshold view x at which a mark counts as having reached the gutter
+ * @returns {number} index of the last change past the threshold, 0 for none
+ */
+export function pickCourtesyIndex(markLefts, threshold) {
+  let index = 0;
+  for (let candidate = 1; candidate < markLefts.length; candidate++) {
+    if (markLefts[candidate] < threshold) index = candidate;
+  }
+  return index;
+}
+
 /**
  * Decide whether a score-space x coordinate should be painted for one render
  * viewport. Cached score tiles do not contain the fixed clef/name gutter, so
@@ -577,14 +628,27 @@ function interpolateMeasureBeat(measureLayout, localBeat) {
  * Measure widths grow only where dense note onsets need more room, while notes
  * at equivalent positions and all measure boundaries retain identical x values.
  *
+ * Words take room too. Two syllables a quaver apart are thirty pixels apart on
+ * the note grid, and "meets" and "thine" are wider than that, so the grid used
+ * to print them into each other. Given `lyricWidth` — the width a note's
+ * syllable needs, with its word space or hyphen — an onset is kept far enough
+ * from its neighbours for both words to be read, and a bar keeps room after its
+ * last syllable for the first one of the next.
+ *
  * @param {Array} parts
- * @param {{ noteWidth?: number, minNoteSpacing?: number, measurePadding?: number }} options
+ * @param {{
+ *   noteWidth?: number,
+ *   minNoteSpacing?: number,
+ *   measurePadding?: number,
+ *   lyricWidth?: ((note: object) => number)|null
+ * }} options
  * @returns {object}
  */
 export function buildHorizontalScoreLayout(parts = [], options = {}) {
   const noteWidth = Math.max(1, Number(options.noteWidth) || 40);
   const minNoteSpacing = Math.max(1, Number(options.minNoteSpacing) || 28);
   const measurePadding = Math.max(1, Number(options.measurePadding) || 18);
+  const lyricWidth = typeof options.lyricWidth === 'function' ? options.lyricWidth : null;
   const entriesByKey = new Map();
   const measureKeys = new WeakMap();
   const notePositions = new WeakMap();
@@ -615,6 +679,7 @@ export function buildHorizontalScoreLayout(parts = [], options = {}) {
           fallbackDuration: 0,
           onsets: new Set(),
           graceCountsByBeat: new Map(),
+          lyricWidthsByBeat: new Map(),
           sourceMeasures: []
         });
       }
@@ -637,6 +702,15 @@ export function buildHorizontalScoreLayout(parts = [], options = {}) {
         contentEnd = Math.max(contentEnd, onset + duration);
         if (note.isGrace && !note.isChord) {
           localGraceCounts.set(onset, (localGraceCounts.get(onset) || 0) + 1);
+        }
+        if (lyricWidth && !note.isGrace) {
+          const width = Number(lyricWidth(note)) || 0;
+          if (width > 0) {
+            entry.lyricWidthsByBeat.set(
+              onset,
+              Math.max(entry.lyricWidthsByBeat.get(onset) || 0, width)
+            );
+          }
         }
       }
       for (const [onset, count] of localGraceCounts) {
@@ -663,16 +737,24 @@ export function buildHorizontalScoreLayout(parts = [], options = {}) {
       .sort((left, right) => left - right);
     const positionsByBeat = new Map();
     let previousX = -Infinity;
+    let previousLyricHalf = 0;
 
     for (const onset of onsets) {
       const graceCount = entry.graceCountsByBeat.get(onset) || 0;
+      // Half the syllable sits either side of the note it is sung on.
+      const lyricHalf = (entry.lyricWidthsByBeat.get(onset) || 0) / 2;
       const desiredFirstX = measurePadding + onset * noteWidth;
       const firstX = Number.isFinite(previousX)
-        ? Math.max(desiredFirstX, previousX + minNoteSpacing)
-        : desiredFirstX;
+        ? Math.max(
+          desiredFirstX,
+          previousX + minNoteSpacing,
+          previousX + previousLyricHalf + lyricHalf
+        )
+        : Math.max(desiredFirstX, lyricHalf);
       const mainX = firstX + graceCount * minNoteSpacing;
       positionsByBeat.set(normalizeLayoutBeat(onset), mainX);
       previousX = mainX;
+      previousLyricHalf = lyricHalf;
     }
 
     // Give every grace-note onset its own slot immediately before the principal
@@ -704,7 +786,11 @@ export function buildHorizontalScoreLayout(parts = [], options = {}) {
     }
 
     const naturalWidth = measurePadding * 2 + duration * noteWidth;
-    const width = Math.max(naturalWidth, Number.isFinite(previousX) ? previousX + measurePadding : 0);
+    // The last syllable of a bar must not run under the barline into the next.
+    const width = Math.max(
+      naturalWidth,
+      Number.isFinite(previousX) ? Math.max(previousX + measurePadding, previousX + previousLyricHalf) : 0
+    );
     const anchors = [{ beat: 0, x: positionsByBeat.get(0) ?? measurePadding }];
     for (const onset of onsets) {
       if (onset > 0 && onset < duration) {
@@ -856,6 +942,26 @@ export class NotationRenderer {
     // the note on the page.
     this.pitchTuningHz = STANDARD_TUNING_HZ;
     this.pitchTransposeSemitones = 0;
+
+    /**
+     * Magnification. Layout is always done in unscaled units and the whole
+     * drawing is scaled at paint time, so a zoomed score has the same geometry
+     * with bigger notes, heads and words alike. `scale` is what is actually
+     * painted at: the zoom, times a boost when one stave is shown on its own.
+     */
+    this.zoom = 1;
+    this.scale = 1;
+    this.cssWidth = 0;
+    /** Show only the chosen part's stave, larger. */
+    this.soloStave = false;
+    /** Which row each part is drawn on; -1 for a part that is hidden. */
+    this.staffSlots = [];
+    this.visibleStaffCount = 0;
+    /** The rehearsal loop, as bar numbers, painted as a band over the score. */
+    this.loopRange = null;
+    /** The bar the pointer is over on the ruler, or null. */
+    this.rulerHover = null;
+    this.lyricWidthCache = new Map();
     // Pitch feedback runs roughly 30 times per second while the microphone is
     // active. Keep a compact, score-time index so feedback does not have to
     // walk every measure and note for every analysis frame.
@@ -878,8 +984,10 @@ export class NotationRenderer {
   setData(parts, metadata) {
     this.parts = Array.isArray(parts) ? parts : [];
     this.metadata = metadata;
-    this.horizontalLayout = buildHorizontalScoreLayout(this.parts, this.config);
+    this.lyricWidthCache.clear();
     this.buildStaffAttributes();
+    this.updateStaffSlots();
+    this.rebuildLayout();
     this.buildPitchTimelines();
     this.currentBeat = 0;
     this.currentPitchSample = null;
@@ -922,6 +1030,122 @@ export class NotationRenderer {
   }
 
   /**
+   * Rebuild the horizontal grid from the parts and the words now showing.
+   *
+   * The words are part of the layout, not only of the painting: a syllable
+   * needs its width on the page, and which syllables show depends on the verse
+   * and on whether the words are shown at all.
+   */
+  rebuildLayout() {
+    this.horizontalLayout = buildHorizontalScoreLayout(this.parts, {
+      ...this.config,
+      lyricWidth: this.showLyrics ? note => this.measureLyricWidth(note) : null
+    });
+  }
+
+  /**
+   * The width a note's syllable needs on the page, with the space or hyphen
+   * that follows it. Zero for a note with no syllable in the selected verse.
+   *
+   * Measured in layout units with the lyric face at its layout size, so the
+   * answer is the same at every zoom. Cached by text, because a long score
+   * repeats its words far more often than it changes them.
+   *
+   * @param {object} note
+   * @returns {number}
+   */
+  measureLyricWidth(note) {
+    const lyric = this.selectLyric(note);
+    if (!lyric || !this.ctx || typeof this.ctx.measureText !== 'function') return 0;
+    const { lineSpacing, lyricSize } = this.config;
+    const size = Math.max(8, Math.round(lineSpacing * lyricSize));
+    const continues = lyric.syllabic === 'begin' || lyric.syllabic === 'middle';
+    const key = `${size}|${continues ? '-' : ' '}|${lyric.text}`;
+    let width = this.lyricWidthCache.get(key);
+    if (width === undefined) {
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.font = `${size}px ${LYRIC_FONT_STACK}`;
+      const measured = Number(ctx.measureText(lyric.text)?.width) || 0;
+      ctx.restore();
+      width = measured + size * (continues ? LYRIC_HYPHEN_GAP : LYRIC_WORD_GAP);
+      this.lyricWidthCache.set(key, width);
+    }
+    return width;
+  }
+
+  /* ------------------------------------------------------------------ zoom */
+
+  /** The painted scale: zoom, plus the boost for a stave shown on its own. */
+  getScale() {
+    return this.zoom * this.getSoloBoost();
+  }
+
+  getSoloBoost() {
+    return this.isSoloStaveActive() ? SOLO_STAVE_BOOST : 1;
+  }
+
+  /** Convert a distance in CSS pixels on the canvas into layout units. */
+  screenToLayout(pixels) {
+    return Number(pixels) / (this.scale || 1);
+  }
+
+  /**
+   * Magnify or shrink the score.
+   *
+   * The cursor keeps its place on screen through the change, so zooming in on
+   * the bar you are looking at does not send it off the edge.
+   *
+   * @param {number} value
+   * @returns {number} the zoom now in force
+   */
+  setZoom(value) {
+    const next = clampZoom(value);
+    if (Math.abs(next - this.zoom) < 1e-6) return this.zoom;
+    const anchorRatio = this.viewWidth > 0
+      ? (this.getScoreX(this.currentBeat) - this.scrollX) / this.viewWidth
+      : 0;
+    this.zoom = next;
+    this.invalidateStaticScore();
+    this.resize();
+    this.scrollX = this.clampScroll(this.getScoreX(this.currentBeat) - anchorRatio * this.viewWidth);
+    this.render();
+    return this.zoom;
+  }
+
+  getZoom() {
+    return this.zoom;
+  }
+
+  /**
+   * The zoom at which every stave fits the frame's height at once.
+   *
+   * A six-part score on a laptop shows four of its six staves at full size; at
+   * this zoom it shows all six, with the staves as close as the words allow.
+   * A short score on a tall screen gets larger rather than smaller.
+   */
+  getFitZoom() {
+    const parent = this.canvas?.parentElement;
+    if (!parent) return this.zoom;
+    const cssHeight = Math.max(1, parent.clientHeight);
+    const count = this.visibleStaffCount || this.parts.length;
+    if (!count) return 1;
+    const lyricRoom = this.showLyrics ? this.getLyricRoom() : 0;
+    const minimal = this.config.marginTop + count * this.getTightSpacing(lyricRoom) + 24 + lyricRoom;
+    // Rounded down, so the fit never comes out a pixel too tall to fit.
+    return clampZoom(Math.floor((cssHeight / minimal / this.getSoloBoost()) * 100) / 100);
+  }
+
+  /**
+   * The closest two staves may sit, in layout units: the stave itself, room
+   * above it for ledger lines, and room below for the words.
+   * @param {number} lyricRoom
+   */
+  getTightSpacing(lyricRoom = 0) {
+    return this.config.lineSpacing * 4 + 36 + lyricRoom;
+  }
+
+  /**
    * Match the canvas to its container and to the display density.
    * Width follows the parent; height expands to fit every stave so the frame
    * can scroll vertically, and short scores are centred instead of hugging the
@@ -931,37 +1155,45 @@ export class NotationRenderer {
     if (!this.canvas || !this.canvas.parentElement) return;
     const parent = this.canvas.parentElement;
     const ratio = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
-    const width = Math.max(1, Math.floor(parent.clientWidth));
-    const availableHeight = Math.max(1, Math.floor(parent.clientHeight));
+    const scale = this.getScale();
+    const cssWidth = Math.max(1, Math.floor(parent.clientWidth));
+    const cssHeight = Math.max(1, Math.floor(parent.clientHeight));
+    // The frame in layout units: what the drawing is laid out into before it is
+    // scaled up or down to fill the real thing.
+    const width = cssWidth / scale;
+    const availableHeight = cssHeight / scale;
 
     // The part-name gutter is fixed while the music scrolls past it, so on a
     // phone a desktop-sized gutter would eat a quarter of the screen and leave
-    // very little music in view. Give it a share of the width instead.
-    this.config.marginLeft = Math.round(
-      Math.max(52, Math.min(MAX_NAME_GUTTER, width * 0.16))
-    );
+    // very little music in view. Give it a share of the width instead: measured
+    // against the real frame, so it does not grow with the zoom, with a floor
+    // below which the shortest names no longer fit.
+    // The cap grows a little with the zoom, since the names in it do too.
+    const cap = MAX_NAME_GUTTER * Math.max(1, Math.sqrt(scale));
+    const gutter = Math.max(52, Math.min(cap, cssWidth * 0.16));
+    this.config.marginLeft = Math.round(Math.max(44, gutter / scale));
 
     // Words need room of their own under each staff, so showing them raises the
     // minimum gap between staves rather than letting them collide. The room is
     // measured from the part that hangs lowest, since that is the one whose
     // words sit furthest down.
     const lyricRoom = this.showLyrics ? this.getLyricRoom() : 0;
-    const baseSpacing = this.config.staffSpacing + lyricRoom;
+    const comfortable = this.config.staffSpacing + lyricRoom;
+    const tight = this.getTightSpacing(lyricRoom);
     const { marginTop } = this.config;
     const bottomMargin = 24 + lyricRoom;
+    const count = this.visibleStaffCount || this.parts.length;
 
     // Spread the staves out to use a tall window, up to a comfortable limit,
-    // then centre whatever space is still left over.
-    let spacing = baseSpacing;
+    // and draw them closer on a short one, down to the tight limit, before
+    // resorting to a scrollbar. Whatever space is still left over centres them.
+    let spacing = comfortable;
     let staffTop = marginTop;
     let contentHeight = availableHeight;
-    if (this.parts.length > 0) {
+    if (count > 0) {
       const room = availableHeight - marginTop - bottomMargin;
-      spacing = Math.min(
-        baseSpacing * 1.5,
-        Math.max(baseSpacing, room / this.parts.length)
-      );
-      contentHeight = marginTop + this.parts.length * spacing + bottomMargin;
+      spacing = Math.max(tight, Math.min(comfortable * 1.5, room / count));
+      contentHeight = marginTop + count * spacing + bottomMargin;
       if (availableHeight > contentHeight) {
         staffTop = marginTop + (availableHeight - contentHeight) / 2;
       }
@@ -971,6 +1203,8 @@ export class NotationRenderer {
     const unchanged = this.viewWidth === width &&
       this.viewHeight === height &&
       this.pixelRatio === ratio &&
+      this.scale === scale &&
+      this.cssWidth === cssWidth &&
       this.staffSpacing === spacing &&
       this.staffTop === staffTop;
     if (unchanged) return;
@@ -978,17 +1212,173 @@ export class NotationRenderer {
     this.viewWidth = width;
     this.viewHeight = height;
     this.pixelRatio = ratio;
+    this.scale = scale;
+    this.cssWidth = cssWidth;
     this.staffSpacing = spacing;
     this.staffTop = staffTop;
-    this.canvas.width = Math.round(width * ratio);
-    this.canvas.height = Math.round(height * ratio);
-    this.canvas.style.height = `${height}px`;
+    this.canvas.width = Math.round(cssWidth * ratio);
+    this.canvas.height = Math.round(height * scale * ratio);
+    this.canvas.style.height = `${Math.round(height * scale)}px`;
+    this.scrollX = this.clampScroll(this.scrollX);
     this.invalidateStaticScore();
   }
 
-  /** Vertical position of a stave by section index. */
+  /** Vertical position of a stave by section index; far off the canvas for a hidden one. */
   getStaffY(partIndex) {
-    return this.staffTop + partIndex * this.staffSpacing;
+    const slot = this.staffSlots[partIndex];
+    if (slot === undefined) return this.staffTop + partIndex * this.staffSpacing;
+    if (slot < 0) return -100000;
+    return this.staffTop + slot * this.staffSpacing;
+  }
+
+  /* ----------------------------------------------------------- solo stave */
+
+  /**
+   * Show only the chosen part's stave, larger, or every stave.
+   * @param {boolean} enabled
+   */
+  setSoloStave(enabled) {
+    const next = Boolean(enabled);
+    if (next === this.soloStave) return;
+    this.soloStave = next;
+    this.updateStaffSlots();
+    this.invalidateStaticScore();
+    this.resize();
+    if (this.isAutoScrollEnabled) this.autoScroll();
+    this.render();
+  }
+
+  /** True while one stave stands in for the whole score. */
+  isSoloStaveActive() {
+    return this.soloStave && this.parts.length > 1 &&
+      this.parts.some(part => part.id === this.selectedPartId);
+  }
+
+  /** Decide which row each part is drawn on. */
+  updateStaffSlots() {
+    const only = this.isSoloStaveActive();
+    let slot = 0;
+    this.staffSlots = this.parts.map(part =>
+      (!only || part.id === this.selectedPartId) ? slot++ : -1
+    );
+    this.visibleStaffCount = slot;
+  }
+
+  isPartVisible(partIndex) {
+    const slot = this.staffSlots[partIndex];
+    return slot === undefined || slot >= 0;
+  }
+
+  /** The lowest painted point of the staves, for the cursor and the loop band. */
+  getContentBottom() {
+    const { lineSpacing } = this.config;
+    let bottom = this.staffTop + lineSpacing * 4 + 14;
+    for (let index = 0; index < this.parts.length; index++) {
+      if (!this.isPartVisible(index)) continue;
+      bottom = Math.max(bottom, this.getStaffY(index) + lineSpacing * 4 + 14);
+    }
+    return bottom;
+  }
+
+  /* ------------------------------------------------------- ruler and loop */
+
+  /** Where the bar ruler sits: the strip just above the top stave. */
+  getRulerBounds() {
+    const bottom = this.staffTop - RULER_GAP;
+    return { top: bottom - RULER_HEIGHT, bottom };
+  }
+
+  /**
+   * Show a loop range on the score, as a band with a handle at each end.
+   * @param {{ fromBar: number, toBar: number }|null} range
+   */
+  setLoopRange(range) {
+    const next = range && Number.isFinite(Number(range.fromBar)) && Number.isFinite(Number(range.toBar))
+      ? { fromBar: Number(range.fromBar), toBar: Number(range.toBar) }
+      : null;
+    const same = (next === null && this.loopRange === null) ||
+      (next && this.loopRange && next.fromBar === this.loopRange.fromBar && next.toBar === this.loopRange.toBar);
+    if (same) return;
+    this.loopRange = next;
+    this.requestRender();
+  }
+
+  /** Highlight the bar under the pointer on the ruler; null for none. */
+  setRulerHover(measureIndex) {
+    const next = Number.isInteger(measureIndex) ? measureIndex : null;
+    if (next === this.rulerHover) return;
+    this.rulerHover = next;
+    this.requestRender();
+  }
+
+  /** The layout of a bar by its number, or null. */
+  getMeasureLayoutByNumber(number) {
+    const wanted = Number(number);
+    const measures = this.horizontalLayout?.measures || [];
+    const structure = this.metadata?.measureStructure;
+    if (Array.isArray(structure)) {
+      const index = structure.findIndex(measure => Number(measure.number) === wanted);
+      if (index >= 0 && measures[index]) return measures[index];
+    }
+    return measures.find((measure, index) => Number(measure.number ?? index + 1) === wanted) || null;
+  }
+
+  /** The loop band's edges in score space, or null when there is no range. */
+  getLoopBandX() {
+    if (!this.loopRange) return null;
+    const from = this.getMeasureLayoutByNumber(this.loopRange.fromBar);
+    const to = this.getMeasureLayoutByNumber(this.loopRange.toBar);
+    if (!from || !to) return null;
+    const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
+    return {
+      startX: scoreOrigin + Math.min(from.startX, to.startX),
+      endX: scoreOrigin + Math.max(from.endX, to.endX)
+    };
+  }
+
+  /** The index of the bar under a score-space x, clamped to the score. */
+  getMeasureIndexAtScoreX(scoreX) {
+    const measures = this.horizontalLayout?.measures || [];
+    if (!measures.length) return null;
+    const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
+    const local = Number(scoreX) - scoreOrigin;
+    if (!(local >= 0)) return 0;
+    for (let index = 0; index < measures.length; index++) {
+      if (local < measures[index].endX) return index;
+    }
+    return measures.length - 1;
+  }
+
+  /**
+   * What is under a point on the canvas.
+   *
+   * @param {number} cssX pixels from the canvas's left edge
+   * @param {number} cssY pixels from the canvas's top edge
+   * @returns {{ zone: 'gutter'|'ruler'|'handle'|'score', edge: 'start'|'end'|null, measureIndex: number|null }}
+   */
+  hitTest(cssX, cssY) {
+    const x = this.screenToLayout(cssX);
+    const y = this.screenToLayout(cssY);
+    const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
+    if (x < scoreOrigin) return { zone: 'gutter', edge: null, measureIndex: null };
+
+    const ruler = this.getRulerBounds();
+    const onRuler = y >= ruler.top - 4 && y <= ruler.bottom + 4;
+    const scoreX = x + this.scrollX;
+    const measureIndex = this.getMeasureIndexAtScoreX(scoreX);
+    if (onRuler) {
+      const band = this.getLoopBandX();
+      if (band) {
+        if (Math.abs(scoreX - band.startX) <= HANDLE_REACH) {
+          return { zone: 'handle', edge: 'start', measureIndex };
+        }
+        if (Math.abs(scoreX - band.endX) <= HANDLE_REACH) {
+          return { zone: 'handle', edge: 'end', measureIndex };
+        }
+      }
+      return { zone: 'ruler', edge: null, measureIndex };
+    }
+    return { zone: 'score', edge: null, measureIndex };
   }
 
   /**
@@ -1000,8 +1390,11 @@ export class NotationRenderer {
     const next = Boolean(visible);
     if (next === this.showLyrics) return;
     this.showLyrics = next;
+    // The words take room sideways as well as down, so the grid is rebuilt.
+    this.rebuildLayout();
     this.invalidateStaticScore();
     this.resize();
+    if (this.isAutoScrollEnabled) this.autoScroll();
     this.render();
   }
 
@@ -1014,8 +1407,10 @@ export class NotationRenderer {
     const next = Math.max(1, Math.round(Number(verse) || 1));
     if (next === this.verse) return;
     this.verse = next;
+    this.rebuildLayout();
     this.invalidateStaticScore();
     this.resize();
+    if (this.isAutoScrollEnabled) this.autoScroll();
     this.render();
   }
 
@@ -1026,7 +1421,7 @@ export class NotationRenderer {
     this.showTimeSignatures = next;
     // The gutter reserves room for the time signature, so it has to be remeasured.
     this.buildStaffAttributes();
-    this.horizontalLayout = buildHorizontalScoreLayout(this.parts, this.config);
+    this.rebuildLayout();
     this.invalidateStaticScore();
     this.resize();
     this.render();
@@ -1054,8 +1449,9 @@ export class NotationRenderer {
   getLyricRoom() {
     const { lineSpacing, lyricSize } = this.config;
     let room = 0;
-    for (const part of this.parts) {
-      if (!this.partSingsSelectedVerse(part)) continue;
+    for (let index = 0; index < this.parts.length; index++) {
+      const part = this.parts[index];
+      if (!this.isPartVisible(index) || !this.partSingsSelectedVerse(part)) continue;
       room = Math.max(
         room,
         this.getLyricBaselineOffset(part) + lineSpacing * (lyricSize + 0.5)
@@ -1314,12 +1710,17 @@ export class NotationRenderer {
     this.requestRender();
   }
 
-  /** Move the viewport directly, for editor-style drag panning. */
-  setScrollX(scrollX) {
+  /** Keep a scroll offset inside the score, in layout units. */
+  clampScroll(scrollX) {
     const scoreLeft = this.config.marginLeft + this.config.clefWidth;
     const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
     const maxScroll = Math.max(0, contentWidth - this.viewWidth);
-    const nextScroll = Math.max(0, Math.min(maxScroll, Number(scrollX) || 0));
+    return Math.max(0, Math.min(maxScroll, Number(scrollX) || 0));
+  }
+
+  /** Move the viewport directly, for editor-style drag panning. */
+  setScrollX(scrollX) {
+    const nextScroll = this.clampScroll(scrollX);
     if (Math.abs(nextScroll - this.scrollX) < 0.01) return;
     this.scrollX = nextScroll;
     this.requestRender();
@@ -1358,7 +1759,7 @@ export class NotationRenderer {
    * @returns {number|null}
    */
   getBeatAtScreenX(screenX) {
-    const x = Number(screenX);
+    const x = this.screenToLayout(screenX);
     if (!Number.isFinite(x) || !this.horizontalLayout?.timelineAnchors?.length) {
       return null;
     }
@@ -1426,9 +1827,7 @@ export class NotationRenderer {
       nextScroll = targetX - this.viewWidth + padding;
     }
 
-    const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
-    const maxScroll = Math.max(0, contentWidth - this.viewWidth);
-    this.scrollX = Math.max(0, Math.min(maxScroll, nextScroll));
+    this.scrollX = this.clampScroll(nextScroll);
     if (options.render !== false) {
       this.render();
     }
@@ -1502,6 +1901,12 @@ export class NotationRenderer {
       this.clearUserPitchTrail();
       this.currentPitchSample = null;
       if (this.focusSelectedPart) this.invalidateStaticScore();
+      if (this.soloStave) {
+        // A different stave stands alone now, so the rows are dealt again.
+        this.updateStaffSlots();
+        this.invalidateStaticScore();
+        this.resize();
+      }
     }
     this.requestRender();
   }
@@ -1761,11 +2166,8 @@ export class NotationRenderer {
    */
   autoScroll() {
     const cursorX = this.getScoreX(this.currentBeat);
-    const scoreLeft = this.config.marginLeft + this.config.clefWidth;
     const anchorX = this.viewWidth * this.config.cursorAnchorRatio;
-    const contentWidth = scoreLeft + this.horizontalLayout.totalWidth + this.config.marginRight;
-    const maxScroll = Math.max(0, contentWidth - this.viewWidth);
-    this.scrollX = Math.max(0, Math.min(maxScroll, cursorX - anchorX));
+    this.scrollX = this.clampScroll(cursorX - anchorX);
   }
 
   /**
@@ -1784,8 +2186,10 @@ export class NotationRenderer {
     const width = this.viewWidth;
     const height = this.viewHeight;
 
-    // Draw in CSS pixels; the backing store is larger on high-density screens.
-    ctx.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    // Draw in layout units; the transform takes in the display density and the
+    // zoom, so everything scales together.
+    const painted = this.pixelRatio * (this.scale || 1);
+    ctx.setTransform(painted, 0, 0, painted, 0, 0);
     ctx.fillStyle = this.theme.paper;
     ctx.fillRect(0, 0, width, height);
 
@@ -1799,19 +2203,35 @@ export class NotationRenderer {
     // layer live and cache only the scrolling notation.
     this.drawPartScaffolds(ctx);
     const scoreOrigin = this.config.marginLeft + this.config.clefWidth;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(scoreOrigin, 0, Math.max(0, width - scoreOrigin), height);
-    ctx.clip();
+    const clipToScore = () => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(scoreOrigin, 0, Math.max(0, width - scoreOrigin), height);
+      ctx.clip();
+    };
+
+    // The loop band goes under the notes, so the music reads through it.
+    clipToScore();
+    ctx.translate(-this.scrollX, 0);
+    this.drawLoopBand(ctx);
+    ctx.restore();
+
+    clipToScore();
     this.drawStaticScore(ctx);
     ctx.restore();
+
+    // Signature changes are painted live rather than cached, because which of
+    // them shows depends on where the score is scrolled to; see `pickCourtesyIndex`.
+    clipToScore();
+    ctx.translate(-this.scrollX, 0);
+    this.drawLiveAttributeChanges(ctx);
+    ctx.restore();
+
     this.drawPartNames(ctx);
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(scoreOrigin, 0, Math.max(0, width - scoreOrigin), height);
-    ctx.clip();
+    clipToScore();
     ctx.translate(-this.scrollX, 0);
+    this.drawRuler(ctx);
 
     // Draw the recent sung-pitch trail underneath the live cursor/marker.
     if (this.userPitchTrail.length > 0) {
@@ -1854,26 +2274,25 @@ export class NotationRenderer {
 
     const tileCssWidth = Math.min(tileWidth, contentWidth - tileStart);
     const tile = document.createElement('canvas');
-    tile.width = Math.round(tileCssWidth * this.pixelRatio);
-    tile.height = Math.round(this.viewHeight * this.pixelRatio);
+    // Tiles are painted at the same density as the canvas, zoom included, so a
+    // magnified score is drawn sharp rather than upscaled from a small cache.
+    const painted = this.pixelRatio * (this.scale || 1);
+    tile.width = Math.round(tileCssWidth * painted);
+    tile.height = Math.round(this.viewHeight * painted);
     const tileCtx = tile.getContext('2d');
     if (!tileCtx) return null;
 
-    tileCtx.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    tileCtx.setTransform(painted, 0, 0, painted, 0, 0);
     tileCtx.save();
     tileCtx.translate(-tileStart, 0);
     for (let i = 0; i < this.parts.length; i++) {
+      if (!this.isPartVisible(i)) continue;
       this.drawPartStaff(tileCtx, this.parts[i], this.getStaffY(i), i, {
         scrollX: tileStart,
         viewportWidth: tileCssWidth,
         staticViewport: true
       });
     }
-    this.drawMeasureNumbers(tileCtx, {
-      scrollX: tileStart,
-      viewportWidth: tileCssWidth,
-      staticViewport: true
-    });
     this.drawEndingBrackets(tileCtx, {
       scrollX: tileStart,
       viewportWidth: tileCssWidth,
@@ -1927,33 +2346,194 @@ export class NotationRenderer {
     }
   }
 
-  /** Draw compact measure labels once in the score layer for rehearsal context. */
-  drawMeasureNumbers(ctx, options = {}) {
+  /**
+   * The bar ruler: numbers and ticks along the top of the score, the loop
+   * range as a strip with a handle at each end, the bar under the pointer, and
+   * the playhead. Drawn live, in score space, because all of it moves.
+   *
+   * @param {CanvasRenderingContext2D} ctx translated by -scrollX
+   */
+  drawRuler(ctx) {
+    const measures = this.horizontalLayout.measures;
+    if (!measures.length) return;
     const { marginLeft, clefWidth } = this.config;
     const scoreOrigin = marginLeft + clefWidth;
-    const labelY = Math.max(14, this.staffTop - 20);
-    const viewportScrollX = Number.isFinite(options.scrollX) ? options.scrollX : this.scrollX;
-    const viewportWidth = Number.isFinite(options.viewportWidth)
-      ? options.viewportWidth
-      : this.viewWidth;
-    const staticViewport = options.staticViewport === true;
+    const { top, bottom } = this.getRulerBounds();
+    const height = bottom - top;
+    const band = this.getLoopBandX();
+    const inLoop = (measure) => band && scoreOrigin + measure.startX >= band.startX - 0.5 &&
+      scoreOrigin + measure.endX <= band.endX + 0.5;
+
     ctx.save();
-    ctx.fillStyle = this.theme.label;
-    ctx.font = `600 10.5px ${UI_FONT_STACK}`;
+
+    // The bar the pointer is over.
+    const hovered = this.rulerHover !== null ? measures[this.rulerHover] : null;
+    if (hovered) {
+      ctx.fillStyle = this.theme.loopFill;
+      ctx.beginPath();
+      ctx.roundRect(scoreOrigin + hovered.startX + 1, top, Math.max(2, hovered.width - 2), height, 4);
+      ctx.fill();
+    }
+
+    // The loop range, stronger on the ruler than on the score below it.
+    if (band) {
+      ctx.fillStyle = this.theme.loopFill;
+      ctx.fillRect(band.startX, top, band.endX - band.startX, height);
+    }
+
+    // The baseline of the ruler, with a tick at every barline.
+    const left = this.scrollX + scoreOrigin;
+    const right = this.scrollX + this.viewWidth;
+    ctx.strokeStyle = this.theme.staffLine;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(left, Math.round(bottom) + 0.5);
+    ctx.lineTo(right, Math.round(bottom) + 0.5);
+    ctx.stroke();
+
+    ctx.font = `600 ${this.labelSize(10.5)}px ${UI_FONT_STACK}`;
     ctx.textAlign = 'left';
-    for (let index = 0; index < this.horizontalLayout.measures.length; index++) {
-      const measure = this.horizontalLayout.measures[index];
-      const x = scoreOrigin + measure.startX + 4;
-      if (!isScoreElementVisible(
-        x,
-        viewportScrollX,
-        viewportWidth,
-        scoreOrigin,
-        staticViewport
-      )) continue;
-      ctx.fillText(String(measure.number || index + 1), x, labelY);
+    ctx.textBaseline = 'alphabetic';
+    for (let index = 0; index < measures.length; index++) {
+      const measure = measures[index];
+      const x = scoreOrigin + measure.startX;
+      if (!isScoreElementVisible(x, this.scrollX, this.viewWidth, scoreOrigin, false)) continue;
+      const looped = inLoop(measure);
+      ctx.strokeStyle = looped ? this.theme.loopEdge : this.theme.staffLine;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, bottom - 5);
+      ctx.lineTo(Math.round(x) + 0.5, bottom);
+      ctx.stroke();
+      ctx.fillStyle = looped ? this.theme.loopHandle : this.theme.label;
+      // A number whose barline carries a loop handle steps aside for it.
+      const underHandle = band && (Math.abs(x - band.startX) < 1 || Math.abs(x - band.endX) < 1);
+      ctx.fillText(String(measure.number ?? index + 1), x + (underHandle ? HANDLE_WIDTH / 2 + 4 : 4), bottom - 7);
+    }
+
+    // Handles at either end of the loop, big enough to take hold of.
+    if (band) {
+      const handleTop = top + (height - HANDLE_HEIGHT) / 2;
+      for (const x of [band.startX, band.endX]) {
+        ctx.fillStyle = this.theme.loopHandle;
+        ctx.beginPath();
+        ctx.roundRect(x - HANDLE_WIDTH / 2, handleTop, HANDLE_WIDTH, HANDLE_HEIGHT, 3);
+        ctx.fill();
+        ctx.fillStyle = this.theme.paper;
+        ctx.globalAlpha = 0.85;
+        ctx.fillRect(Math.round(x) - 0.5, handleTop + 5, 1, HANDLE_HEIGHT - 10);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // The playhead: a small marker on the ruler at the cursor.
+    if (this.currentBeat >= 0) {
+      const cursorX = this.getScoreX(this.currentBeat);
+      ctx.fillStyle = this.theme.cursor;
+      ctx.beginPath();
+      ctx.moveTo(cursorX - 4.5, bottom - 5);
+      ctx.lineTo(cursorX + 4.5, bottom - 5);
+      ctx.lineTo(cursorX, bottom + 1);
+      ctx.closePath();
+      ctx.fill();
     }
     ctx.restore();
+  }
+
+  /**
+   * The loop range as a tinted band down the whole score.
+   * @param {CanvasRenderingContext2D} ctx translated by -scrollX
+   */
+  drawLoopBand(ctx) {
+    const band = this.getLoopBandX();
+    if (!band) return;
+    const { top } = this.getRulerBounds();
+    const bottom = this.getContentBottom();
+    ctx.save();
+    ctx.fillStyle = this.theme.loopFill;
+    ctx.fillRect(band.startX, top, band.endX - band.startX, bottom - top);
+    ctx.strokeStyle = this.theme.loopEdge;
+    ctx.lineWidth = 1.5;
+    for (const x of [band.startX, band.endX]) {
+      ctx.beginPath();
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, bottom);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Key and time changes for every visible stave, in the live layer.
+   * @param {CanvasRenderingContext2D} ctx translated by -scrollX
+   */
+  drawLiveAttributeChanges(ctx) {
+    const viewport = {
+      viewportScrollX: this.scrollX,
+      viewportWidth: this.viewWidth,
+      staticViewport: false
+    };
+    for (let index = 0; index < this.parts.length; index++) {
+      if (!this.isPartVisible(index)) continue;
+      const part = this.parts[index];
+      const clef = getClefDescriptorForPart(part, index, this.parts.length);
+      const dimmed = this.focusSelectedPart && part.id !== this.selectedPartId;
+      ctx.save();
+      if (dimmed) ctx.globalAlpha = 0.32;
+      this.drawStaffAttributeChanges(ctx, part, clef, this.getStaffY(index), viewport);
+      ctx.restore();
+    }
+  }
+
+  /** Left edge of a key change's mark, in score space. */
+  getKeyMarkLeft(change) {
+    const measureLayout = this.horizontalLayout.measures[change.measureIndex];
+    if (!measureLayout) return Infinity;
+    const { lineSpacing, marginLeft, clefWidth } = this.config;
+    return marginLeft + clefWidth + measureLayout.startX + lineSpacing * 0.4;
+  }
+
+  /** Left edge of a time change's mark, in score space, after any key change in the bar. */
+  getTimeMarkLeft(part, change, clef) {
+    const measureLayout = this.horizontalLayout.measures[change.measureIndex];
+    if (!measureLayout) return Infinity;
+    const { lineSpacing, marginLeft, clefWidth } = this.config;
+    const keyRoom = this.getKeyChangeWidth(
+      this.getKeyFifthsAt(part, change.startBeat - 1e-3),
+      this.getKeyFifthsAt(part, change.startBeat),
+      clef
+    );
+    return marginLeft + clefWidth + measureLayout.startX + lineSpacing * 0.4 + keyRoom;
+  }
+
+  /**
+   * Which key and time the gutter shows for a part right now.
+   * @param {object} part
+   * @param {object} clef
+   * @returns {{ keyIndex: number, timeIndex: number }}
+   */
+  getCourtesyIndices(part, clef) {
+    const attributes = this.partAttributes?.get(part.id);
+    if (!attributes) return { keyIndex: 0, timeIndex: 0 };
+    const { lineSpacing, marginLeft, clefWidth } = this.config;
+    // A change moves into the gutter once its inline mark would sit closer to
+    // the gutter than its own width: otherwise the two signatures stand side
+    // by side for the few pixels of scroll before the barline arrives, which
+    // is exactly the doubled "9/8 9/8" this exists to prevent.
+    const threshold = marginLeft + clefWidth + lineSpacing * 0.5;
+    const keyLefts = attributes.keys.map((change, index) => {
+      if (index === 0) return -Infinity;
+      const width = this.getKeyChangeWidth(attributes.keys[index - 1].fifths, change.fifths, clef);
+      return this.getKeyMarkLeft(change) - this.scrollX - width;
+    });
+    const timeLefts = attributes.times.map((change, index) => {
+      if (index === 0) return -Infinity;
+      const width = timeSignatureWidth(change, lineSpacing);
+      return this.getTimeMarkLeft(part, change, clef) - this.scrollX - width;
+    });
+    return {
+      keyIndex: pickCourtesyIndex(keyLefts, threshold),
+      timeIndex: pickCourtesyIndex(timeLefts, threshold)
+    };
   }
 
   /**
@@ -2134,15 +2714,26 @@ export class NotationRenderer {
     ctx.restore();
   }
 
+  /**
+   * Interface text on the canvas — part names, bar numbers — is scaled only
+   * half as hard as the music, so it stays legible zoomed out and does not
+   * shout zoomed in.
+   * @param {number} size at zoom 1
+   */
+  labelSize(size) {
+    return size / Math.sqrt(this.scale || 1);
+  }
+
   /** Draw part labels in the fixed left gutter above the cached score body. */
   drawPartNames(ctx) {
     const { lineSpacing, marginLeft } = this.config;
     const maxWidth = marginLeft - 24;
     ctx.save();
-    ctx.font = `600 12px ${UI_FONT_STACK}`;
+    ctx.font = `600 ${this.labelSize(12)}px ${UI_FONT_STACK}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     for (let index = 0; index < this.parts.length; index++) {
+      if (!this.isPartVisible(index)) continue;
       const part = this.parts[index];
       const dimmed = this.focusSelectedPart && part.id !== this.selectedPartId;
       ctx.save();
@@ -2168,6 +2759,7 @@ export class NotationRenderer {
 
     ctx.lineWidth = 1;
     for (let index = 0; index < this.parts.length; index++) {
+      if (!this.isPartVisible(index)) continue;
       const isSelected = this.parts[index].id === this.selectedPartId;
       const dimmed = this.focusSelectedPart && !isSelected;
       const yOffset = this.getStaffY(index);
@@ -2194,17 +2786,22 @@ export class NotationRenderer {
       const clefX = marginLeft + lineSpacing * 0.5;
       this.drawClef(ctx, clef, clefX, yOffset);
 
+      // The gutter shows the key and time in force at the left edge of the
+      // music, not only the opening pair: once a change has scrolled up to the
+      // gutter it moves in here, and its inline mark is no longer drawn.
       const attributes = this.partAttributes?.get(part.id);
-      const openingFifths = attributes?.keys[0]?.fifths || 0;
+      const courtesy = this.getCourtesyIndices(part, clef);
+      const gutterFifths = attributes?.keys[courtesy.keyIndex]?.fifths || 0;
+      const gutterTime = attributes?.times[courtesy.timeIndex];
       const keyX = clefX + clefGlyphWidth(clef.sign, lineSpacing) + lineSpacing * 0.35;
-      this.drawKeySignature(ctx, openingFifths, clef, keyX, yOffset);
+      this.drawKeySignature(ctx, gutterFifths, clef, keyX, yOffset);
 
-      if (this.showTimeSignatures && attributes?.times[0]) {
-        const timeX = keyX + this.getKeySignatureWidth(openingFifths) + lineSpacing * 0.3 +
-          timeSignatureWidth(attributes.times[0], lineSpacing) / 2;
+      if (this.showTimeSignatures && gutterTime) {
+        const timeX = keyX + this.getKeySignatureWidth(gutterFifths) + lineSpacing * 0.3 +
+          timeSignatureWidth(gutterTime, lineSpacing) / 2;
         drawTimeSignature(
           ctx,
-          attributes.times[0],
+          gutterTime,
           timeX,
           yOffset,
           lineSpacing,
@@ -2383,11 +2980,7 @@ export class NotationRenderer {
     for (const group of this.collectTupletGroups(allLayouts)) {
       this.drawTupletGroup(ctx, group, yOffset, color);
     }
-    this.drawStaffAttributeChanges(ctx, part, clef, yOffset, {
-      viewportScrollX,
-      viewportWidth,
-      staticViewport
-    });
+    // Key and time changes are painted live, not here; see `drawLiveAttributeChanges`.
     if (this.showLyrics) {
       const entries = this.collectLyricEntries(allLayouts);
       if (entries.length) this.drawLyrics(ctx, entries, part, yOffset, color);
@@ -3014,8 +3607,10 @@ export class NotationRenderer {
   /**
    * Draw key and time signature changes at the barline where they take effect.
    *
-   * The opening pair lives in the fixed gutter, so only the changes appear here,
-   * in the scrolling score layer where the music they apply to is.
+   * The pair in force at the left edge lives in the fixed gutter, so only the
+   * changes still to come appear here, in the scrolling score where the music
+   * they apply to is. A change that has reached the gutter is the gutter's now;
+   * drawing it here as well put two 9/8s side by side.
    *
    * @param {CanvasRenderingContext2D} ctx
    * @param {object} part
@@ -3029,6 +3624,7 @@ export class NotationRenderer {
 
     const { lineSpacing, marginLeft, clefWidth } = this.config;
     const scoreOrigin = marginLeft + clefWidth;
+    const courtesy = this.getCourtesyIndices(part, clef);
     const visible = (x) => isScoreElementVisible(
       x,
       viewport.viewportScrollX,
@@ -3039,27 +3635,19 @@ export class NotationRenderer {
 
     // Keys first, then times, so a bar that changes both reads key-then-time
     // the way it would be engraved.
-    for (let index = 1; index < attributes.keys.length; index++) {
+    for (let index = courtesy.keyIndex + 1; index < attributes.keys.length; index++) {
       const change = attributes.keys[index];
-      const measureLayout = this.horizontalLayout.measures[change.measureIndex];
-      if (!measureLayout) continue;
-      const x = scoreOrigin + measureLayout.startX + lineSpacing * 0.4;
-      if (!visible(x)) continue;
+      const x = this.getKeyMarkLeft(change);
+      if (!Number.isFinite(x) || !visible(x)) continue;
       this.drawKeyChange(ctx, attributes.keys[index - 1].fifths, change.fifths, clef, x, yOffset);
     }
 
     if (!this.showTimeSignatures) return;
-    for (let index = 1; index < attributes.times.length; index++) {
+    for (let index = courtesy.timeIndex + 1; index < attributes.times.length; index++) {
       const change = attributes.times[index];
-      const measureLayout = this.horizontalLayout.measures[change.measureIndex];
-      if (!measureLayout) continue;
-      const keyRoom = this.getKeyChangeWidth(
-        this.getKeyFifthsAt(part, change.startBeat - 1e-3),
-        this.getKeyFifthsAt(part, change.startBeat),
-        clef
-      );
-      const x = scoreOrigin + measureLayout.startX + lineSpacing * 0.4 + keyRoom +
-        timeSignatureWidth(change, lineSpacing) / 2;
+      const left = this.getTimeMarkLeft(part, change, clef);
+      if (!Number.isFinite(left)) continue;
+      const x = left + timeSignatureWidth(change, lineSpacing) / 2;
       if (!visible(x)) continue;
       drawTimeSignature(ctx, change, x, yOffset, lineSpacing, this.theme.ink, TIME_FONT_STACK);
     }
@@ -3296,10 +3884,10 @@ export class NotationRenderer {
     // The cursor is also drawn at beat 0 so the starting point is always visible.
     if (!(this.currentBeat >= 0) || this.parts.length === 0) return;
 
-    const { lineSpacing, cursorWidth } = this.config;
+    const { cursorWidth } = this.config;
     const cursorX = this.getScoreX(this.currentBeat);
-    const top = this.staffTop - 14;
-    const bottom = this.getStaffY(this.parts.length - 1) + lineSpacing * 4 + 14;
+    const top = this.getRulerBounds().bottom + 2;
+    const bottom = this.getContentBottom();
 
     ctx.save();
     ctx.strokeStyle = this.theme.cursor;

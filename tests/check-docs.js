@@ -27,9 +27,14 @@ const notes = [];
 
 const fail = (message) => failures.push(message);
 
-const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
-const html = readFileSync(join(SITE, 'index.html'), 'utf8');
-const appSource = readFileSync(join(SITE, 'js', 'app.js'), 'utf8');
+// Read with the line endings made uniform: everything below finds blocks by
+// '\n\n' and method ends by '\n  }\n', and a checkout with autocrlf on hands
+// this script CRLF files, on which the score table ran on into the keyboard
+// table and every path in the layout block went unread.
+const readText = (...segments) => readFileSync(join(...segments), 'utf8').replace(/\r\n/g, '\n');
+const readme = readText(ROOT, 'README.md');
+const html = readText(SITE, 'index.html');
+const appSource = readText(SITE, 'js', 'app.js');
 const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 
 /* ------------------------------------------------------------- keyboard */
@@ -47,7 +52,8 @@ function handledKeys() {
   // cases in it, so every documented key looked unhandled.
   const body = appSource.slice(appSource.indexOf('  handleKeydown(event) {'));
   const scope = body.slice(0, body.indexOf('\n  }\n'));
-  const codes = [...scope.matchAll(/case '([A-Za-z]+)':/g)].map(match => match[1]);
+  // Digits are part of a code too: `Digit0` is the fit-to-window key.
+  const codes = [...scope.matchAll(/case '([A-Za-z0-9]+)':/g)].map(match => match[1]);
   // '?' is matched on event.key rather than on a code, so it is not in the switch.
   if (/event\.key === '\?'/.test(appSource)) codes.push('Slash');
   return new Set(codes);
@@ -66,7 +72,10 @@ const KEY_CODES = new Map([
   ['\\\\', 'Backslash'],
   ['\\', 'Backslash'],
   [',', 'Comma'],
-  ['?', 'Slash']
+  ['?', 'Slash'],
+  ['-', 'Minus'],
+  ['=', 'Equal'],
+  ['0', 'Digit0']
 ]);
 
 const documentedKeys = new Set();
@@ -153,6 +162,59 @@ for (const row of tableRows.slice(0, tableRows.indexOf('\n\n')).split('\n').slic
   }
 }
 
+/* ------------------------------------------------------------ bar counts */
+
+/**
+ * How many bars a score has, read off the file itself.
+ *
+ * The README's table said 104 and 70 for scores that have 26 and 129, for as
+ * long as the table existed, because nothing read the column. Counting the
+ * `<measure>` elements in the first part needs no parser and cannot drift.
+ */
+function countBars(xml) {
+  const start = xml.indexOf('<part ');
+  const end = xml.indexOf('</part>', start);
+  if (start < 0 || end < 0) return 0;
+  return (xml.slice(start, end).match(/<measure\b/g) || []).length;
+}
+
+const barsByFile = new Map(bundled.map(name => [
+  name,
+  countBars(readFileSync(join(SITE, 'sample-pieces', name), 'utf8'))
+]));
+
+const plainName = (text) => text.toLowerCase().replace(/[^a-z0-9]/g, '');
+const fileForTitle = (title) => bundled.find(name => plainName(name).startsWith(plainName(title)));
+
+// The Length column of the README's table.
+for (const row of tableRows.slice(0, tableRows.indexOf('\n\n')).split('\n').slice(2)) {
+  const cells = row.split('|').map(cell => cell.trim());
+  const title = cells[1];
+  const length = cells[3] || '';
+  if (!title) continue;
+  const file = fileForTitle(title);
+  if (!file) continue;
+  const claimed = Number.parseInt((length.match(/(\d+) bars?/) || [])[1], 10);
+  if (!Number.isFinite(claimed)) {
+    fail(`the README's score table gives no bar count for "${title}"`);
+  } else if (claimed !== barsByFile.get(file)) {
+    fail(`the README says "${title}" is ${claimed} bars, but ${file} has ${barsByFile.get(file)}`);
+  }
+}
+
+// The home screen's cards say the same number.
+for (const match of html.matchAll(/<button class="sample"[^>]*>/g)) {
+  const tag = match[0];
+  const path = decodeURIComponent((tag.match(/data-sample-path="sample-pieces\/([^"]+)"/) || [])[1] || '');
+  const bars = Number.parseInt((tag.match(/data-bars="(\d+)"/) || [])[1], 10);
+  if (!path) continue;
+  if (!Number.isFinite(bars)) {
+    fail(`the home screen's card for ${path} carries no data-bars`);
+  } else if (bars !== barsByFile.get(path)) {
+    fail(`the home screen says ${path} is ${bars} bars, but the file has ${barsByFile.get(path)}`);
+  }
+}
+
 /* ---------------------------------------------------------------- paths */
 
 // Every path in the project-layout block, and every fixture named in prose.
@@ -205,7 +267,8 @@ if (!/"directory"\s*:\s*"\.\/public"/.test(wrangler)) {
 /* ------------------------------------------------------------------ report */
 
 notes.push(
-  `checked ${documentedKeys.size} documented keys, ${bundled.length} samples, ${paths.size} paths`
+  `checked ${documentedKeys.size} documented keys, ${bundled.length} samples ` +
+  `(${[...barsByFile.values()].join('/')} bars), ${paths.size} paths`
 );
 
 console.log('Documentation checks');

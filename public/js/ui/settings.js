@@ -25,7 +25,9 @@ export const SETTINGS_DEFAULTS = {
   playRepeats: true,
   clickPattern: 'beat',
   clickVolume: 80,
-  countInBars: 0,
+  // One bar, counted aloud over the score, so pressing play gives a singer
+  // their breath before the first note rather than starting on it.
+  countInBars: 1,
   showLyrics: true,
   showTimeSignatures: true,
   verse: 1
@@ -73,7 +75,7 @@ export class Settings {
       playRepeats: document.getElementById('play-repeats'),
       clickPattern: document.getElementById('click-pattern'),
       clickVolume: document.getElementById('click-volume'),
-      countInBars: document.getElementById('count-in'),
+      countInBars: document.getElementById('count-in-bars'),
       showLyrics: document.getElementById('show-lyrics'),
       showTimeSignatures: document.getElementById('show-time-signatures'),
       verse: document.getElementById('verse')
