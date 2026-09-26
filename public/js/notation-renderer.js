@@ -310,6 +310,47 @@ export function getPartLabel(part) {
   return baseName || part?.voiceType || 'Part';
 }
 
+/**
+ * The standard short form of each choral voice, matched against the parser's
+ * canonical voice types ("soprano", "alto 2", "mezzo-soprano"…).
+ */
+const VOICE_SHORT_FORMS = [
+  [/^mezzo/, 'Mz'],
+  [/^soprano\b/, 'S'],
+  [/^alto\b/, 'A'],
+  [/^tenor\b/, 'T'],
+  [/^baritone\b/, 'Bar'],
+  [/^bass\b/, 'B']
+];
+
+/**
+ * Short stave labels, most preferred first, for a gutter too narrow for the
+ * full names: the way a printed score names its staves on every system after
+ * the first. The score's own `<part-abbreviation>` comes first, then the
+ * standard letter for the voice with the label's number (S, A, T, B; S1, S2).
+ * @param {object} part
+ * @returns {Array<string>} empty when the voice is not one that has a short form
+ */
+export function getPartShortLabels(part) {
+  const labels = [];
+  const name = String(part?.name || '').trim();
+  const abbreviation = String(part?.abbreviation || '').trim();
+  // A shared staff's abbreviation names all of its voices rather than one,
+  // and a renamed part has outgrown the abbreviation it came with.
+  if (abbreviation && !part.isSubPart && name === String(part.originalName || '').trim()) {
+    labels.push(abbreviation);
+  }
+  const type = String(part?.voiceType || '').trim().toLowerCase();
+  const voice = VOICE_SHORT_FORMS.find(([pattern]) => pattern.test(type));
+  if (voice) {
+    // "soprano 1" carries its number; a split voice's number is on its label.
+    const number = type.match(/\s(\d+)$/)?.[1] || getPartLabel(part).match(/\s(\d+)$/)?.[1] || '';
+    const standard = `${voice[1]}${number}`;
+    if (!labels.includes(standard)) labels.push(standard);
+  }
+  return labels;
+}
+
 /** Truncate text with an ellipsis so it never spills out of the gutter. */
 function fitText(ctx, text, maxWidth) {
   if (maxWidth <= 0 || ctx.measureText(text).width <= maxWidth) return text;
@@ -2724,7 +2765,15 @@ export class NotationRenderer {
     return size / Math.sqrt(this.scale || 1);
   }
 
-  /** Draw part labels in the fixed left gutter above the cached score body. */
+  /**
+   * Draw part labels in the fixed left gutter above the cached score body.
+   *
+   * The gutter is kept to a share of a phone's width so the music keeps the
+   * screen, which leaves no room for "Soprano". Rather than cut every name to
+   * "Sopr…", the staves are then named in short, as a printed score names them
+   * after the first system. All of them are, or none: "S, Alto, T, Bass" reads
+   * as a mistake. Only a name with no short form that fits is still cut.
+   */
   drawPartNames(ctx) {
     const { lineSpacing, marginLeft } = this.config;
     const maxWidth = marginLeft - 24;
@@ -2732,15 +2781,21 @@ export class NotationRenderer {
     ctx.font = `600 ${this.labelSize(12)}px ${UI_FONT_STACK}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
+    const fits = text => ctx.measureText(text).width <= maxWidth;
+    const shown = [];
     for (let index = 0; index < this.parts.length; index++) {
-      if (!this.isPartVisible(index)) continue;
+      if (this.isPartVisible(index)) shown.push({ index, label: getPartLabel(this.parts[index]) });
+    }
+    const inShort = !shown.every(({ label }) => fits(label));
+    for (const { index, label } of shown) {
       const part = this.parts[index];
+      const text = inShort ? getPartShortLabels(part).find(fits) || label : label;
       const dimmed = this.focusSelectedPart && part.id !== this.selectedPartId;
       ctx.save();
       if (dimmed) ctx.globalAlpha = 0.32;
       ctx.fillStyle = this.getPartInk(part);
       ctx.fillText(
-        fitText(ctx, getPartLabel(part), maxWidth),
+        fitText(ctx, text, maxWidth),
         12,
         this.getStaffY(index) + lineSpacing * 2
       );

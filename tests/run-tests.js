@@ -84,6 +84,7 @@ import {
   getLowestStaffPosition,
   getNoteRenderInfo,
   getPartLabel,
+  getPartShortLabels,
   getStaffPositionForClef,
   isScoreElementVisible,
   NotationRenderer,
@@ -512,6 +513,34 @@ test('a stave label drops the parser voice suffix', () => {
   assert.equal(getPartLabel({ name: 'Voices (Voice 2)' }), 'Voices 2');
   assert.equal(getPartLabel({ name: 'Tenor' }), 'Tenor');
   assert.equal(getPartLabel({ name: '', voiceType: 'bass' }), 'bass');
+});
+
+test('a stave has short labels for a narrow gutter', () => {
+  // The score's own abbreviation first, then the standard letter.
+  assert.deepEqual(
+    getPartShortLabels({ name: 'Soprano1', originalName: 'Soprano1', abbreviation: 'Sop. 1', voiceType: 'soprano 1' }),
+    ['Sop. 1', 'S1']
+  );
+  assert.deepEqual(
+    getPartShortLabels({ name: 'Tenor', originalName: 'Tenor', abbreviation: 'T', voiceType: 'tenor' }),
+    ['T']
+  );
+  assert.deepEqual(getPartShortLabels({ name: 'Bass', originalName: 'Bass', voiceType: 'bass' }), ['B']);
+  assert.deepEqual(getPartShortLabels({ name: 'Mezzo', voiceType: 'mezzo-soprano' }), ['Mz']);
+  // A split voice takes its number from its label.
+  assert.deepEqual(
+    getPartShortLabels({ name: 'Soprano (Voice 2)', voiceType: 'soprano', isSubPart: true }),
+    ['S2']
+  );
+  // A shared staff's abbreviation is not one voice's, and a renamed part's is stale.
+  assert.deepEqual(
+    getPartShortLabels({ name: 'Alto', originalName: 'S/A', abbreviation: 'S/A', voiceType: 'alto', isSubPart: true }),
+    ['A']
+  );
+  assert.deepEqual(
+    getPartShortLabels({ name: 'Descant', originalName: 'Soprano', abbreviation: 'S', voiceType: 'descant' }),
+    []
+  );
 });
 
 test('piano parts are detected from name or MIDI program', () => {

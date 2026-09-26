@@ -1470,6 +1470,45 @@ test.describe('a phone', () => {
     expect(problems).toEqual([]);
   });
 
+  test('the score gutter names every part, in short when the full names do not fit', async ({ page }) => {
+    // What the gutter actually paints: the text drawn left of the clefs in one
+    // frame, and where it ends.
+    const gutterNames = () => page.evaluate(() => {
+      const renderer = window.choirPracticeApp.renderer;
+      const ctx = renderer.canvas.getContext('2d');
+      const { marginLeft } = renderer.config;
+      const names = [];
+      const fillText = ctx.fillText;
+      ctx.fillText = function (text, x, y, ...rest) {
+        if (x < marginLeft) names.push({ text, right: x + this.measureText(text).width });
+        return fillText.call(this, text, x, y, ...rest);
+      };
+      try {
+        renderer.render();
+      } finally {
+        delete ctx.fillText;
+      }
+      return { names, marginLeft };
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSample(page, 'Draw on, sweet night');
+    let drawn = await gutterNames();
+    expect(drawn.names.map(name => name.text)).toEqual(['S1', 'S2', 'A1', 'A2', 'T', 'B']);
+    for (const name of drawn.names) {
+      expect(name.right, `"${name.text}" runs into the clef`).toBeLessThanOrEqual(drawn.marginLeft);
+    }
+
+    await openSample(page, 'Quick! We have but a second');
+    drawn = await gutterNames();
+    expect(drawn.names.map(name => name.text)).toEqual(['S', 'A', 'T', 'B']);
+
+    // With room for them, the names are written out.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expect.poll(async () => (await gutterNames()).names.map(name => name.text))
+      .toEqual(['Soprano', 'Alto', 'Tenor', 'Bass']);
+  });
+
   test('the parts sheet is compact: presets on top, one line per part', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await openSample(page, 'Quick! We have but a second');
